@@ -9,6 +9,7 @@ This repository is a pinned, offline-after-bootstrap polyglot workspace. Use `./
 - `package.toml` and `package-lock.toml` own package declarations and exact runtime closure resolution.
 - `cpp/cpp.toml` owns C++ targets and profiles. Ninja and `compile_commands.json` are generated projections.
 - Each language owns `lib/<name>/`, `app/<name>/`, and `test/`; its `lib/` directory is an import/include root.
+- `.vscode/settings.json` mirrors repository discovery: clangd uses the root compdb, Deno owns `ts/` and `tsweb/`, and Python analysis includes `python/lib` plus `python/app`.
 - Normal build, test, lint, and package operations do not fetch.
 - Build products live under `build/`, release products under `dist/`, and toolchains/caches under ignored `.local/`.
 

@@ -111,7 +111,7 @@ case "$command" in
     python_install="$POLYGLOT_LOCAL_DIR/toolchain/$target/python-$python_version"
     [[ -x $gcc_install/$loader && -x $python_install/$python_expected ]] || { printf 'error: pinned Python toolchain is not installed\n' >&2; exit 1; }
     loader_dir=$(dirname -- "$gcc_install/$loader")
-    export PYTHONPATH="$ROOT/python/lib${PYTHONPATH:+:$PYTHONPATH}"
+    export PYTHONPATH="$ROOT/python/lib:$ROOT/python/app${PYTHONPATH:+:$PYTHONPATH}"
     "$gcc_install/$loader" --library-path "$loader_dir:$python_install/python/lib" "$python_install/$python_expected" "$@"
     ;;
   python-check)
@@ -190,6 +190,7 @@ case "$command" in
   test)
     bash "$ROOT/test/bootstrap-smoke.sh"
     bash "$ROOT/test/workflow-contract.sh"
+    python3 "$ROOT/test/editor-contract.py"
     bash "$ROOT/test/test-package-model.sh"
     bash "$ROOT/test/test-package-release.sh"
     "$ROOT/repo.sh" cpp-test
