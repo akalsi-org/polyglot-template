@@ -32,6 +32,7 @@ install_one() {
   stamp="$install/.installed-$sha"
   cache="$LOCAL/downloads/$sha-$archive"
   if [[ -f $stamp && -x $install/$expected ]]; then
+    [[ $tool != go ]] || chmod -R u+w -- "$install"
     printf 'bootstrap: %s %s already installed\n' "$tool" "$version"; return
   fi
   if [[ $url == UNRESOLVED* || ! $sha =~ ^[0-9a-f]{64}$ ]]; then
@@ -59,6 +60,7 @@ install_one() {
     *.zip) command -v unzip >/dev/null; listing=$(unzip -Z1 "$cache"); validate_members "$listing"; unzip -q "$cache" -d "$tmp" ;;
     *) printf 'error: unsupported archive: %s\n' "$archive" >&2; return 1 ;;
   esac
+  [[ $tool != go ]] || chmod -R u+w -- "$tmp"
   if [[ $tool == gcc-musl ]]; then
     local declared_loader loader_target
     declared_loader=$(lock_value "$tool" "$target" loader)

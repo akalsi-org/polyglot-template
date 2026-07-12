@@ -5,7 +5,7 @@
       "@/": "./ts/lib/"
     },
     "./tsweb/": {
-      "@/": "./tsweb/lib/"
+      "#/": "./tsweb/lib/"
     }
   },
   "compilerOptions": {

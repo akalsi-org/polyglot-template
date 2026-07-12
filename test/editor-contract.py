@@ -21,7 +21,7 @@ def main() -> None:
     deno_config = json.loads((ROOT / "deno.json").read_text())
     assert deno_config["scopes"] == {
         "./ts/": {"@/": "./ts/lib/"},
-        "./tsweb/": {"@/": "./tsweb/lib/"},
+        "./tsweb/": {"#/": "./tsweb/lib/"},
     }
     assert settings["go.alternateTools"] == {"go": "${workspaceFolder}/.vscode/go"}
     assert settings["go.toolsEnvVars"] == {

@@ -14,6 +14,8 @@ fi
 
 help_output=$("$ROOT/repo.sh" help)
 [[ $help_output == *bootstrap* ]]
+grep -Fq 'chmod -R u+w -- "$install"' "$ROOT/toolchain/bootstrap.sh"
+grep -Fq 'chmod -R u+w -- "$tmp"' "$ROOT/toolchain/bootstrap.sh"
 target=$("$ROOT/repo.sh" target)
 awk -v target="$target" '
   /^\[\[artifact\]\]$/ { selected = 0 }
