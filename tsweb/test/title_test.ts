@@ -1,4 +1,4 @@
-import { pageTitle } from "title/title.ts";
+import { pageTitle } from "@/title/title.ts";
 
 Deno.test("page title is deterministic", () => {
   if (pageTitle("docs") !== "docs | polyglot-template") {

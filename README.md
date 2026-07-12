@@ -14,7 +14,7 @@ The userdocs compiler source is intentional rather than historical accident. Aga
 
 The upstream userdocs toolchains are configured with `--disable-libsanitizer`, and this template deliberately leaves sanitizers outside its musl toolchain contract. The usable `dbg` profile provides symbols, assertions, low optimization, warnings, and frame pointers; `opt` remains the portable release profile. A future sanitizer lane should be an independently evaluated host-debug toolchain rather than a fork requirement for these release artifacts.
 
-Source is organized under `cpp/`, `python/`, `ts/`, and `tsweb/`. Every language owns `lib/<name>/`, `app/<name>/`, and `test/`. Library roots are configured by the repository commands, so code uses logical names such as `example/example.hh`, `example.example`, `greeting/greeting.ts`, and `title/title.ts` instead of relative traversal.
+Source is organized under `cpp/`, `python/`, `ts/`, and `tsweb/`. Every language owns `lib/<name>/`, `app/<name>/`, and `test/`. Library roots are configured by the repository commands, so code uses logical names such as `example/example.hh`, `example.example`, `@/greeting/greeting.ts`, and `@/title/title.ts` instead of relative traversal.
 
 The Python lane includes a real C++ extension under `python/lib/fastbytes`. `python-build` queries include paths and `EXT_SUFFIX` from the exact pinned interpreter, compiles with pinned GCC/musl/mold, and stages the importable module under `build/python/<target>/lib`. The Go lane uses one module at `github.com/akalsi-org/polyglot-template`, `CGO_ENABLED=0`, `GOTOOLCHAIN=local`, isolated repository caches, Go 1.26's default Green Tea collector, and the explicit `jsonv2` experiment.
 

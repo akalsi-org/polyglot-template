@@ -1,8 +1,8 @@
 {
   "lock": true,
   "imports": {
-    "greeting/": "./ts/lib/greeting/",
-    "title/": "./tsweb/lib/title/"
+    "@/greeting/": "./ts/lib/greeting/",
+    "@/title/": "./tsweb/lib/title/"
   },
   "compilerOptions": {
     "strict": true,

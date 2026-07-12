@@ -18,6 +18,11 @@ def main() -> None:
     assert settings["deno.enable"] is True
     assert settings["deno.enablePaths"] == ["./ts", "./tsweb"]
     assert settings["deno.config"] == "${workspaceFolder}/deno.json"
+    deno_config = json.loads((ROOT / "deno.json").read_text())
+    assert deno_config["imports"] == {
+        "@/greeting/": "./ts/lib/greeting/",
+        "@/title/": "./tsweb/lib/title/",
+    }
     assert settings["go.alternateTools"] == {"go": "${workspaceFolder}/.vscode/go"}
     assert settings["go.toolsEnvVars"] == {
         "CGO_ENABLED": "0",
