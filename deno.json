@@ -1,8 +1,12 @@
 {
   "lock": true,
-  "imports": {
-    "@/greeting/": "./ts/lib/greeting/",
-    "@/title/": "./tsweb/lib/title/"
+  "scopes": {
+    "./ts/": {
+      "@/": "./ts/lib/"
+    },
+    "./tsweb/": {
+      "@/": "./tsweb/lib/"
+    }
   },
   "compilerOptions": {
     "strict": true,
