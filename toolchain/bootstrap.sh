@@ -98,6 +98,8 @@ install_one() {
     "$tmp/$expected" -std=gnu++26 -freflection -fsyntax-only "$probe_source" || {
       printf 'error: GCC C++26 reflection capability probe failed\n' >&2; return 1;
     }
+  elif [[ $tool == go ]]; then
+    "$tmp/$expected" version | grep -q "go$version" || { printf 'error: Go capability probe failed\n' >&2; return 1; }
   else
     "$tmp/$expected" --version >/dev/null 2>&1 || { printf 'error: %s capability probe failed\n' "$tool" >&2; return 1; }
   fi

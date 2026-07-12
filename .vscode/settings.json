@@ -8,6 +8,14 @@
     "./tsweb"
   ],
   "deno.config": "${workspaceFolder}/deno.json",
+  "go.alternateTools": {
+    "go": "${workspaceFolder}/.vscode/go"
+  },
+  "go.toolsEnvVars": {
+    "CGO_ENABLED": "0",
+    "GOEXPERIMENT": "jsonv2",
+    "GOTOOLCHAIN": "local"
+  },
   "python.analysis.extraPaths": [
     "${workspaceFolder}/python/lib",
     "${workspaceFolder}/python/app"

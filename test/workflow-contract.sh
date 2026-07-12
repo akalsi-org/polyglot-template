@@ -20,7 +20,7 @@ for command in \
   './repo.sh cpp-build dbg' './repo.sh cpp-run dbg' \
   './repo.sh cpp-build opt' './repo.sh cpp-run opt' \
   './repo.sh python -I -c' './repo.sh python-check' \
-  './repo.sh ts-check' './repo.sh tsweb-check'; do
+  './repo.sh ts-check' './repo.sh tsweb-check' './repo.sh go-check'; do
   grep -Fq "$command" "$workflow"
 done
 

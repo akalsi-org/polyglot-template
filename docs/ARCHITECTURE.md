@@ -30,7 +30,7 @@ repo/
 │   ├── patches/
 │   ├── licenses/
 │   └── vendor/
-├── go/
+├── go/{lib/<name>,app/<name>,test}/
 ├── python/{lib/<name>,app/<name>,test}/
 ├── ts/{lib/<name>,app/<name>,test}/
 ├── tsweb/{lib/<name>,app/<name>,test}/
@@ -291,7 +291,7 @@ PR smoke gates catch only gross regressions. Stable dedicated runners enforce ti
 1. Contracts: commands, directories, lock schema, offline, package, benchmark, AI overview.
 2. Bootstrap and doctor: transactional installer, stamps, candidate updates, capability probes, temporary-home tests.
 3. Native lane: manifest IR, Ninja, complete compdb, third-party adapters, lint, tests.
-4. Go and expanded Python/Deno application lanes; the bootstrap slice already verifies pinned Python and a minimal Deno module/test on both native architectures.
+4. Expand the implemented Go, Python, and Deno examples into product-specific application lanes.
 5. moon aggregation with coarse task inputs/outputs and affected execution.
 6. Schema generation and cross-runtime fixtures.
 7. Runtime-deduplicated packaging, deterministic compression, extractor, and consumer tests.
@@ -307,4 +307,4 @@ The template is complete only when a fresh clone bootstraps verified pins, the s
 
 ## Implemented Bootstrap Slice
 
-The repository currently implements target resolution, transactional fail-closed bootstrap, doctor, exact x64/ARM64 GCC 16.1+musl, mold 2.41, Ninja 1.13.1, Python 3.14.6, and Deno 2.9.2 pins; deterministic C++ Ninja/compdb generation; language-owned `lib`, `app`, and `test` roots; usable sanitizer-free debug and optimized C++ profiles; checked Python, TypeScript, and browser-TypeScript lanes; runtime-closure schema and lock validation; deterministic package assembly; package smoke tests; release checks; release-note extraction; the canonical AI guide/symlink; local tests; and native x64/ARM64 live-bootstrap/build CI. Sanitizers and a custom compiler fork are not requirements of this template. Tag publication remains disabled until promoted into the workflow.
+The repository currently implements target resolution, transactional fail-closed bootstrap, doctor, exact x64/ARM64 GCC 16.1+musl, mold 2.41, Ninja 1.13.1, Python 3.14.6, Deno 2.9.2, and Go 1.26.5 pins; deterministic C++ Ninja/compdb generation; language-owned `lib`, `app`, and `test` roots; a pinned-ABI Python C++ extension; pure-Go format/vet/test/build/run; checked TypeScript and browser-TypeScript lanes; runtime-closure schema and lock validation; deterministic package assembly; package smoke tests; release checks; release-note extraction; the canonical AI guide/symlink; local tests; and native x64/ARM64 live-bootstrap/build CI. Sanitizers and a custom compiler fork are not requirements of this template. Tag publication remains disabled until promoted into the workflow.

@@ -70,6 +70,9 @@ jobs:
           ./repo.sh python -I -c 'import ctypes, hashlib, sqlite3, ssl, sys, zlib; print(sys.version)'
           ./repo.sh python-check
 
+      - name: Check pinned Go lane
+        run: ./repo.sh go-check
+
       - name: Check pinned TypeScript lanes
         run: |
           ./repo.sh ts-check

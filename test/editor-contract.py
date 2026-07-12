@@ -18,6 +18,12 @@ def main() -> None:
     assert settings["deno.enable"] is True
     assert settings["deno.enablePaths"] == ["./ts", "./tsweb"]
     assert settings["deno.config"] == "${workspaceFolder}/deno.json"
+    assert settings["go.alternateTools"] == {"go": "${workspaceFolder}/.vscode/go"}
+    assert settings["go.toolsEnvVars"] == {
+        "CGO_ENABLED": "0",
+        "GOEXPERIMENT": "jsonv2",
+        "GOTOOLCHAIN": "local",
+    }
     assert settings["python.analysis.extraPaths"] == [
         "${workspaceFolder}/python/lib",
         "${workspaceFolder}/python/app",
@@ -36,11 +42,13 @@ def main() -> None:
         "llvm-vs-code-extensions.vscode-clangd",
         "ms-python.python",
         "ms-python.vscode-pylance",
+        "golang.go",
     }
     assert required.issubset(extensions["recommendations"])
 
     repo_sh = (ROOT / "repo.sh").read_text()
-    assert 'PYTHONPATH="$ROOT/python/lib:$ROOT/python/app' in repo_sh
+    assert 'PYTHONPATH="$build_python:$ROOT/python/lib:$ROOT/python/app' in repo_sh
+    assert (ROOT / ".vscode" / "go").stat().st_mode & 0o111
 
     print("editor contract: ok")
 

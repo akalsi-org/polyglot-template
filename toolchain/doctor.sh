@@ -46,6 +46,10 @@ while IFS= read -r tool; do
       [[ $("$install/$expected" --version) == "$version" ]] || {
         printf 'invalid: Ninja version mismatch\n'; failed=1; continue;
       }
+    elif [[ $tool == go ]]; then
+      [[ $("$install/$expected" version | awk '{ print $3 }') == "go$version" ]] || {
+        printf 'invalid: Go version mismatch\n'; failed=1; continue;
+      }
     else
       "$install/$expected" --version >/dev/null
     fi

@@ -31,10 +31,13 @@ Commands:
   cpp-run [dbg|opt]            Run the C++ app through the pinned musl loader.
   cpp-test                     Test the C++ build graph and policy.
   python [args...]             Run the pinned Python through the pinned musl loader.
+  python-build                 Build the pinned-ABI C++ extension.
   python-check                 Compile and test the Python lane.
   deno [args...]               Run the pinned Deno binary.
   ts-check                     Check, lint, and test local TypeScript.
   tsweb-check                  Check, lint, and test browser TypeScript.
+  go [args...]                 Run pinned Go with isolated repository caches.
+  go-check                     Format, vet, test, build, and run the Go lane.
   cpp-reflection-probe         Print the pinned GCC reflection probe command.
   package-validate             Validate package and runtime closure metadata.
   package-resolve <name> [out] Resolve an exact native-target package closure.
@@ -59,7 +62,7 @@ case "$command" in
   bootstrap) "$ROOT/toolchain/bootstrap.sh" "$@" ;;
   doctor) "$ROOT/toolchain/doctor.sh" "$@" ;;
   lint)
-    bash -n "$ROOT/repo.sh" "$ROOT"/toolchain/*.sh "$ROOT"/test/*.sh
+    bash -n "$ROOT/repo.sh" "$ROOT"/.vscode/go "$ROOT"/toolchain/*.sh "$ROOT"/test/*.sh
     python3 "$ROOT/tools/lint.py"
     ;;
   cpp-configure)
@@ -111,10 +114,18 @@ case "$command" in
     python_install="$POLYGLOT_LOCAL_DIR/toolchain/$target/python-$python_version"
     [[ -x $gcc_install/$loader && -x $python_install/$python_expected ]] || { printf 'error: pinned Python toolchain is not installed\n' >&2; exit 1; }
     loader_dir=$(dirname -- "$gcc_install/$loader")
-    export PYTHONPATH="$ROOT/python/lib:$ROOT/python/app${PYTHONPATH:+:$PYTHONPATH}"
+    build_python="$ROOT/build/python/$target/lib"
+    export PYTHONPATH="$build_python:$ROOT/python/lib:$ROOT/python/app${PYTHONPATH:+:$PYTHONPATH}"
     "$gcc_install/$loader" --library-path "$loader_dir:$python_install/python/lib" "$python_install/$python_expected" "$@"
     ;;
+  python-build)
+    target=$("$ROOT/toolchain/target.sh")
+    cxx=$(tool_path gcc-musl)
+    [[ -x $cxx ]] || { printf 'error: pinned compiler is not installed; run ./repo.sh bootstrap\n' >&2; exit 1; }
+    python3 "$ROOT/tools/python_build.py" --root "$ROOT" --target "$target" --cxx "$cxx"
+    ;;
   python-check)
+    "$ROOT/repo.sh" python-build
     "$ROOT/repo.sh" python -m compileall -q python/lib python/app python/test
     "$ROOT/repo.sh" python -m unittest discover -s python/test -p 'test_*.py'
     "$ROOT/repo.sh" python python/app/hello/main.py
@@ -138,6 +149,39 @@ case "$command" in
     "$ROOT/repo.sh" deno fmt --check tsweb/
     "$ROOT/repo.sh" deno lint tsweb/
     "$ROOT/repo.sh" deno test --frozen tsweb/test/
+    ;;
+  go)
+    target=$("$ROOT/toolchain/target.sh")
+    export POLYGLOT_LOCK_FILE=${POLYGLOT_LOCK_FILE:-$ROOT/tools.lock.toml}
+    . "$ROOT/toolchain/lock.sh"
+    go_version=$(lock_value go "$target" version)
+    go_install="$POLYGLOT_LOCAL_DIR/toolchain/$target/go-$go_version/go"
+    [[ -x $go_install/bin/go ]] || { printf 'error: pinned Go is not installed; run ./repo.sh bootstrap\n' >&2; exit 1; }
+    export GOROOT="$go_install"
+    export GOPATH="$POLYGLOT_LOCAL_DIR/cache/go/path"
+    export GOMODCACHE="$POLYGLOT_LOCAL_DIR/cache/go/mod"
+    export GOCACHE="$POLYGLOT_LOCAL_DIR/cache/go/build"
+    export GOBIN="$POLYGLOT_LOCAL_DIR/bin"
+    export GOTOOLCHAIN=local
+    export CGO_ENABLED=0
+    export GOEXPERIMENT=jsonv2
+    export PATH="$GOROOT/bin:$PATH"
+    exec "$GOROOT/bin/go" "$@"
+    ;;
+  go-check)
+    target=$("$ROOT/toolchain/target.sh")
+    go_bin=$(tool_path go)
+    go_root=$(dirname -- "$(dirname -- "$go_bin")")
+    unformatted=$("$go_root/bin/gofmt" -l "$ROOT/go")
+    [[ -z $unformatted ]] || { printf 'error: unformatted Go files:\n%s\n' "$unformatted" >&2; exit 1; }
+    "$ROOT/repo.sh" go version
+    [[ $("$ROOT/repo.sh" go env GOEXPERIMENT) == jsonv2 ]]
+    "$ROOT/repo.sh" go mod verify
+    "$ROOT/repo.sh" go vet ./go/...
+    "$ROOT/repo.sh" go test ./go/...
+    mkdir -p "$ROOT/build/go/$target"
+    "$ROOT/repo.sh" go build -trimpath -o "$ROOT/build/go/$target/hello" ./go/app/hello
+    "$ROOT/build/go/$target/hello"
     ;;
   cpp-reflection-probe)
     cxx=$(tool_path gcc-musl)
