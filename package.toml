@@ -1,0 +1,35 @@
+schema_version = 1
+
+[[package]]
+name = "gateway"
+version = "1.4.0"
+kind = "application"
+executables = ["gateway", "gateway-admin"]
+supported_targets = ["x86_64-linux-musl", "aarch64-linux-musl"]
+runtime = { name = "python", version = "^3.14", variant = "install_only_stripped" }
+
+[[package]]
+name = "schema-cli"
+version = "0.8.2"
+kind = "application"
+executables = ["schema-cli"]
+supported_targets = ["x86_64-linux-musl", "aarch64-linux-musl"]
+
+[[package]]
+name = "runtime-python"
+version = "3.14.6"
+kind = "runtime"
+runtime_name = "python"
+variant = "install_only_stripped"
+loader_tool = "gcc-musl"
+supported_targets = ["x86_64-linux-musl", "aarch64-linux-musl"]
+
+[[package.artifact]]
+target = "x86_64-linux-musl"
+filename = "cpython-3.14.6+20260610-x86_64-unknown-linux-musl-install_only_stripped.tar.gz"
+sha256 = "54eca143d09ed3c596ecad5e3bfcb7724387818f8f984f44f3d8c0e9f36681d3"
+
+[[package.artifact]]
+target = "aarch64-linux-musl"
+filename = "cpython-3.14.6+20260610-aarch64-unknown-linux-musl-install_only_stripped.tar.gz"
+sha256 = "5c75bea22f425ebc94912c618518a5aa4753eedeea6b5da5939f027d3a9c0fec"

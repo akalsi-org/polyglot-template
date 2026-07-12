@@ -1,0 +1,41 @@
+[toolchain]
+cxx = "@PINNED_CXX@"
+standard = "gnu++26"
+reflection_flag = "-freflection"
+
+[profiles.dbg]
+compile_flags = [
+  "-O0",
+  "-g3",
+  "-Wall",
+  "-Wextra",
+  "-Wpedantic",
+  "-Werror=uninitialized",
+  "-Werror=maybe-uninitialized",
+  "-fno-omit-frame-pointer",
+]
+link_flags = ["-fuse-ld=mold"]
+
+[profiles.opt]
+compile_flags = [
+  "-O3",
+  "-DNDEBUG",
+  "-Wall",
+  "-Wextra",
+  "-Wpedantic",
+  "-Werror=uninitialized",
+  "-Werror=maybe-uninitialized",
+]
+link_flags = ["-fuse-ld=mold"]
+
+[[targets]]
+name = "hello"
+type = "executable"
+sources = ["src/hello.cpp"]
+include_dirs = ["include", "third_party/example/include"]
+adapter_dependencies = ["example-vendor"]
+
+[[adapters]]
+name = "example-vendor"
+fragment = "adapters/example-vendor.json"
+include_in_compdb = true

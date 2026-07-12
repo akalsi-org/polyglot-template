@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+tmp=$(mktemp -d); trap 'rm -rf -- "$tmp"' EXIT
+export POLYGLOT_LOCAL_DIR="$tmp/local"
+
+[[ $($ROOT/repo.sh target) =~ ^(x86_64|aarch64)-linux-musl$ ]]
+[[ $(POLYGLOT_TEST_MACHINE=amd64 "$ROOT/repo.sh" target) == x86_64-linux-musl ]]
+[[ $(POLYGLOT_TEST_MACHINE=arm64 "$ROOT/repo.sh" target) == aarch64-linux-musl ]]
+if POLYGLOT_TEST_MACHINE=riscv64 "$ROOT/repo.sh" target >/dev/null 2>&1; then
+  printf 'unsupported target unexpectedly succeeded\n' >&2; exit 1
+fi
+
+help_output=$("$ROOT/repo.sh" help)
+[[ $help_output == *bootstrap* ]]
+sed -e '0,/url = /s|url = .*|url = "UNRESOLVED: fixture"|' \
+    -e '0,/sha256 = /s|sha256 = .*|sha256 = "UNRESOLVED"|' \
+    "$ROOT/tools.lock.toml" >"$tmp/unresolved.lock.toml"
+export POLYGLOT_LOCK_FILE="$tmp/unresolved.lock.toml"
+dry_output=$("$ROOT/repo.sh" bootstrap --dry-run --offline)
+[[ $dry_output == *'LOCK UNRESOLVED'* ]]
+if "$ROOT/repo.sh" bootstrap --offline >/dev/null 2>&1; then
+  printf 'unresolved live bootstrap unexpectedly succeeded\n' >&2; exit 1
+fi
+if "$ROOT/repo.sh" doctor >/dev/null 2>&1; then
+  printf 'doctor unexpectedly accepted unresolved lock\n' >&2; exit 1
+fi
+
+# Exercise the complete offline, checksum-verified, idempotent install path with
+# a synthetic executable. This deliberately uses no host compiler.
+target=$("$ROOT/repo.sh" target)
+mkdir -p "$tmp/payload/bin" "$POLYGLOT_LOCAL_DIR/downloads"
+printf '#!/usr/bin/env sh\nprintf "fixture 1.0\\n"\n' >"$tmp/payload/bin/fixture"
+chmod +x "$tmp/payload/bin/fixture"
+tar -czf "$tmp/fixture.tar.gz" -C "$tmp/payload" .
+sha=$(sha256sum "$tmp/fixture.tar.gz" | awk '{print $1}')
+cp "$tmp/fixture.tar.gz" "$POLYGLOT_LOCAL_DIR/downloads/$sha-fixture.tar.gz"
+cat >"$tmp/resolved.lock.toml" <<EOF
+schema = 1
+[[artifact]]
+tool = "fixture"
+target = "$target"
+version = "1.0"
+url = "https://invalid.example/fixture.tar.gz"
+sha256 = "$sha"
+archive = "fixture.tar.gz"
+expected = "bin/fixture"
+EOF
+export POLYGLOT_LOCK_FILE="$tmp/resolved.lock.toml"
+first=$("$ROOT/repo.sh" bootstrap --offline)
+[[ $first == *'installed fixture 1.0'* ]]
+second=$("$ROOT/repo.sh" bootstrap --offline)
+[[ $second == *'already installed'* ]]
+"$ROOT/repo.sh" doctor --deep | grep -q 'ok: fixture 1.0'
+
+printf 'bootstrap smoke: ok\n'

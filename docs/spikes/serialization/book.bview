@@ -1,0 +1,25 @@
+schema market.v1;
+
+namespace cpp market;
+namespace go market;
+namespace python market;
+namespace typescript market;
+
+record Metadata @id(1) {
+  1: string venue;
+}
+
+record Level @id(2) {
+  1: i64 price;
+  2: u64 quantity;
+}
+
+record Book @id(3) {
+  1: u64 instrument_id;
+  2: u64 sequence;
+  3: Metadata metadata;
+  4: [Level] bids;
+  5: [Level] asks;
+}
+
+root Book;

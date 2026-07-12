@@ -1,0 +1,54 @@
+name: bootstrap-preflight
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bootstrap-preflight-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CI: "1"
+
+jobs:
+  verify:
+    name: verify ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-linux-musl
+          - runner: ubuntu-24.04-arm
+            target: aarch64-linux-musl
+    steps:
+      - name: Check out the exact revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Assert native CPU and musl output triplet
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(./repo.sh target)" = "${{ matrix.target }}"
+
+      - name: Validate bootstrap plan
+        run: ./repo.sh bootstrap --dry-run
+
+      - name: Run pre-resolvable quality gates
+        run: ./repo.sh ci
+
+  # Tag-triggered package publication is deliberately absent from this
+  # executable slice. Enable the CI-RELEASE.md workflow only after every
+  # toolchain digest is resolved and package/package-smoke/release commands
+  # have clean-consumer tests. This keeps bootstrap CI green without
+  # pretending unresolved release plumbing works.

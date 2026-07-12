@@ -1,0 +1,62 @@
+schema = 1
+
+# Every asset is pinned to an immutable release URL and SHA-256. Update tooling
+# must edit this file reviewably; it must never interpret a mutable "latest" URL.
+
+[[artifact]]
+tool = "gcc-musl"
+target = "x86_64-linux-musl"
+version = "16.1.0-userdocs-2628"
+url = "https://github.com/userdocs/qbt-musl-cross-make/releases/download/2628/x86_64-x86_64-linux-musl.tar.xz"
+sha256 = "a6a1ec6a830777eac1982909ba50c9b6b53853166051edcf9bb6b6bf9581bff6"
+archive = "x86_64-x86_64-linux-musl.tar.xz"
+expected = "x86_64-linux-musl/bin/x86_64-linux-musl-g++"
+loader = "x86_64-linux-musl/x86_64-linux-musl/lib/ld-musl-x86_64.so.1"
+mold = "x86_64-linux-musl/bin/mold"
+
+[[artifact]]
+tool = "gcc-musl"
+target = "aarch64-linux-musl"
+version = "16.1.0-userdocs-2628"
+url = "https://github.com/userdocs/qbt-musl-cross-make/releases/download/2628/aarch64-aarch64-linux-musl.tar.xz"
+sha256 = "770f2fcd3e74a965fa958b82406fabb02114dfc2c0ea40deadb70d96088a3abf"
+archive = "aarch64-aarch64-linux-musl.tar.xz"
+expected = "aarch64-linux-musl/bin/aarch64-linux-musl-g++"
+loader = "aarch64-linux-musl/aarch64-linux-musl/lib/ld-musl-aarch64.so.1"
+mold = "aarch64-linux-musl/bin/mold"
+
+[[artifact]]
+tool = "python"
+target = "x86_64-linux-musl"
+version = "3.14.6+20260610"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20260610/cpython-3.14.6%2B20260610-x86_64-unknown-linux-musl-install_only_stripped.tar.gz"
+sha256 = "54eca143d09ed3c596ecad5e3bfcb7724387818f8f984f44f3d8c0e9f36681d3"
+archive = "cpython-3.14.6+20260610-x86_64-unknown-linux-musl-install_only_stripped.tar.gz"
+expected = "python/bin/python3"
+
+[[artifact]]
+tool = "ninja"
+target = "x86_64-linux-musl"
+version = "1.13.1"
+url = "https://github.com/ninja-build/ninja/releases/download/v1.13.1/ninja-linux.zip"
+sha256 = "0830252db77884957a1a4b87b05a1e2d9b5f658b8367f82999a941884cbe0238"
+archive = "ninja-linux.zip"
+expected = "ninja"
+
+[[artifact]]
+tool = "ninja"
+target = "aarch64-linux-musl"
+version = "1.13.1"
+url = "https://github.com/ninja-build/ninja/releases/download/v1.13.1/ninja-linux-aarch64.zip"
+sha256 = "740f1b9f9d8ae68438240a6a2f3f7a27fc8b1946d2024a6a6b25857ee877987b"
+archive = "ninja-linux-aarch64.zip"
+expected = "ninja"
+
+[[artifact]]
+tool = "python"
+target = "aarch64-linux-musl"
+version = "3.14.6+20260610"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20260610/cpython-3.14.6%2B20260610-aarch64-unknown-linux-musl-install_only_stripped.tar.gz"
+sha256 = "5c75bea22f425ebc94912c618518a5aa4753eedeea6b5da5939f027d3a9c0fec"
+archive = "cpython-3.14.6+20260610-aarch64-unknown-linux-musl-install_only_stripped.tar.gz"
+expected = "python/bin/python3"

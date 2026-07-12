@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "adapter": "example-vendor",
+  "actions": [
+    {
+      "source": "third_party/example/example.cpp",
+      "output": "third_party/example/example.o",
+      "arguments": ["-Ithird_party/example/include"]
+    }
+  ]
+}
