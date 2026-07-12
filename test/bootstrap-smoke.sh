@@ -14,9 +14,25 @@ fi
 
 help_output=$("$ROOT/repo.sh" help)
 [[ $help_output == *bootstrap* ]]
-sed -e '0,/url = /s|url = .*|url = "UNRESOLVED: fixture"|' \
-    -e '0,/sha256 = /s|sha256 = .*|sha256 = "UNRESOLVED"|' \
-    "$ROOT/tools.lock.toml" >"$tmp/unresolved.lock.toml"
+target=$("$ROOT/repo.sh" target)
+awk -v target="$target" '
+  /^\[\[artifact\]\]$/ { selected = 0 }
+  $0 == "target = \"" target "\"" { selected = 1 }
+  selected && /^url = / && !replaced_url {
+    print "url = \"UNRESOLVED: fixture\""
+    replaced_url = 1
+    next
+  }
+  selected && /^sha256 = / && !replaced_sha {
+    print "sha256 = \"UNRESOLVED\""
+    replaced_sha = 1
+    next
+  }
+  { print }
+  END {
+    if (!replaced_url || !replaced_sha) exit 1
+  }
+' "$ROOT/tools.lock.toml" >"$tmp/unresolved.lock.toml"
 export POLYGLOT_LOCK_FILE="$tmp/unresolved.lock.toml"
 dry_output=$("$ROOT/repo.sh" bootstrap --dry-run --offline)
 [[ $dry_output == *'LOCK UNRESOLVED'* ]]
@@ -29,7 +45,6 @@ fi
 
 # Exercise the complete offline, checksum-verified, idempotent install path with
 # a synthetic executable. This deliberately uses no host compiler.
-target=$("$ROOT/repo.sh" target)
 mkdir -p "$tmp/payload/bin" "$POLYGLOT_LOCAL_DIR/downloads"
 printf '#!/usr/bin/env sh\nprintf "fixture 1.0\\n"\n' >"$tmp/payload/bin/fixture"
 chmod +x "$tmp/payload/bin/fixture"
