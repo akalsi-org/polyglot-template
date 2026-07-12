@@ -9,6 +9,9 @@ workflow=$root/.github/workflows/ci-release.yml
 grep -Fq 'actions/cache@5a3ec84eff668545956fd18022155c47e93e2684' "$workflow"
 grep -Fq 'polyglot-tools-v1-${{ runner.os }}-${{ matrix.target }}-' "$workflow"
 grep -Fq "hashFiles('tools.lock.toml', 'toolchain/**')" "$workflow"
+grep -Fq 'polyglot-deno-v1-${{ runner.os }}-${{ matrix.target }}-' "$workflow"
+grep -Fq "hashFiles('tools.lock.toml', 'deno.lock')" "$workflow"
+grep -Fq '            node_modules' "$workflow"
 ! grep -q 'restore-keys:' "$workflow"
 
 bootstrap_line=$(grep -n './repo.sh bootstrap$' "$workflow" | cut -d: -f1)

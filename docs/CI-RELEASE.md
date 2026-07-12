@@ -106,6 +106,7 @@ The workflow aggressively caches the expensive immutable inputs:
 ```text
 .local/toolchain/
 .local/downloads/
+.local/cache/deno/
 ```
 
 The cache key includes:
@@ -119,7 +120,7 @@ There are deliberately no broad restore prefixes for installed toolchains. An ex
 
 Downloaded archives are stored with the toolchain because they make repair and offline reinstallation cheap. They remain subject to the committed SHA-256 checks before use.
 
-Build outputs and language dependency caches are not yet cached by this workflow. Add them independently after each lane has a complete content-addressed input contract. Workflow artifacts transport final packages between jobs; they are not a build cache. The packaged archive is uploaded as a file, so its internal executable modes and normalized metadata remain intact.
+The frozen Deno npm graph is cached separately by native target plus the exact tool and Deno lock digests. Other build outputs and language dependency caches are not yet cached. Add them independently after each lane has a complete content-addressed input contract. Workflow artifacts transport final packages between jobs; they are not a build cache. The packaged archive is uploaded as a file, so its internal executable modes and normalized metadata remain intact.
 
 ## Release Procedure
 

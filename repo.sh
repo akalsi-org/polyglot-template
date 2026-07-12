@@ -36,6 +36,7 @@ Commands:
   deno [args...]               Run the pinned Deno binary.
   ts-check                     Check, lint, and test local TypeScript.
   tsweb-check                  Check, lint, and test browser TypeScript.
+  tsweb-build                  Build the React 19 static application.
   go [args...]                 Run pinned Go with isolated repository caches.
   go-check                     Format, vet, test, build, and run the Go lane.
   cpp-reflection-probe         Print the pinned GCC reflection probe command.
@@ -145,10 +146,15 @@ case "$command" in
     "$ROOT/repo.sh" deno run --frozen ts/app/hello/main.ts
     ;;
   tsweb-check)
-    "$ROOT/repo.sh" deno check --frozen tsweb/app/site/main.ts tsweb/test/title_test.ts
+    "$ROOT/repo.sh" deno check --frozen tsweb/app/site/main.tsx tsweb/test/app_test.tsx tsweb/test/title_test.ts tsweb/vite.config.ts
     "$ROOT/repo.sh" deno fmt --check tsweb/
     "$ROOT/repo.sh" deno lint tsweb/
-    "$ROOT/repo.sh" deno test --frozen tsweb/test/
+    "$ROOT/repo.sh" deno test --frozen --allow-env=NODE_ENV tsweb/test/
+    "$ROOT/repo.sh" tsweb-build
+    python3 "$ROOT/tools/tsweb_smoke.py" --root "$ROOT/build/tsweb/site"
+    ;;
+  tsweb-build)
+    "$ROOT/repo.sh" deno run --cached-only --frozen -A npm:vite@8.1.4 build --config tsweb/vite.config.ts
     ;;
   go)
     target=$("$ROOT/toolchain/target.sh")

@@ -6,6 +6,7 @@
 /.ninja_deps
 **/__pycache__/
 *.pyc
+/node_modules/
 /.moon/cache/
 /.moon/docker/
 /.moon/toolchain/

@@ -19,6 +19,14 @@ def main() -> None:
     assert settings["deno.enablePaths"] == ["./ts", "./tsweb"]
     assert settings["deno.config"] == "${workspaceFolder}/deno.json"
     deno_config = json.loads((ROOT / "deno.json").read_text())
+    assert deno_config["nodeModulesDir"] == "auto"
+    assert deno_config["imports"] == {
+        "@deno/vite-plugin": "npm:@deno/vite-plugin@2.0.2",
+        "@vitejs/plugin-react": "npm:@vitejs/plugin-react@6.0.3",
+        "react": "npm:react@19.2.7",
+        "react-dom/client": "npm:react-dom@19.2.7/client",
+        "vite": "npm:vite@8.1.4",
+    }
     assert deno_config["scopes"] == {
         "./ts/": {"@/": "./ts/lib/"},
         "./tsweb/": {"#/": "./tsweb/lib/"},

@@ -49,6 +49,14 @@ jobs:
             .local/toolchain/${{ matrix.target }}
           key: polyglot-tools-v1-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('tools.lock.toml', 'toolchain/**') }}
 
+      - name: Restore exact Deno dependency graph
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            .local/cache/deno
+            node_modules
+          key: polyglot-deno-v1-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('tools.lock.toml', 'deno.lock') }}
+
       - name: Bootstrap and validate pinned tools
         run: |
           ./repo.sh bootstrap

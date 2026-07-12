@@ -1,6 +1,6 @@
 # Polyglot Repository Template Decision Package
 
-Status: proposed design baseline with executable pinned C++, Python, TypeScript, browser-TypeScript, bootstrap, and package slices at the repository root. Full Go/schema lanes, tag publication, and fleet deployment remain gated as documented.
+Status: proposed design baseline with executable pinned C++, Python, Go, TypeScript, React 19/browser-TypeScript, bootstrap, and package slices at the repository root. Schema work, tag publication, and fleet deployment remain gated as documented.
 
 This document set defines a cloneable, non-JVM, AI-ready monorepo template for C/C++, Go, Python with native extensions, and Deno TypeScript/React. It records both the concrete design and the reasoning rules that produced it.
 

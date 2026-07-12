@@ -1,0 +1,39 @@
+:root {
+  color: #162033;
+  background: #f4f7fb;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  font-synthesis: none;
+}
+
+body {
+  display: grid;
+  min-width: 20rem;
+  min-height: 100vh;
+  margin: 0;
+  place-items: center;
+}
+
+main {
+  width: min(38rem, calc(100% - 3rem));
+}
+
+.eyebrow {
+  color: #2458a6;
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+h1 {
+  margin: 0.25rem 0 1rem;
+  font-size: clamp(2.5rem, 8vw, 5rem);
+  line-height: 0.95;
+}
+
+.summary {
+  max-width: 34rem;
+  color: #42516a;
+  font-size: 1.1rem;
+  line-height: 1.65;
+}

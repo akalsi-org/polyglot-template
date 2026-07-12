@@ -1,5 +1,13 @@
 {
   "lock": true,
+  "nodeModulesDir": "auto",
+  "imports": {
+    "@deno/vite-plugin": "npm:@deno/vite-plugin@2.0.2",
+    "@vitejs/plugin-react": "npm:@vitejs/plugin-react@6.0.3",
+    "react": "npm:react@19.2.7",
+    "react-dom/client": "npm:react-dom@19.2.7/client",
+    "vite": "npm:vite@8.1.4"
+  },
   "scopes": {
     "./ts/": {
       "@/": "./ts/lib/"
@@ -11,6 +19,8 @@
   "compilerOptions": {
     "strict": true,
     "noUncheckedIndexedAccess": true,
+    "jsx": "react-jsx",
+    "jsxImportSource": "react",
     "lib": ["deno.ns", "dom", "dom.iterable", "esnext"]
   },
   "fmt": {

@@ -126,3 +126,23 @@ validate_members() {
 }
 
 while IFS= read -r tool; do install_one "$tool"; done < <(locked_tools)
+
+if ((dry_run == 0)); then
+  deno_version=$(lock_value deno "$target" version)
+  deno_expected=$(lock_value deno "$target" expected)
+  deno_install="$LOCAL/toolchain/$target/deno-$deno_version"
+  if [[ -n $deno_version && -x $deno_install/$deno_expected ]]; then
+    if ((offline == 0)); then
+      DENO_DIR="$LOCAL/cache/deno" "$deno_install/$deno_expected" cache --frozen \
+        "$ROOT/ts/app/hello/main.ts" \
+        "$ROOT/ts/test/greeting_test.ts" \
+        "$ROOT/tsweb/app/site/main.tsx" \
+        "$ROOT/tsweb/test/app_test.tsx" \
+        "$ROOT/tsweb/test/title_test.ts" \
+        "$ROOT/tsweb/vite.config.ts"
+      printf 'bootstrap: cached locked Deno dependency graph\n'
+    else
+      printf 'bootstrap: preserved cached locked Deno dependency graph\n'
+    fi
+  fi
+fi
