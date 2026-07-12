@@ -67,6 +67,48 @@ def copy_executable(source: Path, destination: Path) -> None:
     os.chmod(destination, 0o755)
 
 
+def copy_tree(source: Path, destination: Path, *, ignore: tuple[str, ...] = ()) -> None:
+    require(source.is_dir(), f"missing built directory: {source}")
+    shutil.copytree(source, destination, dirs_exist_ok=True, symlinks=True, ignore=shutil.ignore_patterns(*ignore))
+
+
+def write_launcher(path: Path, body: str) -> None:
+    write_text(path, "#!/bin/sh\nset -eu\n" + body)
+    os.chmod(path, 0o755)
+
+
+def assemble_polyglot_demo(args: argparse.Namespace, entry: dict[str, Any], stage: Path, target: str) -> None:
+    root = args.root
+    local = root / ".local" / "toolchain" / target
+    tools = load(args.tools_lock).get("artifact", [])
+    gcc = next(item for item in tools if item.get("tool") == "gcc-musl" and item.get("target") == target)
+    python = next(item for item in tools if item.get("tool") == "python" and item.get("target") == target)
+    gcc_install = local / f"gcc-musl-{gcc['version']}"
+    python_install = local / f"python-{python['version']}" / "python"
+
+    copy_executable(root / f"build/cpp/{target}/{args.profile}/bin/hello", stage / "libexec/cpp-hello")
+    copy_executable(root / f"build/go/{target}/hello", stage / "bin/go-hello")
+    copy_tree(python_install, stage / "runtime/python", ignore=("__pycache__", "*.pyc"))
+    copy_tree(root / "python/lib", stage / "app/python/lib", ignore=("*.cc", "__pycache__", "*.pyc"))
+    copy_tree(root / "python/app", stage / "app/python/app", ignore=("__pycache__", "*.pyc"))
+    copy_tree(root / f"build/python/{target}/lib", stage / "app/python/lib", ignore=("__pycache__", "*.pyc"))
+    copy_tree(root / "build/tsweb/site", stage / "app/web")
+
+    loader_source = gcc_install / gcc["loader"]
+    libc_source = loader_source.parent / "libc.so"
+    loader_name = f"ld-musl-{'x86_64' if target.startswith('x86_64') else 'aarch64'}.so.1"
+    copy_executable(loader_source, stage / f"lib/{loader_name}")
+    copy_executable(libc_source, stage / "lib/libc.so")
+    write_launcher(
+        stage / "bin/cpp-hello",
+        f'ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)\nexec "$ROOT/lib/{loader_name}" --library-path "$ROOT/lib" "$ROOT/libexec/cpp-hello" "$@"\n',
+    )
+    write_launcher(
+        stage / "bin/python-hello",
+        f'ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)\nexport PYTHONPATH="$ROOT/app/python/lib:$ROOT/app/python/app"\nexec "$ROOT/lib/{loader_name}" --library-path "$ROOT/lib:$ROOT/runtime/python/lib" "$ROOT/runtime/python/bin/python3" "$ROOT/app/python/app/hello/main.py" "$@"\n',
+    )
+
+
 def reset_tarinfo(info: tarfile.TarInfo) -> tarfile.TarInfo:
     info.uid = 0
     info.gid = 0
@@ -90,7 +132,7 @@ def make_archive(stage: Path, archive: Path) -> None:
         with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as zipped:
             with tarfile.open(fileobj=zipped, mode="w") as tar:
                 for path in sorted(stage.rglob("*")):
-                    tar.add(path, arcname=path.relative_to(stage).as_posix(), filter=reset_tarinfo)
+                    tar.add(path, arcname=path.relative_to(stage).as_posix(), recursive=False, filter=reset_tarinfo)
     temporary.replace(archive)
 
 
@@ -103,7 +145,7 @@ def assemble(args: argparse.Namespace) -> int:
     target = args.target
     require(target in entry["supported_targets"], f"{args.package}: target is not supported: {target}")
     closure, runtime_ref = resolve_closure(args, args.package, target)
-    build_dir = args.build_dir or args.root / "build" / "native" / target / args.profile
+    build_dir = args.build_dir or args.root / "build" / "cpp" / target / args.profile
     package_id = f"{args.package}-{entry['version']}-{target}"
     dist_dir = args.dist_dir
     stage_parent = dist_dir / "stage"
@@ -111,8 +153,11 @@ def assemble(args: argparse.Namespace) -> int:
     if stage.exists():
         shutil.rmtree(stage)
     stage.mkdir(parents=True)
-    for executable in entry["executables"]:
-        copy_executable(build_dir / "bin" / executable, stage / "bin" / executable)
+    if entry.get("layout") == "polyglot-demo":
+        assemble_polyglot_demo(args, entry, stage, target)
+    else:
+        for executable in entry["executables"]:
+            copy_executable(build_dir / "bin" / executable, stage / "bin" / executable)
     metadata = {
         "schema_version": 1,
         "package": args.package,
@@ -172,6 +217,13 @@ def smoke(args: argparse.Namespace) -> int:
             require(os.access(path, os.X_OK), f"packaged executable is not executable: {executable}")
             if args.execute:
                 subprocess.run([str(path)], cwd=scratch, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if entry.get("layout") == "polyglot-demo":
+            require((scratch / "app/web/index.html").is_file(), "packaged React index is missing")
+            subprocess.run(
+                [sys.executable, str(args.root / "tools/tsweb_smoke.py"), "--root", str(scratch / "app/web")],
+                check=True,
+                stdout=subprocess.DEVNULL,
+            )
     print("package smoke: ok")
     return 0
 
@@ -199,7 +251,7 @@ def release_check(args: argparse.Namespace) -> int:
     changelog_section(args.changelog, tag)
     target = args.target
     archive = args.dist_dir / f"{args.package}-{entry['version']}-{target}.tar.gz"
-    smoke_args = argparse.Namespace(**vars(args), archive=archive, execute=False)
+    smoke_args = argparse.Namespace(**vars(args), archive=archive, execute=True)
     smoke(smoke_args)
     print("release check: ok")
     return 0

@@ -40,6 +40,8 @@ def packages(model: dict) -> dict[str, dict]:
         require(name not in result, f"duplicate package: {name}")
         require(bool(VERSION.fullmatch(item.get("version", ""))), f"{name}: version must be exact SemVer")
         require(item.get("kind") in {"application", "runtime"}, f"{name}: invalid kind")
+        layout = item.get("layout", "executables")
+        require(layout in {"executables", "polyglot-demo"}, f"{name}: invalid package layout")
         targets = item.get("supported_targets", [])
         require(bool(targets) and len(targets) == len(set(targets)), f"{name}: supported_targets must be nonempty and unique")
         require(all(TARGET.fullmatch(x) for x in targets), f"{name}: invalid supported target")

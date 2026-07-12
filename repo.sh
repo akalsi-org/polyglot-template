@@ -209,6 +209,12 @@ case "$command" in
     (($# >= 1 && $# <= 2)) || { printf 'usage: ./repo.sh package <name> [dbg|opt]\n' >&2; exit 2; }
     profile=${2:-opt}
     [[ $profile == dbg || $profile == opt ]] || { printf 'error: profile must be dbg or opt\n' >&2; exit 2; }
+    if [[ $1 == polyglot-demo ]]; then
+      "$ROOT/repo.sh" cpp-build "$profile"
+      "$ROOT/repo.sh" python-build
+      "$ROOT/repo.sh" go-check
+      "$ROOT/repo.sh" tsweb-check
+    fi
     target=$("$ROOT/toolchain/target.sh")
     python3 "$ROOT/tools/package_release.py" --root "$ROOT" --manifest "$ROOT/package.toml" \
       --lock "$ROOT/runtime-resolution.lock.toml" --tools-lock "$ROOT/tools.lock.toml" \
@@ -221,7 +227,7 @@ case "$command" in
     python3 "$ROOT/tools/package_release.py" --root "$ROOT" --manifest "$ROOT/package.toml" \
       --lock "$ROOT/runtime-resolution.lock.toml" --tools-lock "$ROOT/tools.lock.toml" \
       --dist-dir "$ROOT/dist" --changelog "$ROOT/CHANGELOG.md" smoke \
-      --archive "$1" --package "$2" --target "$target"
+      --archive "$1" --package "$2" --target "$target" --execute
     ;;
   release-check)
     (($# == 2)) || { printf 'usage: ./repo.sh release-check <name> <tag>\n' >&2; exit 2; }

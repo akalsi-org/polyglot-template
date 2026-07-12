@@ -36,7 +36,7 @@ if python3 "$tool" "${common[@]}" release-check --package gateway --target x86_6
   exit 1
 fi
 
-sed '0,/loader_sha256 = "[a-f0-9]*"/s//loader_sha256 = "UNRESOLVED"/' \
+sed 's/loader_sha256 = "[a-f0-9]*"/loader_sha256 = "UNRESOLVED"/g' \
   "$root/runtime-resolution.lock.toml" >"$tmp/unresolved-runtime.lock.toml"
 if python3 "$tool" --root "$root" --manifest "$root/package.toml" --lock "$tmp/unresolved-runtime.lock.toml" --tools-lock "$root/tools.lock.toml" --dist-dir "$tmp/unresolved" package --package gateway --target x86_64-linux-musl --profile opt --build-dir "$build" >/dev/null 2>&1; then
   echo "package unexpectedly accepted unresolved runtime closure" >&2
