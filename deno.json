@@ -1,0 +1,16 @@
+{
+  "lock": true,
+  "compilerOptions": {
+    "strict": true,
+    "noUncheckedIndexedAccess": true
+  },
+  "fmt": {
+    "include": ["deno/"]
+  },
+  "lint": {
+    "include": ["deno/"]
+  },
+  "test": {
+    "include": ["deno/"]
+  }
+}

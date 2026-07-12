@@ -13,7 +13,7 @@ This document set defines a cloneable, non-JVM, AI-ready monorepo template for C
 - [FLEET-NEXT.md](FLEET-NEXT.md) — remaining provider, SLO, trust-implementation, service-policy, stateful-workload, and recovery questions.
 - [CI-RELEASE.md](CI-RELEASE.md) — GitHub Actions packaging, provenance, artifact retention, and tag-gated release contract.
 - [spikes/serialization/README.md](spikes/serialization/README.md) — nested-array IDL spike comparing Fory, Bebop, FlatBuffers, and a minimal borrowed-view lower bound.
-- [../README.md](../README.md) — runnable target, lock/bootstrap, native graph, package/runtime closure, AI-guide, test, and two-runner preflight slice.
+- [../README.md](../README.md) — runnable target, lock/bootstrap, native graph, package/runtime closure, AI guide, tests, and live two-runner toolchain/build CI.
 
 ## Decision Summary
 

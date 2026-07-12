@@ -38,6 +38,14 @@ while IFS= read -r tool; do
       [[ $("$install/$expected" -dumpmachine) == "$target" ]] || { printf 'invalid: compiler target mismatch\n'; failed=1; continue; }
       "$install/$mold" --version | grep -q '^mold 2\.41\.0'
       "$install/$expected" -std=gnu++26 -freflection -fsyntax-only "$ROOT/native/probes/reflection.cpp"
+    elif [[ $tool == deno ]]; then
+      [[ $("$install/$expected" --version | awk 'NR == 1 { print $2 }') == "$version" ]] || {
+        printf 'invalid: Deno version mismatch\n'; failed=1; continue;
+      }
+    elif [[ $tool == ninja ]]; then
+      [[ $("$install/$expected" --version) == "$version" ]] || {
+        printf 'invalid: Ninja version mismatch\n'; failed=1; continue;
+      }
     else
       "$install/$expected" --version >/dev/null
     fi

@@ -290,7 +290,7 @@ PR smoke gates catch only gross regressions. Stable dedicated runners enforce ti
 1. Contracts: commands, directories, lock schema, offline, package, benchmark, AI overview.
 2. Bootstrap and doctor: transactional installer, stamps, candidate updates, capability probes, temporary-home tests.
 3. Native lane: manifest IR, Ninja, complete compdb, third-party adapters, lint, tests.
-4. Go, Python, and Deno lanes with one verified example each.
+4. Go and expanded Python/Deno application lanes; the bootstrap slice already verifies pinned Python and a minimal Deno module/test on both native architectures.
 5. moon aggregation with coarse task inputs/outputs and affected execution.
 6. Schema generation and cross-runtime fixtures.
 7. Runtime-deduplicated packaging, deterministic compression, extractor, and consumer tests.
@@ -298,7 +298,7 @@ PR smoke gates catch only gross regressions. Stable dedicated runners enforce ti
 
 ## GitHub CI And Releases
 
-The template installs the workflow documented in [CI-RELEASE.md](CI-RELEASE.md). Pull requests and main pushes restore toolchains from exact lock-and-target-keyed caches, revalidate them through bootstrap, run `doctor --deep`, and execute `repo.sh ci`. An annotated `packages/<name>/v<version>` tag selects one independently versioned package, builds separate x64 and ARM64 assets, runs package consumer tests, generates package-specific checksums and provenance, and publishes one GitHub Release with that package's own notes. GitHub workflow YAML never owns compilation, version calculation, release-note generation, or package staging logic.
+The template installs the workflow documented in [CI-RELEASE.md](CI-RELEASE.md). Pull requests and main pushes restore toolchains from exact lock, bootstrap implementation, and target-keyed caches; run live then offline bootstrap; run `doctor --deep` and `repo.sh ci`; build and execute both native profiles; exercise pinned Python through musl; and check, lint, and test with pinned Deno. An annotated `packages/<name>/v<version>` tag will select one independently versioned package once tag publication is enabled. GitHub workflow YAML never owns compilation, version calculation, release-note generation, or package staging logic.
 
 ## Completion Gate
 
@@ -306,4 +306,4 @@ The template is complete only when a fresh clone bootstraps verified pins, the s
 
 ## Implemented Bootstrap Slice
 
-The repository currently implements target resolution, transactional fail-closed bootstrap, doctor, exact x64/ARM64 GCC 16.1+musl, mold 2.41, Ninja 1.13.1, and Python 3.14.6 pins, deterministic native Ninja/compdb generation, usable sanitizer-free debug and optimized C++ profiles, runtime-closure schema and lock validation, deterministic package assembly, package smoke tests, release checks, release-note extraction, the canonical AI guide/symlink, local tests, and native x64/ARM64 GitHub preflight. The x64 bootstrap, deep doctor, reflection probe, optimized mold-linked native build, musl-loader execution, and runtime closure have been exercised locally. Sanitizers and a custom compiler fork are not requirements of this template. Tag publication remains disabled until promoted into the workflow.
+The repository currently implements target resolution, transactional fail-closed bootstrap, doctor, exact x64/ARM64 GCC 16.1+musl, mold 2.41, Ninja 1.13.1, Python 3.14.6, and Deno 2.9.2 pins, deterministic native Ninja/compdb generation, usable sanitizer-free debug and optimized C++ profiles, a minimal checked Deno lane, runtime-closure schema and lock validation, deterministic package assembly, package smoke tests, release checks, release-note extraction, the canonical AI guide/symlink, local tests, and native x64/ARM64 live-bootstrap/build CI. Sanitizers and a custom compiler fork are not requirements of this template. Tag publication remains disabled until promoted into the workflow.

@@ -106,7 +106,6 @@ The workflow aggressively caches the expensive immutable inputs:
 ```text
 .local/toolchain/
 .local/downloads/
-.local/cache/downloads/
 ```
 
 The cache key includes:
@@ -116,7 +115,7 @@ The cache key includes:
 - the digest of `tools.lock.toml` and the bootstrap implementation under `toolchain/`;
 - an explicit cache-schema version.
 
-There are deliberately no broad restore prefixes for installed toolchains. An exact lock hit restores a complete candidate; a miss performs the normal checksum-verified installation. `repo.sh bootstrap` always runs after restoration and must recheck stamps and capability probes, so a corrupt or incomplete cache is repaired rather than trusted.
+There are deliberately no broad restore prefixes for installed toolchains. An exact lock hit restores a complete candidate; a miss performs the normal checksum-verified installation. `repo.sh bootstrap` verifies stamps and expected executables after restoration, the immediate offline bootstrap proves cache completeness, and `repo.sh doctor --deep` re-runs identity and capability probes.
 
 Downloaded archives are stored with the toolchain because they make repair and offline reinstallation cheap. They remain subject to the committed SHA-256 checks before use.
 

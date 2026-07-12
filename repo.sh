@@ -28,6 +28,10 @@ Commands:
   lint                         Check shell, Python, TOML, and JSON sources.
   native-configure [dbg|opt]   Generate Ninja and compile_commands.json.
   native-build [dbg|opt]       Build with the pinned repo-local GCC and Ninja.
+  native-run [dbg|opt]         Run the native example through the pinned musl loader.
+  python [args...]             Run the pinned Python through the pinned musl loader.
+  deno [args...]               Run the pinned Deno binary.
+  deno-check                   Check, lint, and test the repository Deno lane.
   reflection-probe             Print the pinned GCC reflection probe command.
   package-validate             Validate package and runtime closure metadata.
   package-resolve <name> [out] Resolve an exact native-target package closure.
@@ -74,6 +78,46 @@ case "$command" in
     cxx=$(tool_path gcc-musl)
     (cd "$ROOT" && "$cxx" -std=gnu++26 -freflection -fsyntax-only native/probes/reflection.cpp)
     (cd "$ROOT" && "$ninja" -f "build/native/$target/$profile/build.ninja")
+    ;;
+  native-run)
+    profile=${1:-dbg}
+    [[ $profile == dbg || $profile == opt ]] || { printf 'error: profile must be dbg or opt\n' >&2; exit 2; }
+    target=$("$ROOT/toolchain/target.sh")
+    export POLYGLOT_LOCK_FILE=${POLYGLOT_LOCK_FILE:-$ROOT/tools.lock.toml}
+    . "$ROOT/toolchain/lock.sh"
+    version=$(lock_value gcc-musl "$target" version)
+    loader=$(lock_value gcc-musl "$target" loader)
+    install="$POLYGLOT_LOCAL_DIR/toolchain/$target/gcc-musl-$version"
+    binary="$ROOT/build/native/$target/$profile/bin/hello"
+    [[ -x $install/$loader && -x $binary ]] || { printf 'error: build and bootstrap the %s profile first\n' "$profile" >&2; exit 1; }
+    loader_dir=$(dirname -- "$install/$loader")
+    "$install/$loader" --library-path "$loader_dir" "$binary"
+    ;;
+  python)
+    target=$("$ROOT/toolchain/target.sh")
+    export POLYGLOT_LOCK_FILE=${POLYGLOT_LOCK_FILE:-$ROOT/tools.lock.toml}
+    . "$ROOT/toolchain/lock.sh"
+    gcc_version=$(lock_value gcc-musl "$target" version)
+    loader=$(lock_value gcc-musl "$target" loader)
+    python_version=$(lock_value python "$target" version)
+    python_expected=$(lock_value python "$target" expected)
+    gcc_install="$POLYGLOT_LOCAL_DIR/toolchain/$target/gcc-musl-$gcc_version"
+    python_install="$POLYGLOT_LOCAL_DIR/toolchain/$target/python-$python_version"
+    [[ -x $gcc_install/$loader && -x $python_install/$python_expected ]] || { printf 'error: pinned Python toolchain is not installed\n' >&2; exit 1; }
+    loader_dir=$(dirname -- "$gcc_install/$loader")
+    "$gcc_install/$loader" --library-path "$loader_dir:$python_install/python/lib" "$python_install/$python_expected" "$@"
+    ;;
+  deno)
+    deno=$(tool_path deno)
+    [[ -x $deno ]] || { printf 'error: pinned Deno is not installed; run ./repo.sh bootstrap\n' >&2; exit 1; }
+    export DENO_DIR="$POLYGLOT_LOCAL_DIR/cache/deno"
+    exec "$deno" "$@"
+    ;;
+  deno-check)
+    "$ROOT/repo.sh" deno --version
+    "$ROOT/repo.sh" deno check --frozen deno/main.ts deno/main_test.ts
+    "$ROOT/repo.sh" deno lint deno/
+    "$ROOT/repo.sh" deno test --frozen deno/
     ;;
   reflection-probe)
     cxx=$(tool_path gcc-musl)
@@ -125,6 +169,7 @@ case "$command" in
     ;;
   test)
     bash "$ROOT/test/bootstrap-smoke.sh"
+    bash "$ROOT/test/workflow-contract.sh"
     bash "$ROOT/test/test-package-model.sh"
     bash "$ROOT/test/test-package-release.sh"
     python3 -m unittest discover -s "$ROOT/native" -p 'test_*.py'
