@@ -31,8 +31,8 @@ link_flags = ["-fuse-ld=mold"]
 [[targets]]
 name = "hello"
 type = "executable"
-sources = ["src/hello.cpp"]
-include_dirs = ["include", "third_party/example/include"]
+sources = ["app/hello/main.cc"]
+include_dirs = ["lib"]
 adapter_dependencies = ["example-vendor"]
 
 [[adapters]]

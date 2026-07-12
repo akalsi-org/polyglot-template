@@ -1,6 +1,6 @@
 # Polyglot Repository Template Decision Package
 
-Status: proposed design baseline with an executable pinned bootstrap/native/package slice at the repository root. Full Go/Deno/schema lanes, tag publication, and fleet deployment remain gated as documented.
+Status: proposed design baseline with executable pinned C++, Python, TypeScript, browser-TypeScript, bootstrap, and package slices at the repository root. Full Go/schema lanes, tag publication, and fleet deployment remain gated as documented.
 
 This document set defines a cloneable, non-JVM, AI-ready monorepo template for C/C++, Go, Python with native extensions, and Deno TypeScript/React. It records both the concrete design and the reasoning rules that produced it.
 
@@ -13,7 +13,7 @@ This document set defines a cloneable, non-JVM, AI-ready monorepo template for C
 - [FLEET-NEXT.md](FLEET-NEXT.md) — remaining provider, SLO, trust-implementation, service-policy, stateful-workload, and recovery questions.
 - [CI-RELEASE.md](CI-RELEASE.md) — GitHub Actions packaging, provenance, artifact retention, and tag-gated release contract.
 - [spikes/serialization/README.md](spikes/serialization/README.md) — nested-array IDL spike comparing Fory, Bebop, FlatBuffers, and a minimal borrowed-view lower bound.
-- [../README.md](../README.md) — runnable target, lock/bootstrap, native graph, package/runtime closure, AI guide, tests, and live two-runner toolchain/build CI.
+- [../README.md](../README.md) — runnable target, lock/bootstrap, C++ graph, language source layout, package/runtime closure, AI guide, tests, and live two-runner CI.
 
 ## Decision Summary
 

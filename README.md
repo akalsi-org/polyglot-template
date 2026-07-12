@@ -1,6 +1,6 @@
 # Polyglot Template Bootstrap Slice
 
-This directory is the executable vertical slice associated with the parent decision package. It establishes the public command surface, native target policy, locked bootstrap model, package/runtime closure schema, and native build-graph generation without implementing fleet deployment.
+This repository is the executable vertical slice associated with the decision package. It establishes the public command surface, native target policy, language-owned source layout, locked bootstrap model, package/runtime closure schema, and C++ build-graph generation without implementing fleet deployment.
 
 ```bash
 ./repo.sh help
@@ -14,6 +14,8 @@ The userdocs compiler source is intentional rather than historical accident. Aga
 
 The upstream userdocs toolchains are configured with `--disable-libsanitizer`, and this template deliberately leaves sanitizers outside its musl toolchain contract. The usable `dbg` profile provides symbols, assertions, low optimization, warnings, and frame pointers; `opt` remains the portable release profile. A future sanitizer lane should be an independently evaluated host-debug toolchain rather than a fork requirement for these release artifacts.
 
-The checked-in GitHub workflow performs a real native bootstrap on x64 and ARM64. It restores only an exact target/lock/bootstrap-keyed toolchain cache, installs on a miss, proves the second bootstrap succeeds offline, runs deep capability checks, builds and executes both C++ profiles through musl, exercises Python through musl, and checks/lints/tests the pinned Deno lane. Tag-triggered publishing remains intentionally disabled until package assembly and clean consumer smoke are promoted into the release workflow, but the local release gates already exist.
+Source is organized under `cpp/`, `python/`, `ts/`, and `tsweb/`. Every language owns `lib/<name>/`, `app/<name>/`, and `test/`. Library roots are configured by the repository commands, so code uses logical names such as `example/example.hh`, `example.example`, `greeting/greeting.ts`, and `title/title.ts` instead of relative traversal.
 
-Implemented commands include target detection, transactional bootstrap, doctor, check-only linting, deterministic native configuration with a refreshed root compilation-database link, pinned native build/run entrypoints, pinned Python and Deno launchers, Deno quality gates, reflection-probe generation, package/runtime model validation, exact closure resolution, deterministic package assembly, package smoke tests, release checks, release-note extraction, tests, and aggregate CI.
+The checked-in GitHub workflow performs a real native bootstrap on x64 and ARM64. It restores only an exact target/lock/bootstrap-keyed toolchain cache, installs on a miss, proves the second bootstrap succeeds offline, runs deep capability checks, builds and executes both C++ profiles through musl, exercises and tests Python through musl, and checks/lints/tests the local and browser TypeScript lanes with pinned Deno. Tag-triggered publishing remains intentionally disabled until package assembly and clean consumer smoke are promoted into the release workflow, but the local release gates already exist.
+
+Implemented commands include target detection, transactional bootstrap, doctor, check-only linting, deterministic C++ configuration with a refreshed root compilation-database link, pinned `cpp-*`, `python-*`, `ts-*`, and `tsweb-*` checks, reflection-probe generation, package/runtime model validation, exact closure resolution, deterministic package assembly, package smoke tests, release checks, release-note extraction, tests, and aggregate CI.

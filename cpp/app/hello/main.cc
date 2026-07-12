@@ -1,4 +1,4 @@
-#include "example.hpp"
+#include "example/example.hh"
 
 #include <iostream>
 

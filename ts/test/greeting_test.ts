@@ -1,4 +1,4 @@
-import { greeting } from "./main.ts";
+import { greeting } from "greeting/greeting.ts";
 
 Deno.test("greeting is deterministic", () => {
   if (greeting("world") !== "hello, world") {

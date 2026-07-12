@@ -58,18 +58,22 @@ jobs:
       - name: Run repository quality gates
         run: ./repo.sh ci
 
-      - name: Build and run native profiles
+      - name: Build and run C++ profiles
         run: |
-          ./repo.sh native-build dbg
-          ./repo.sh native-run dbg
-          ./repo.sh native-build opt
-          ./repo.sh native-run opt
+          ./repo.sh cpp-build dbg
+          ./repo.sh cpp-run dbg
+          ./repo.sh cpp-build opt
+          ./repo.sh cpp-run opt
 
       - name: Exercise pinned Python runtime
-        run: ./repo.sh python -I -c 'import ctypes, hashlib, sqlite3, ssl, sys, zlib; print(sys.version)'
+        run: |
+          ./repo.sh python -I -c 'import ctypes, hashlib, sqlite3, ssl, sys, zlib; print(sys.version)'
+          ./repo.sh python-check
 
-      - name: Check pinned Deno lane
-        run: ./repo.sh deno-check
+      - name: Check pinned TypeScript lanes
+        run: |
+          ./repo.sh ts-check
+          ./repo.sh tsweb-check
 
   # Tag-triggered package publication is deliberately absent from this
   # executable slice. Enable the CI-RELEASE.md workflow only after every

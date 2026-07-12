@@ -21,20 +21,21 @@ repo/
 │   ├── bootstrap.sh
 │   ├── fetch_binary.sh
 │   └── doctor.sh
-├── native/
-│   ├── native.toml
-│   └── third_party.toml
+├── cpp/
+│   ├── cpp.toml
+│   ├── lib/<name>/
+│   ├── app/<name>/
+│   └── test/
 ├── third_party/
 │   ├── patches/
 │   ├── licenses/
 │   └── vendor/
 ├── go/
-├── python/
-├── typescript/
-│   ├── deno.json
-│   ├── deno.lock
-│   ├── apps/
-│   └── packages/
+├── python/{lib/<name>,app/<name>,test}/
+├── ts/{lib/<name>,app/<name>,test}/
+├── tsweb/{lib/<name>,app/<name>,test}/
+├── deno.json
+├── deno.lock
 ├── schema/
 ├── tools/
 ├── config/
@@ -120,14 +121,14 @@ Userdocs is roughly half the download size and 22–24% smaller after extraction
 
 The pinned native lane uses `-std=gnu++26`. Doctor probes every required language, reflection, and libstdc++ facility rather than claiming full conformance from the compiler version alone. `dbg` uses symbols, assertions, low optimization, warnings, and frame pointers. `opt` enables optimization. Sanitizers are excluded from both profiles. Neither profile uses `-fhardened`; hardening flags are selected individually, and automatic-variable initialization mistakes are addressed with warnings and static analysis rather than unconditional zero-initialization cost.
 
-## Native Build Graph
+## C++ Build Graph
 
 ```text
-native/native.toml
+cpp/cpp.toml
   -> parser + validator
   -> resolved compile-action IR
-      -> build/native/<arch>/<profile>/build.ninja
-      -> build/native/<arch>/<profile>/compile_commands.json
+      -> build/cpp/<arch>/<profile>/build.ninja
+      -> build/cpp/<arch>/<profile>/compile_commands.json
       -> root compile_commands.json for the active dev profile
       -> test inventory
       -> benchmark inventory
@@ -138,7 +139,7 @@ Every command that may compile C or C++ first refreshes Ninja and the compilatio
 
 The canonical database includes first-party, generated, vendored, and external third-party translation units. `--first-party-only` is an explicit diagnostic derivative, never the canonical database. Complete database coverage does not imply that ordinary lint runs policy checks over all upstream source; `lint --third-party` does that explicitly.
 
-Every dependency adapter must export or capture its executed compile actions as a normalized fragment. The native graph importer canonicalizes paths, arguments, target triplets, and duplicates before merging the fragment into the same compile-action IR. Verification requires the adapter's executed translation-unit set, normalized imported set, and canonical compilation-database set to agree.
+Every dependency adapter must export or capture its executed compile actions as a normalized fragment. The C++ graph importer canonicalizes paths, arguments, target triplets, and duplicates before merging the fragment into the same compile-action IR. Verification requires the adapter's executed translation-unit set, normalized imported set, and canonical compilation-database set to agree.
 
 ## C/C++ Third-Party Dependencies
 
@@ -298,7 +299,7 @@ PR smoke gates catch only gross regressions. Stable dedicated runners enforce ti
 
 ## GitHub CI And Releases
 
-The template installs the workflow documented in [CI-RELEASE.md](CI-RELEASE.md). Pull requests and main pushes restore toolchains from exact lock, bootstrap implementation, and target-keyed caches; run live then offline bootstrap; run `doctor --deep` and `repo.sh ci`; build and execute both native profiles; exercise pinned Python through musl; and check, lint, and test with pinned Deno. An annotated `packages/<name>/v<version>` tag will select one independently versioned package once tag publication is enabled. GitHub workflow YAML never owns compilation, version calculation, release-note generation, or package staging logic.
+The template installs the workflow documented in [CI-RELEASE.md](CI-RELEASE.md). Pull requests and main pushes restore toolchains from exact lock, bootstrap implementation, and target-keyed caches; run live then offline bootstrap; run `doctor --deep` and `repo.sh ci`; build and execute both C++ profiles; exercise and test pinned Python through musl; and check, lint, and test `ts/` and `tsweb/` with pinned Deno. An annotated `packages/<name>/v<version>` tag will select one independently versioned package once tag publication is enabled. GitHub workflow YAML never owns compilation, version calculation, release-note generation, or package staging logic.
 
 ## Completion Gate
 
@@ -306,4 +307,4 @@ The template is complete only when a fresh clone bootstraps verified pins, the s
 
 ## Implemented Bootstrap Slice
 
-The repository currently implements target resolution, transactional fail-closed bootstrap, doctor, exact x64/ARM64 GCC 16.1+musl, mold 2.41, Ninja 1.13.1, Python 3.14.6, and Deno 2.9.2 pins, deterministic native Ninja/compdb generation, usable sanitizer-free debug and optimized C++ profiles, a minimal checked Deno lane, runtime-closure schema and lock validation, deterministic package assembly, package smoke tests, release checks, release-note extraction, the canonical AI guide/symlink, local tests, and native x64/ARM64 live-bootstrap/build CI. Sanitizers and a custom compiler fork are not requirements of this template. Tag publication remains disabled until promoted into the workflow.
+The repository currently implements target resolution, transactional fail-closed bootstrap, doctor, exact x64/ARM64 GCC 16.1+musl, mold 2.41, Ninja 1.13.1, Python 3.14.6, and Deno 2.9.2 pins; deterministic C++ Ninja/compdb generation; language-owned `lib`, `app`, and `test` roots; usable sanitizer-free debug and optimized C++ profiles; checked Python, TypeScript, and browser-TypeScript lanes; runtime-closure schema and lock validation; deterministic package assembly; package smoke tests; release checks; release-note extraction; the canonical AI guide/symlink; local tests; and native x64/ARM64 live-bootstrap/build CI. Sanitizers and a custom compiler fork are not requirements of this template. Tag publication remains disabled until promoted into the workflow.

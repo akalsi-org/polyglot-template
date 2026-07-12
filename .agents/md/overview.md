@@ -7,7 +7,8 @@ This repository is a pinned, offline-after-bootstrap polyglot workspace. Use `./
 - The current CPU architecture selects the build architecture. Native artifacts use the pinned GCC+musl ABI and never cross CPU architectures.
 - `tools.lock.toml` owns tool provenance. Missing or placeholder digests fail closed.
 - `package.toml` and `package-lock.toml` own package declarations and exact runtime closure resolution.
-- `native/native.toml` owns native targets and profiles. Ninja and `compile_commands.json` are generated projections.
+- `cpp/cpp.toml` owns C++ targets and profiles. Ninja and `compile_commands.json` are generated projections.
+- Each language owns `lib/<name>/`, `app/<name>/`, and `test/`; its `lib/` directory is an import/include root.
 - Normal build, test, lint, and package operations do not fetch.
 - Build products live under `build/`, release products under `dist/`, and toolchains/caches under ignored `.local/`.
 
@@ -22,7 +23,7 @@ Run `./repo.sh help` for the canonical command list. Start with:
 ./repo.sh test
 ```
 
-`native-configure`, `native-build`, and `reflection-probe` require the pinned compiler installation and never use host `g++`. The checked-in release workflow is a preflight only while GCC/Ninja lock entries remain unresolved.
+`cpp-configure`, `cpp-build`, and `cpp-reflection-probe` require the pinned compiler installation and never use host `g++`. `python-check`, `ts-check`, and `tsweb-check` similarly use only pinned runtimes. CI performs real cached bootstrap, offline replay, deep doctor, and language-lane verification on x64 and ARM64.
 
 ## Agent Skills
 

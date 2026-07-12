@@ -94,7 +94,7 @@ install_one() {
     dumpmachine=$("$tmp/$expected" -dumpmachine)
     [[ $dumpmachine == "$target" ]] || { printf 'error: compiler target mismatch: %s\n' "$dumpmachine" >&2; return 1; }
     "$tmp/$mold" --version | grep -q '^mold 2\.41\.0' || { printf 'error: mold capability probe failed\n' >&2; return 1; }
-    probe_source="$ROOT/native/probes/reflection.cpp"
+    probe_source="$ROOT/cpp/test/reflection.cc"
     "$tmp/$expected" -std=gnu++26 -freflection -fsyntax-only "$probe_source" || {
       printf 'error: GCC C++26 reflection capability probe failed\n' >&2; return 1;
     }

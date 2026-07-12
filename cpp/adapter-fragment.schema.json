@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://example.invalid/polyglot-template/native-adapter-fragment.schema.json",
+  "$id": "https://example.invalid/polyglot-template/cpp-adapter-fragment.schema.json",
   "title": "Native dependency adapter action fragment",
   "type": "object",
   "additionalProperties": false,

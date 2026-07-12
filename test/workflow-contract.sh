@@ -17,9 +17,10 @@ doctor_line=$(grep -n './repo.sh doctor --deep$' "$workflow" | cut -d: -f1)
 ((bootstrap_line < offline_line && offline_line < doctor_line))
 
 for command in \
-  './repo.sh native-build dbg' './repo.sh native-run dbg' \
-  './repo.sh native-build opt' './repo.sh native-run opt' \
-  './repo.sh python -I -c' './repo.sh deno-check'; do
+  './repo.sh cpp-build dbg' './repo.sh cpp-run dbg' \
+  './repo.sh cpp-build opt' './repo.sh cpp-run opt' \
+  './repo.sh python -I -c' './repo.sh python-check' \
+  './repo.sh ts-check' './repo.sh tsweb-check'; do
   grep -Fq "$command" "$workflow"
 done
 

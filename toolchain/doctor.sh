@@ -37,7 +37,7 @@ while IFS= read -r tool; do
       [[ -x $install/$mold ]] || { printf 'invalid: missing mold\n'; failed=1; continue; }
       [[ $("$install/$expected" -dumpmachine) == "$target" ]] || { printf 'invalid: compiler target mismatch\n'; failed=1; continue; }
       "$install/$mold" --version | grep -q '^mold 2\.41\.0'
-      "$install/$expected" -std=gnu++26 -freflection -fsyntax-only "$ROOT/native/probes/reflection.cpp"
+      "$install/$expected" -std=gnu++26 -freflection -fsyntax-only "$ROOT/cpp/test/reflection.cc"
     elif [[ $tool == deno ]]; then
       [[ $("$install/$expected" --version | awk 'NR == 1 { print $2 }') == "$version" ]] || {
         printf 'invalid: Deno version mismatch\n'; failed=1; continue;

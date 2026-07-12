@@ -1,16 +1,21 @@
 {
   "lock": true,
+  "imports": {
+    "greeting/": "./ts/lib/greeting/",
+    "title/": "./tsweb/lib/title/"
+  },
   "compilerOptions": {
     "strict": true,
-    "noUncheckedIndexedAccess": true
+    "noUncheckedIndexedAccess": true,
+    "lib": ["deno.ns", "dom", "dom.iterable", "esnext"]
   },
   "fmt": {
-    "include": ["deno/"]
+    "include": ["ts/", "tsweb/"]
   },
   "lint": {
-    "include": ["deno/"]
+    "include": ["ts/", "tsweb/"]
   },
   "test": {
-    "include": ["deno/"]
+    "include": ["ts/test/", "tsweb/test/"]
   }
 }
