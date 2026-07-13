@@ -58,6 +58,16 @@ jobs:
             node_modules
           key: polyglot-deno-v1-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('tools.lock.toml', 'deno.lock') }}
 
+      - name: Restore exact Moon task cache
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            .moon/cache
+            .local/cache/moon
+            .local/cache/proto
+            .local/cache/xdg
+          key: polyglot-moon-v1-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('tools.lock.toml', 'moon.yml', '.moon/**') }}
+
       - name: Bootstrap and validate pinned tools
         run: |
           ./repo.sh bootstrap

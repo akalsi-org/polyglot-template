@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import tomllib
 import sys
 import tempfile
 import unittest
@@ -33,6 +34,19 @@ class CppGraphTest(unittest.TestCase):
     self.assertTrue(all("-fno-omit-frame-pointer" not in row["arguments"] for row in opt))
     self.assertTrue(all("-fhardened" not in row["arguments"] for row in dbg + opt))
     self.assertTrue(all("-ftrivial-auto-var-init=zero" not in row["arguments"] for row in dbg + opt))
+
+  def test_component_manifests_own_targets(self):
+    with (ROOT / "cpp/cpp.toml").open("rb") as stream:
+      policy = tomllib.load(stream)
+    self.assertNotIn("targets", policy)
+    self.assertNotIn("tests", policy)
+    data = cpp_graph.load_manifest(ROOT / "cpp/cpp.toml")
+    self.assertEqual([item["name"] for item in data["targets"]], ["hello"])
+    self.assertEqual(
+      sorted(item["name"] for item in data["tests"]),
+      ["example_edge_test", "example_test"],
+    )
+    self.assertEqual(data["targets"][0]["sources"], ["app/hello/main.cc"])
 
   def test_third_party_is_in_canonical_compdb_by_default(self):
     output = self.configure("dbg")

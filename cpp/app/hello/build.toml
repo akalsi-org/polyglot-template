@@ -1,0 +1,6 @@
+[[targets]]
+name = "hello"
+type = "executable"
+sources = ["main.cc"]
+include_dirs = ["//lib"]
+adapter_dependencies = ["example-vendor"]

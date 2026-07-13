@@ -1,0 +1,15 @@
+[test_framework]
+include_dir = "@PINNED_DOCTEST_INCLUDE@"
+runner_source = "doctest_runner.cc"
+
+[[tests]]
+name = "example_test"
+sources = ["example_test.cc"]
+include_dirs = ["//lib"]
+adapter_dependencies = ["example-vendor"]
+
+[[tests]]
+name = "example_edge_test"
+sources = ["example_edge_test.cc"]
+include_dirs = ["//lib"]
+adapter_dependencies = ["example-vendor"]

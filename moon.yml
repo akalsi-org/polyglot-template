@@ -1,0 +1,250 @@
+language: "unknown"
+
+tasks:
+  infra-lint:
+    command: "./repo.sh infra-lint"
+    inputs:
+      - "**/*.py"
+      - "**/*.toml"
+      - "**/*.json"
+      - "**/*.sh"
+      - ".vscode/go"
+      - "repo.sh"
+
+  ts-lint:
+    command: "./repo.sh ts-lint"
+    inputs:
+      - "ts/**/*"
+      - "deno.json"
+      - "deno.lock"
+      - "tools.lock.toml"
+      - "repo.sh"
+
+  tsweb-lint:
+    command: "./repo.sh tsweb-lint"
+    inputs:
+      - "tsweb/**/*"
+      - "deno.json"
+      - "deno.lock"
+      - "tools.lock.toml"
+      - "repo.sh"
+
+  go-lint:
+    command: "./repo.sh go-lint"
+    inputs:
+      - "go/**/*"
+      - "go.mod"
+      - "tools.lock.toml"
+      - "repo.sh"
+
+  lint:
+    command: "true"
+    deps:
+      - "~:infra-lint"
+      - "~:ts-lint"
+      - "~:tsweb-lint"
+      - "~:go-lint"
+    inputs:
+      - "moon.yml"
+    options:
+      cache: false
+
+  cpp-build:
+    command: "./repo.sh cpp-build"
+    inputs:
+      - "cpp/**/*"
+      - "tools/cpp_graph.py"
+      - "tools/compdb.py"
+      - "toolchain/**/*"
+      - "tools.lock.toml"
+      - "repo.sh"
+      - "$POLYGLOT_CPP_PROFILE"
+    env:
+      POLYGLOT_DEFER_COMPDB: "1"
+    outputs:
+      - "build/cpp"
+    options:
+      cache: false
+
+  python-build:
+    command: "./repo.sh python-build"
+    inputs:
+      - "python/**/*"
+      - "tools/python_build.py"
+      - "tools/compdb.py"
+      - "toolchain/**/*"
+      - "tools.lock.toml"
+      - "repo.sh"
+    env:
+      POLYGLOT_DEFER_COMPDB: "1"
+    outputs:
+      - "build/python"
+    options:
+      cache: false
+
+  ts-build:
+    command: "./repo.sh ts-build"
+    inputs:
+      - "ts/**/*"
+      - "deno.json"
+      - "deno.lock"
+      - "tools.lock.toml"
+      - "repo.sh"
+
+  go-build:
+    command: "./repo.sh go-build"
+    inputs:
+      - "go/**/*"
+      - "go.mod"
+      - "tools.lock.toml"
+      - "repo.sh"
+    outputs:
+      - "build/go"
+
+  tsweb-build:
+    command: "./repo.sh tsweb-build"
+    inputs:
+      - "tsweb/**/*"
+      - "deno.json"
+      - "deno.lock"
+      - "tools/tsweb_smoke.py"
+      - "tools.lock.toml"
+      - "repo.sh"
+    outputs:
+      - "build/tsweb"
+
+  compile-commands:
+    command: "./repo.sh compile-commands"
+    deps:
+      - "~:cpp-build"
+      - "~:python-build"
+    inputs:
+      - "tools/compdb.py"
+      - "$POLYGLOT_CPP_PROFILE"
+    outputs:
+      - "compile_commands.json"
+    options:
+      cache: false
+
+  build:
+    command: "true"
+    deps:
+      - "~:compile-commands"
+      - "~:ts-build"
+      - "~:go-build"
+      - "~:tsweb-build"
+    options:
+      cache: false
+    inputs:
+      - "moon.yml"
+
+  infra-test:
+    command: "./repo.sh infra-test"
+    inputs:
+      - "test/**/*"
+      - "tools/**/*"
+      - "package.toml"
+      - "runtime-resolution.lock.toml"
+      - "tools.lock.toml"
+      - "repo.sh"
+
+  cpp-test:
+    command: "./repo.sh cpp-test"
+    deps:
+      - "~:cpp-build"
+    inputs:
+      - "cpp/**/*"
+      - "tools/cpp_graph.py"
+      - "tools.lock.toml"
+      - "repo.sh"
+    env:
+      POLYGLOT_DEFER_COMPDB: "1"
+      POLYGLOT_SKIP_BUILD: "1"
+
+  python-test:
+    command: "./repo.sh python-test"
+    deps:
+      - "~:python-build"
+    inputs:
+      - "python/**/*"
+      - "tools/python_build.py"
+      - "tools.lock.toml"
+      - "repo.sh"
+    env:
+      POLYGLOT_DEFER_COMPDB: "1"
+      POLYGLOT_SKIP_BUILD: "1"
+
+  ts-test:
+    command: "./repo.sh ts-test"
+    deps:
+      - "~:ts-build"
+    inputs:
+      - "ts/**/*"
+      - "deno.json"
+      - "deno.lock"
+      - "tools.lock.toml"
+      - "repo.sh"
+    env:
+      POLYGLOT_SKIP_BUILD: "1"
+
+  go-test:
+    command: "./repo.sh go-test"
+    deps:
+      - "~:go-build"
+    inputs:
+      - "go/**/*"
+      - "go.mod"
+      - "tools.lock.toml"
+      - "repo.sh"
+    env:
+      POLYGLOT_SKIP_BUILD: "1"
+
+  tsweb-test:
+    command: "./repo.sh tsweb-test"
+    deps:
+      - "~:tsweb-build"
+    inputs:
+      - "tsweb/**/*"
+      - "tools/tsweb_smoke.py"
+      - "deno.json"
+      - "deno.lock"
+      - "tools.lock.toml"
+      - "repo.sh"
+    env:
+      POLYGLOT_SKIP_BUILD: "1"
+
+  test:
+    command: "true"
+    deps:
+      - "~:infra-test"
+      - "~:compile-commands"
+      - "~:cpp-test"
+      - "~:python-test"
+      - "~:ts-test"
+      - "~:go-test"
+      - "~:tsweb-test"
+    options:
+      cache: false
+    inputs:
+      - "moon.yml"
+
+  package-validate:
+    command: "./repo.sh package-validate"
+    inputs:
+      - "package.toml"
+      - "runtime-resolution.lock.toml"
+      - "tools.lock.toml"
+      - "tools/package_model.py"
+      - "repo.sh"
+
+  ci:
+    command: "true"
+    deps:
+      - "~:lint"
+      - "~:package-validate"
+      - "~:build"
+      - "~:test"
+    inputs:
+      - "moon.yml"
+    options:
+      cache: false

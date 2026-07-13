@@ -66,23 +66,17 @@ def main() -> None:
   ]
   subprocess.run(command, check=True, cwd=root)
   fragment = root / f"build/python/{args.target}/compile_commands.json"
-  fragment.write_text(
-    json.dumps(
-      [
-        {
-          "arguments": command,
-          "directory": str(root),
-          "file": str(source),
-          "output": str(output),
-        }
-      ],
-      indent=2,
-      sort_keys=True,
-    )
-    + "\n",
-    encoding="utf-8",
+  compdb.atomic_write(
+    fragment,
+    [
+      {
+        "arguments": command,
+        "directory": str(root),
+        "file": str(source),
+        "output": str(output),
+      }
+    ],
   )
-  compdb.update(root, fragment, "python")
   print(output)
 
 

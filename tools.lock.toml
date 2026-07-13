@@ -116,3 +116,21 @@ sha256 = "174ebc4e769928959614789c5b4e9c3d0a0f81a62bb608756b127bfebfb21331"
 archive = "doctest-v2.5.3.tar.gz"
 expected = "doctest-2.5.3/doctest/doctest.h"
 kind = "header"
+
+[[artifact]]
+tool = "moon"
+target = "x86_64-linux-musl"
+version = "2.4.3"
+url = "https://github.com/moonrepo/moon/releases/download/v2.4.3/moon_cli-x86_64-unknown-linux-musl.tar.xz"
+sha256 = "7401f2fed531fcb034d1f7b6f436bcd10611b84091ff43ffbf5b201d0053fa18"
+archive = "moon_cli-x86_64-unknown-linux-musl.tar.xz"
+expected = "moon_cli-x86_64-unknown-linux-musl/moon"
+
+[[artifact]]
+tool = "moon"
+target = "aarch64-linux-musl"
+version = "2.4.3"
+url = "https://github.com/moonrepo/moon/releases/download/v2.4.3/moon_cli-aarch64-unknown-linux-musl.tar.xz"
+sha256 = "2d6e6cdc3d3258c029e705c4bb63e2700434845d0558d4a01402273035f032cd"
+archive = "moon_cli-aarch64-unknown-linux-musl.tar.xz"
+expected = "moon_cli-aarch64-unknown-linux-musl/moon"

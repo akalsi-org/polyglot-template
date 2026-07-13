@@ -129,7 +129,7 @@ The pinned native lane uses `-std=gnu++26`. Doctor probes every required languag
 ## C++ Build Graph
 
 ```text
-cpp/cpp.toml
+cpp/cpp.toml + cpp/**/build.toml
   -> parser + validator
   -> resolved compile-action IR
       -> build/cpp/<arch>/<profile>/build.ninja
@@ -146,6 +146,11 @@ python/lib/*/*.{c,cc}
 ```
 
 Every command that may compile C or C++ refreshes its language-owned compilation-database fragment and merges that ownership slice into the root database. Native C++ actions come from the same objects that generate Ninja; Python extension actions are captured from the exact command executed against the pinned interpreter ABI. A successful build with a stale or incomplete database is a build-system defect.
+
+The root C++ manifest owns toolchain and profile policy only. Component-local
+`build.toml` files own targets, tests, and adapters; local paths resolve from the
+component directory and `//` paths resolve from `cpp/`. Discovery produces one
+validated action graph, avoiding a global target-manifest edit bottleneck.
 
 C++ unit tests use pinned doctest as a header artifact. One runner translation unit defines doctest's implementation and `main`, producing one object per target/profile. Every declared test executable links that shared object with its own test translation units and dependencies; the generated test inventory drives `cpp-test`, so adding a test target does not require shell orchestration changes.
 

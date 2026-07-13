@@ -27,31 +27,3 @@ compile_flags = [
   "-Werror=maybe-uninitialized",
 ]
 link_flags = ["-fuse-ld=mold"]
-
-[test_framework]
-include_dir = "@PINNED_DOCTEST_INCLUDE@"
-runner_source = "test/doctest_runner.cc"
-
-[[targets]]
-name = "hello"
-type = "executable"
-sources = ["app/hello/main.cc"]
-include_dirs = ["lib"]
-adapter_dependencies = ["example-vendor"]
-
-[[adapters]]
-name = "example-vendor"
-fragment = "adapters/example-vendor.json"
-include_in_compdb = true
-
-[[tests]]
-name = "example_test"
-sources = ["test/example_test.cc"]
-include_dirs = ["lib"]
-adapter_dependencies = ["example-vendor"]
-
-[[tests]]
-name = "example_edge_test"
-sources = ["test/example_edge_test.cc"]
-include_dirs = ["lib"]
-adapter_dependencies = ["example-vendor"]

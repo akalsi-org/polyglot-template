@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shlex
 import tomllib
 from dataclasses import dataclass
@@ -58,6 +59,45 @@ def load_manifest(path: Path) -> dict[str, Any]:
     data = tomllib.load(stream)
   if not isinstance(data.get("toolchain"), dict):
     fail("cpp.toml requires [toolchain]")
+  cpp_root = path.parent
+  for fragment_path in sorted(cpp_root.rglob("build.toml")):
+    with fragment_path.open("rb") as stream:
+      fragment = tomllib.load(stream)
+    unknown = set(fragment) - {"targets", "adapters", "tests", "test_framework"}
+    if unknown:
+      fail(f"{fragment_path.relative_to(cpp_root)} has unknown sections: {', '.join(sorted(unknown))}")
+    base = fragment_path.parent.relative_to(cpp_root)
+
+    def component_path(value: str, field: str) -> str:
+      if value.startswith("//"):
+        return relpath(value[2:], field=field)
+      return relpath((base / relpath(value, field=field)).as_posix(), field=field)
+
+    for key in ("targets", "tests"):
+      for declaration in fragment.get(key, []):
+        name = declaration.get("name", "")
+        declaration["sources"] = [
+          component_path(item, f"{key}.{name}.sources")
+          for item in string_list(declaration.get("sources", []), field=f"{key}.{name}.sources")
+        ]
+        declaration["include_dirs"] = [
+          component_path(item, f"{key}.{name}.include_dirs")
+          for item in string_list(declaration.get("include_dirs", []), field=f"{key}.{name}.include_dirs")
+        ]
+      data.setdefault(key, []).extend(fragment.get(key, []))
+    for declaration in fragment.get("adapters", []):
+      declaration["fragment"] = component_path(
+        declaration.get("fragment", ""), f"adapter {declaration.get('name', '')} fragment"
+      )
+    data.setdefault("adapters", []).extend(fragment.get("adapters", []))
+    if "test_framework" in fragment:
+      if "test_framework" in data:
+        fail("test_framework must be declared exactly once")
+      framework = fragment["test_framework"]
+      framework["runner_source"] = component_path(
+        framework.get("runner_source", ""), "test_framework.runner_source"
+      )
+      data["test_framework"] = framework
   return data
 
 
@@ -202,7 +242,9 @@ def ninja_text(actions: list[Action], links: dict[str, list[str]], linker: list[
 def write_if_changed(path: Path, content: str) -> None:
   path.parent.mkdir(parents=True, exist_ok=True)
   if not path.exists() or path.read_text() != content:
-    path.write_text(content)
+    temporary = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+    temporary.write_text(content)
+    os.replace(temporary, path)
 
 
 def configure(root: Path, manifest: Path, profile: str, output: Path, cxx: str | None = None, doctest_include: str | None = None) -> None:

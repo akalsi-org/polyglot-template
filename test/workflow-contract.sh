@@ -13,6 +13,8 @@ grep -Fq 'polyglot-tools-v1-${{ runner.os }}-${{ matrix.target }}-' "$workflow"
 grep -Fq "hashFiles('tools.lock.toml', 'toolchain/**')" "$workflow"
 grep -Fq 'polyglot-deno-v1-${{ runner.os }}-${{ matrix.target }}-' "$workflow"
 grep -Fq "hashFiles('tools.lock.toml', 'deno.lock')" "$workflow"
+grep -Fq 'polyglot-moon-v1-${{ runner.os }}-${{ matrix.target }}-' "$workflow"
+grep -Fq "hashFiles('tools.lock.toml', 'moon.yml', '.moon/**')" "$workflow"
 grep -Fq '            node_modules' "$workflow"
 ! grep -q 'restore-keys:' "$workflow"
 grep -Fq 'tags: ["packages/*/v*"]' "$workflow"
@@ -37,6 +39,11 @@ for command in build test cpp-test python-test ts-test go-test tsweb-test; do
 done
 for removed in python-check ts-check go-check tsweb-check; do
   ! grep -Eq "^  ${removed}( |$)" <<<"$help"
+done
+
+grep -Fq 'repo: "."' "$root/.moon/workspace.yml"
+for task in cpp-build python-build ts-build go-build tsweb-build compile-commands build test; do
+  grep -Eq "^  ${task}:$" "$root/moon.yml"
 done
 
 printf 'workflow contract: ok\n'

@@ -15,6 +15,30 @@ tool_path() {
   printf '%s/toolchain/%s/%s-%s/%s\n' "$POLYGLOT_LOCAL_DIR" "$target" "$tool" "$version" "$expected"
 }
 
+host_jobs() {
+  local jobs=${POLYGLOT_JOBS:-}
+  if [[ -z $jobs ]]; then jobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf '1\n'); fi
+  [[ $jobs =~ ^[1-9][0-9]*$ ]] || { printf 'error: POLYGLOT_JOBS must be a positive integer\n' >&2; return 2; }
+  printf '%s\n' "$jobs"
+}
+
+run_moon() {
+  local target=$1 jobs lanes inner moon
+  jobs=$(host_jobs)
+  lanes=$jobs
+  ((lanes <= 5)) || lanes=5
+  inner=$((jobs / lanes))
+  ((inner >= 1)) || inner=1
+  export POLYGLOT_INNER_JOBS=$inner
+  export MOON_TOOLCHAIN_FORCE_GLOBALS=true
+  export MOON_HOME="$POLYGLOT_LOCAL_DIR/cache/moon/home"
+  export PROTO_HOME="$POLYGLOT_LOCAL_DIR/cache/proto"
+  export XDG_CACHE_HOME="$POLYGLOT_LOCAL_DIR/cache/xdg"
+  moon=$(tool_path moon)
+  [[ -x $moon ]] || { printf 'error: pinned Moon is not installed; run ./repo.sh bootstrap\n' >&2; return 1; }
+  "$moon" run --concurrency "$lanes" --summary detailed "repo:$target"
+}
+
 usage() {
   cat <<'EOF'
 Usage: ./repo.sh <command> [options]
@@ -28,6 +52,7 @@ Commands:
   lint                         Check formatting and static policy in every lane.
   build [dbg|opt]              Build every language target (C++ defaults to dbg).
   test                         Test every language target and repository contract.
+  compile-commands [dbg|opt]   Merge language-owned compile database fragments.
   cpp-configure [dbg|opt]      Generate Ninja and compile_commands.json.
   cpp-build [dbg|opt]          Build with the pinned repo-local GCC and Ninja.
   cpp-run [dbg|opt]            Run the C++ app through the pinned musl loader.
@@ -66,10 +91,21 @@ case "$command" in
   bootstrap) "$ROOT/toolchain/bootstrap.sh" "$@" ;;
   doctor) "$ROOT/toolchain/doctor.sh" "$@" ;;
   lint)
+    run_moon lint
+    ;;
+  infra-lint)
     bash -n "$ROOT/repo.sh" "$ROOT"/.vscode/go "$ROOT"/toolchain/*.sh "$ROOT"/test/*.sh
     python3 "$ROOT/tools/lint.py"
-    "$ROOT/repo.sh" deno fmt --check ts/ tsweb/
-    "$ROOT/repo.sh" deno lint ts/ tsweb/
+    ;;
+  ts-lint)
+    "$ROOT/repo.sh" deno fmt --check ts/
+    "$ROOT/repo.sh" deno lint ts/
+    ;;
+  tsweb-lint)
+    "$ROOT/repo.sh" deno fmt --check tsweb/
+    "$ROOT/repo.sh" deno lint tsweb/
+    ;;
+  go-lint)
     go_bin=$(tool_path go)
     go_root=$(dirname -- "$(dirname -- "$go_bin")")
     unformatted=$("$go_root/bin/gofmt" -l "$ROOT/go")
@@ -79,11 +115,21 @@ case "$command" in
   build)
     profile=${1:-dbg}
     (($# <= 1)) || { printf 'usage: ./repo.sh build [dbg|opt]\n' >&2; exit 2; }
-    "$ROOT/repo.sh" cpp-build "$profile"
-    "$ROOT/repo.sh" python-build
-    "$ROOT/repo.sh" ts-build
-    "$ROOT/repo.sh" go-build
-    "$ROOT/repo.sh" tsweb-build
+    [[ $profile == dbg || $profile == opt ]] || { printf 'error: profile must be dbg or opt\n' >&2; exit 2; }
+    export POLYGLOT_CPP_PROFILE=$profile
+    run_moon build
+    ;;
+  compile-commands)
+    profile=${1:-${POLYGLOT_CPP_PROFILE:-dbg}}
+    [[ $profile == dbg || $profile == opt ]] || { printf 'error: profile must be dbg or opt\n' >&2; exit 2; }
+    target=$("$ROOT/toolchain/target.sh")
+    fragments=()
+    cpp_fragment="$ROOT/build/cpp/$target/$profile/compile_commands.json"
+    python_fragment="$ROOT/build/python/$target/compile_commands.json"
+    [[ ! -f $cpp_fragment ]] || fragments+=(--fragment "$cpp_fragment")
+    [[ ! -f $python_fragment ]] || fragments+=(--fragment "$python_fragment")
+    ((${#fragments[@]})) || { printf 'error: no compile database fragments; run ./repo.sh build\n' >&2; exit 1; }
+    python3 "$ROOT/tools/compdb.py" --root "$ROOT" "${fragments[@]}"
     ;;
   cpp-configure)
     profile=${1:-dbg}
@@ -97,19 +143,17 @@ case "$command" in
     python3 "$ROOT/tools/cpp_graph.py" configure --root "$ROOT" --profile "$profile" \
       --output "$ROOT/build/cpp/$target/$profile" --cxx "$cxx" \
       --doctest-include "$doctest_include"
-    python3 "$ROOT/tools/compdb.py" --root "$ROOT" \
-      --fragment "$ROOT/build/cpp/$target/$profile/compile_commands.json" \
-      --replace-prefix cpp
     ;;
   cpp-build)
-    profile=${1:-dbg}
+    profile=${1:-${POLYGLOT_CPP_PROFILE:-dbg}}
     "$ROOT/repo.sh" cpp-configure "$profile"
     target=$("$ROOT/toolchain/target.sh")
     ninja=$(tool_path ninja)
     [[ -x $ninja ]] || { printf 'error: pinned Ninja is not installed; run ./repo.sh bootstrap\n' >&2; exit 1; }
     cxx=$(tool_path gcc-musl)
     (cd "$ROOT" && "$cxx" -std=gnu++26 -freflection -fsyntax-only cpp/test/reflection.cc)
-    (cd "$ROOT" && "$ninja" -f "build/cpp/$target/$profile/build.ninja")
+    (cd "$ROOT" && "$ninja" -j "${POLYGLOT_INNER_JOBS:-$(host_jobs)}" -f "build/cpp/$target/$profile/build.ninja")
+    [[ ${POLYGLOT_DEFER_COMPDB:-0} == 1 ]] || "$ROOT/repo.sh" compile-commands "$profile"
     ;;
   cpp-run)
     profile=${1:-dbg}
@@ -126,7 +170,7 @@ case "$command" in
     "$install/$loader" --library-path "$loader_dir" "$binary"
     ;;
   cpp-test)
-    "$ROOT/repo.sh" cpp-build dbg
+    [[ ${POLYGLOT_SKIP_BUILD:-0} == 1 ]] || "$ROOT/repo.sh" cpp-build dbg
     python3 -m unittest discover -s "$ROOT/cpp/test" -p 'test_*.py'
     target=$("$ROOT/toolchain/target.sh")
     export POLYGLOT_LOCK_FILE=${POLYGLOT_LOCK_FILE:-$ROOT/tools.lock.toml}
@@ -135,10 +179,9 @@ case "$command" in
     loader=$(lock_value gcc-musl "$target" loader)
     install="$POLYGLOT_LOCAL_DIR/toolchain/$target/gcc-musl-$version"
     loader_dir=$(dirname -- "$install/$loader")
-    while IFS= read -r test_binary; do
-      "$install/$loader" --library-path "$loader_dir" "$ROOT/$test_binary"
-    done < <(python3 -c 'import json,sys; print(*json.load(open(sys.argv[1]))["tests"], sep="\n")' \
-      "$ROOT/build/cpp/$target/dbg/cpp-tests.json")
+    python3 -c 'import json,sys; print(*json.load(open(sys.argv[1]))["tests"], sep="\n")' \
+      "$ROOT/build/cpp/$target/dbg/cpp-tests.json" | \
+      xargs -r -n1 -P "${POLYGLOT_INNER_JOBS:-$(host_jobs)}" "$install/$loader" --library-path "$loader_dir"
     "$ROOT/repo.sh" cpp-run dbg
     ;;
   python)
@@ -162,9 +205,10 @@ case "$command" in
     cxx=$(tool_path gcc-musl)
     [[ -x $cxx ]] || { printf 'error: pinned compiler is not installed; run ./repo.sh bootstrap\n' >&2; exit 1; }
     python3 "$ROOT/tools/python_build.py" --root "$ROOT" --target "$target" --cxx "$cxx"
+    [[ ${POLYGLOT_DEFER_COMPDB:-0} == 1 ]] || "$ROOT/repo.sh" compile-commands "${POLYGLOT_CPP_PROFILE:-dbg}"
     ;;
   python-test)
-    "$ROOT/repo.sh" python-build
+    [[ ${POLYGLOT_SKIP_BUILD:-0} == 1 ]] || "$ROOT/repo.sh" python-build
     "$ROOT/repo.sh" python -m compileall -q python/lib python/app python/test
     "$ROOT/repo.sh" python -m unittest discover -s python/test -p 'test_*.py'
     "$ROOT/repo.sh" python python/app/hello/main.py
@@ -179,12 +223,12 @@ case "$command" in
     "$ROOT/repo.sh" deno check --frozen ts/app/hello/main.ts
     ;;
   ts-test)
-    "$ROOT/repo.sh" ts-build
+    [[ ${POLYGLOT_SKIP_BUILD:-0} == 1 ]] || "$ROOT/repo.sh" ts-build
     "$ROOT/repo.sh" deno test --frozen ts/test/
     "$ROOT/repo.sh" deno run --cached-only --frozen ts/app/hello/main.ts
     ;;
   tsweb-test)
-    "$ROOT/repo.sh" tsweb-build
+    [[ ${POLYGLOT_SKIP_BUILD:-0} == 1 ]] || "$ROOT/repo.sh" tsweb-build
     "$ROOT/repo.sh" deno test --frozen --allow-env=NODE_ENV tsweb/test/
     python3 "$ROOT/tools/tsweb_smoke.py" --root "$ROOT/build/tsweb/site"
     ;;
@@ -206,6 +250,7 @@ case "$command" in
     export GOTOOLCHAIN=local
     export CGO_ENABLED=0
     export GOEXPERIMENT=jsonv2
+    export GOFLAGS="-p=${POLYGLOT_INNER_JOBS:-$(host_jobs)}"
     export PATH="$GOROOT/bin:$PATH"
     exec "$GOROOT/bin/go" "$@"
     ;;
@@ -217,7 +262,7 @@ case "$command" in
   go-test)
     "$ROOT/repo.sh" go mod verify
     "$ROOT/repo.sh" go test ./go/...
-    "$ROOT/repo.sh" go-build
+    [[ ${POLYGLOT_SKIP_BUILD:-0} == 1 ]] || "$ROOT/repo.sh" go-build
     target=$("$ROOT/toolchain/target.sh")
     "$ROOT/build/go/$target/hello"
     ;;
@@ -242,6 +287,7 @@ case "$command" in
     profile=${2:-opt}
     [[ $profile == dbg || $profile == opt ]] || { printf 'error: profile must be dbg or opt\n' >&2; exit 2; }
     if [[ $1 == polyglot-demo ]]; then
+      export POLYGLOT_CPP_PROFILE=$profile
       "$ROOT/repo.sh" cpp-build "$profile"
       "$ROOT/repo.sh" python-build
       "$ROOT/repo.sh" go-build
@@ -275,24 +321,20 @@ case "$command" in
       --lock "$ROOT/runtime-resolution.lock.toml" --tools-lock "$ROOT/tools.lock.toml" \
       --dist-dir "$ROOT/dist" --changelog "$ROOT/CHANGELOG.md" release-notes --tag "$1"
     ;;
-  test)
+  infra-test)
     bash "$ROOT/test/bootstrap-smoke.sh"
     bash "$ROOT/test/workflow-contract.sh"
     python3 "$ROOT/test/editor-contract.py"
     python3 -m unittest discover -s "$ROOT/test" -p 'test_*.py'
     bash "$ROOT/test/test-package-model.sh"
     bash "$ROOT/test/test-package-release.sh"
-    "$ROOT/repo.sh" cpp-test
-    "$ROOT/repo.sh" python-test
-    "$ROOT/repo.sh" ts-test
-    "$ROOT/repo.sh" go-test
-    "$ROOT/repo.sh" tsweb-test
+    ;;
+  test)
+    (($# == 0)) || { printf 'usage: ./repo.sh test\n' >&2; exit 2; }
+    run_moon test
     ;;
   ci)
-    "$ROOT/repo.sh" lint
-    "$ROOT/repo.sh" package-validate
-    "$ROOT/repo.sh" build
-    "$ROOT/repo.sh" test
+    run_moon ci
     ;;
   *) printf 'error: unknown command: %s\n' "$command" >&2; usage >&2; exit 2 ;;
 esac
