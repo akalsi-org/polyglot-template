@@ -65,7 +65,11 @@ jobs:
           ./repo.sh doctor --deep
 
       - name: Run repository quality gates
-        run: ./repo.sh ci
+        run: |
+          ./repo.sh lint
+          ./repo.sh package-validate
+          ./repo.sh build
+          ./repo.sh test
 
       - name: Build and run C++ profiles
         run: |
@@ -75,17 +79,7 @@ jobs:
           ./repo.sh cpp-run opt
 
       - name: Exercise pinned Python runtime
-        run: |
-          ./repo.sh python -I -c 'import ctypes, hashlib, sqlite3, ssl, sys, zlib; print(sys.version)'
-          ./repo.sh python-check
-
-      - name: Check pinned Go lane
-        run: ./repo.sh go-check
-
-      - name: Check pinned TypeScript lanes
-        run: |
-          ./repo.sh ts-check
-          ./repo.sh tsweb-check
+        run: ./repo.sh python -I -c 'import ctypes, hashlib, sqlite3, ssl, sys, zlib; print(sys.version)'
 
       - name: Resolve tagged package
         if: startsWith(github.ref, 'refs/tags/packages/')

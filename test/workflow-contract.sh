@@ -24,11 +24,19 @@ doctor_line=$(grep -n './repo.sh doctor --deep$' "$workflow" | cut -d: -f1)
 ((bootstrap_line < offline_line && offline_line < doctor_line))
 
 for command in \
+  './repo.sh lint' './repo.sh package-validate' './repo.sh build' './repo.sh test' \
   './repo.sh cpp-build dbg' './repo.sh cpp-run dbg' \
   './repo.sh cpp-build opt' './repo.sh cpp-run opt' \
-  './repo.sh python -I -c' './repo.sh python-check' \
-  './repo.sh ts-check' './repo.sh tsweb-check' './repo.sh go-check'; do
+  './repo.sh python -I -c'; do
   grep -Fq "$command" "$workflow"
+done
+
+help=$($root/repo.sh help)
+for command in build test cpp-test python-test ts-test go-test tsweb-test; do
+  grep -Eq "^  ${command}( |$)" <<<"$help"
+done
+for removed in python-check ts-check go-check tsweb-check; do
+  ! grep -Eq "^  ${removed}( |$)" <<<"$help"
 done
 
 printf 'workflow contract: ok\n'

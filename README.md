@@ -7,6 +7,7 @@ Editors use two-space indentation across the repository. Go source remains `gofm
 ```bash
 ./repo.sh help
 ./repo.sh lint
+./repo.sh build
 ./repo.sh test
 ```
 
@@ -28,4 +29,4 @@ The checked-in GitHub workflow performs a real native bootstrap on x64 and ARM64
 
 `polyglot-demo` is the complete consumer proof: one 33 MB compressed target archive contains the C++ executable and musl loader, static Go executable, Python application/native extension and exactly one CPython runtime, plus the React static bundle. Its package smoke runs every executable and validates every referenced web asset from an isolated extraction without host Python, Deno, Go, compiler, or source-tree state.
 
-Implemented commands include target detection, transactional bootstrap, doctor, check-only linting, deterministic C++ configuration with a refreshed root compilation-database link, pinned `cpp-*`, `python-*`, `ts-*`, and `tsweb-*` checks, reflection-probe generation, package/runtime model validation, exact closure resolution, deterministic package assembly, package smoke tests, release checks, release-note extraction, tests, and aggregate CI.
+The command surface is uniform across lanes: `cpp-build`/`cpp-test`, `python-build`/`python-test`, `ts-build`/`ts-test`, `go-build`/`go-test`, and `tsweb-build`/`tsweb-test`. Aggregate `build` and `test` compose those leaf commands; `lint` owns formatting and static policy for every language. Other implemented commands cover target detection, transactional bootstrap, doctor, deterministic C++ configuration and compilation-database refresh, reflection probing, package/runtime validation, exact closure resolution, deterministic package assembly, package smoke, release checks, release-note extraction, and aggregate CI.

@@ -25,20 +25,24 @@ Commands:
   bootstrap [--offline] [--dry-run]
                                Install the locked repo-local toolchain.
   doctor [--deep]              Validate target and installed tools.
-  lint                         Check shell, Python, TOML, and JSON sources.
+  lint                         Check formatting and static policy in every lane.
+  build [dbg|opt]              Build every language target (C++ defaults to dbg).
+  test                         Test every language target and repository contract.
   cpp-configure [dbg|opt]      Generate Ninja and compile_commands.json.
   cpp-build [dbg|opt]          Build with the pinned repo-local GCC and Ninja.
   cpp-run [dbg|opt]            Run the C++ app through the pinned musl loader.
-  cpp-test                     Test the C++ build graph and policy.
+  cpp-test                     Build, run, and test the C++ lane.
   python [args...]             Run the pinned Python through the pinned musl loader.
   python-build                 Build the pinned-ABI C++ extension.
-  python-check                 Compile and test the Python lane.
+  python-test                  Build and test the Python lane.
   deno [args...]               Run the pinned Deno binary.
-  ts-check                     Check, lint, and test local TypeScript.
-  tsweb-check                  Check, lint, and test browser TypeScript.
+  ts-build                     Type-check TypeScript against the frozen graph.
+  ts-test                      Build and test local TypeScript.
   tsweb-build                  Build the React 19 static application.
+  tsweb-test                   Build and test browser TypeScript.
   go [args...]                 Run pinned Go with isolated repository caches.
-  go-check                     Format, vet, test, build, and run the Go lane.
+  go-build                     Build the Go application.
+  go-test                      Build, run, and test the Go lane.
   cpp-reflection-probe         Print the pinned GCC reflection probe command.
   package-validate             Validate package and runtime closure metadata.
   package-resolve <name> [out] Resolve an exact native-target package closure.
@@ -47,8 +51,7 @@ Commands:
                                Verify a packaged artifact and exact runtime closure.
   release-check <name> <tag>   Check package tag, changelog, archive, and smoke test.
   release-notes <tag>          Print release notes for an exact changelog tag.
-  test                         Run repository infrastructure and C++ graph tests.
-  ci                           Run the complete pre-bootstrap validation slice.
+  ci                           Run lint, package validation, build, and test.
 
 Bootstrap is the only command allowed to fetch toolchain artifacts. Builds must
 use tools beneath .local/toolchain and never fall back to host compilers.
@@ -65,6 +68,22 @@ case "$command" in
   lint)
     bash -n "$ROOT/repo.sh" "$ROOT"/.vscode/go "$ROOT"/toolchain/*.sh "$ROOT"/test/*.sh
     python3 "$ROOT/tools/lint.py"
+    "$ROOT/repo.sh" deno fmt --check ts/ tsweb/
+    "$ROOT/repo.sh" deno lint ts/ tsweb/
+    go_bin=$(tool_path go)
+    go_root=$(dirname -- "$(dirname -- "$go_bin")")
+    unformatted=$("$go_root/bin/gofmt" -l "$ROOT/go")
+    [[ -z $unformatted ]] || { printf 'error: unformatted Go files:\n%s\n' "$unformatted" >&2; exit 1; }
+    "$ROOT/repo.sh" go vet ./go/...
+    ;;
+  build)
+    profile=${1:-dbg}
+    (($# <= 1)) || { printf 'usage: ./repo.sh build [dbg|opt]\n' >&2; exit 2; }
+    "$ROOT/repo.sh" cpp-build "$profile"
+    "$ROOT/repo.sh" python-build
+    "$ROOT/repo.sh" ts-build
+    "$ROOT/repo.sh" go-build
+    "$ROOT/repo.sh" tsweb-build
     ;;
   cpp-configure)
     profile=${1:-dbg}
@@ -103,7 +122,9 @@ case "$command" in
     "$install/$loader" --library-path "$loader_dir" "$binary"
     ;;
   cpp-test)
+    "$ROOT/repo.sh" cpp-build dbg
     python3 -m unittest discover -s "$ROOT/cpp/test" -p 'test_*.py'
+    "$ROOT/repo.sh" cpp-run dbg
     ;;
   python)
     target=$("$ROOT/toolchain/target.sh")
@@ -127,7 +148,7 @@ case "$command" in
     [[ -x $cxx ]] || { printf 'error: pinned compiler is not installed; run ./repo.sh bootstrap\n' >&2; exit 1; }
     python3 "$ROOT/tools/python_build.py" --root "$ROOT" --target "$target" --cxx "$cxx"
     ;;
-  python-check)
+  python-test)
     "$ROOT/repo.sh" python-build
     "$ROOT/repo.sh" python -m compileall -q python/lib python/app python/test
     "$ROOT/repo.sh" python -m unittest discover -s python/test -p 'test_*.py'
@@ -139,20 +160,17 @@ case "$command" in
     export DENO_DIR="$POLYGLOT_LOCAL_DIR/cache/deno"
     exec "$deno" "$@"
     ;;
-  ts-check)
-    "$ROOT/repo.sh" deno --version
-    "$ROOT/repo.sh" deno check --frozen ts/app/hello/main.ts ts/test/greeting_test.ts
-    "$ROOT/repo.sh" deno fmt --check ts/
-    "$ROOT/repo.sh" deno lint ts/
-    "$ROOT/repo.sh" deno test --frozen ts/test/
-    "$ROOT/repo.sh" deno run --frozen ts/app/hello/main.ts
+  ts-build)
+    "$ROOT/repo.sh" deno check --frozen ts/app/hello/main.ts
     ;;
-  tsweb-check)
-    "$ROOT/repo.sh" deno check --frozen tsweb/app/site/main.tsx tsweb/test/app_test.tsx tsweb/test/title_test.ts tsweb/vite.config.ts
-    "$ROOT/repo.sh" deno fmt --check tsweb/
-    "$ROOT/repo.sh" deno lint tsweb/
-    "$ROOT/repo.sh" deno test --frozen --allow-env=NODE_ENV tsweb/test/
+  ts-test)
+    "$ROOT/repo.sh" ts-build
+    "$ROOT/repo.sh" deno test --frozen ts/test/
+    "$ROOT/repo.sh" deno run --cached-only --frozen ts/app/hello/main.ts
+    ;;
+  tsweb-test)
     "$ROOT/repo.sh" tsweb-build
+    "$ROOT/repo.sh" deno test --frozen --allow-env=NODE_ENV tsweb/test/
     python3 "$ROOT/tools/tsweb_smoke.py" --root "$ROOT/build/tsweb/site"
     ;;
   tsweb-build)
@@ -176,19 +194,16 @@ case "$command" in
     export PATH="$GOROOT/bin:$PATH"
     exec "$GOROOT/bin/go" "$@"
     ;;
-  go-check)
+  go-build)
     target=$("$ROOT/toolchain/target.sh")
-    go_bin=$(tool_path go)
-    go_root=$(dirname -- "$(dirname -- "$go_bin")")
-    unformatted=$("$go_root/bin/gofmt" -l "$ROOT/go")
-    [[ -z $unformatted ]] || { printf 'error: unformatted Go files:\n%s\n' "$unformatted" >&2; exit 1; }
-    "$ROOT/repo.sh" go version
-    [[ $("$ROOT/repo.sh" go env GOEXPERIMENT) == jsonv2 ]]
-    "$ROOT/repo.sh" go mod verify
-    "$ROOT/repo.sh" go vet ./go/...
-    "$ROOT/repo.sh" go test ./go/...
     mkdir -p "$ROOT/build/go/$target"
     "$ROOT/repo.sh" go build -trimpath -o "$ROOT/build/go/$target/hello" ./go/app/hello
+    ;;
+  go-test)
+    "$ROOT/repo.sh" go mod verify
+    "$ROOT/repo.sh" go test ./go/...
+    "$ROOT/repo.sh" go-build
+    target=$("$ROOT/toolchain/target.sh")
     "$ROOT/build/go/$target/hello"
     ;;
   cpp-reflection-probe)
@@ -214,8 +229,8 @@ case "$command" in
     if [[ $1 == polyglot-demo ]]; then
       "$ROOT/repo.sh" cpp-build "$profile"
       "$ROOT/repo.sh" python-build
-      "$ROOT/repo.sh" go-check
-      "$ROOT/repo.sh" tsweb-check
+      "$ROOT/repo.sh" go-build
+      "$ROOT/repo.sh" tsweb-build
     fi
     target=$("$ROOT/toolchain/target.sh")
     python3 "$ROOT/tools/package_release.py" --root "$ROOT" --manifest "$ROOT/package.toml" \
@@ -253,10 +268,15 @@ case "$command" in
     bash "$ROOT/test/test-package-model.sh"
     bash "$ROOT/test/test-package-release.sh"
     "$ROOT/repo.sh" cpp-test
+    "$ROOT/repo.sh" python-test
+    "$ROOT/repo.sh" ts-test
+    "$ROOT/repo.sh" go-test
+    "$ROOT/repo.sh" tsweb-test
     ;;
   ci)
     "$ROOT/repo.sh" lint
     "$ROOT/repo.sh" package-validate
+    "$ROOT/repo.sh" build
     "$ROOT/repo.sh" test
     ;;
   *) printf 'error: unknown command: %s\n' "$command" >&2; usage >&2; exit 2 ;;

@@ -58,10 +58,15 @@ third-party list|graph|verify|check-updates|update
 graph
 generate [--check]
 format [--check]
-lint [--affected|--all|--third-party]
+lint
 typecheck [--affected|--all]
-build [--profile dbg|opt]
-test [--affected|--all]
+build [dbg|opt]
+test
+cpp-build [dbg|opt] | cpp-test
+python-build | python-test
+ts-build | ts-test
+go-build | go-test
+tsweb-build | tsweb-test
 coverage
 compile-commands [profile] [--check|--first-party-only]
 bench env|smoke|all|compare
