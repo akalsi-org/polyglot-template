@@ -32,6 +32,11 @@ def string_list(value: Any, *, field: str) -> list[str]:
     return list(value)
 
 
+fixed_args: list[str] = [
+    "-D__BEGIN_DECLS=",
+    "-D__END_DECLS=",
+]
+
 @dataclass(frozen=True)
 class Action:
     owner: str
@@ -44,7 +49,7 @@ class Action:
             "directory": str(root),
             "file": str(root / self.source),
             "output": str(root / self.output),
-            "arguments": list(self.arguments),
+            "arguments": list(self.arguments) + fixed_args,
         }
 
 
