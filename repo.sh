@@ -22,21 +22,27 @@ host_jobs() {
   printf '%s\n' "$jobs"
 }
 
+compute_job_budget() {
+  local jobs=$1
+  BUILD_LANES=$((jobs / 2))
+  ((BUILD_LANES >= 1)) || BUILD_LANES=1
+  ((BUILD_LANES <= 5)) || BUILD_LANES=5
+  BUILD_INNER_JOBS=$((jobs / BUILD_LANES))
+}
+
 run_moon() {
-  local target=$1 jobs lanes inner moon
+  local target=$1 jobs moon
   jobs=$(host_jobs)
-  lanes=$jobs
-  ((lanes <= 5)) || lanes=5
-  inner=$((jobs / lanes))
-  ((inner >= 1)) || inner=1
-  export POLYGLOT_INNER_JOBS=$inner
+  compute_job_budget "$jobs"
+  export POLYGLOT_INNER_JOBS=$BUILD_INNER_JOBS
   export MOON_TOOLCHAIN_FORCE_GLOBALS=true
   export MOON_HOME="$POLYGLOT_LOCAL_DIR/cache/moon/home"
   export PROTO_HOME="$POLYGLOT_LOCAL_DIR/cache/proto"
   export XDG_CACHE_HOME="$POLYGLOT_LOCAL_DIR/cache/xdg"
   moon=$(tool_path moon)
   [[ -x $moon ]] || { printf 'error: pinned Moon is not installed; run ./repo.sh bootstrap\n' >&2; return 1; }
-  "$moon" run --concurrency "$lanes" --summary detailed "repo:$target"
+  printf 'build budget: total=%s coarse=%s inner=%s\n' "$jobs" "$BUILD_LANES" "$BUILD_INNER_JOBS"
+  "$moon" run --concurrency "$BUILD_LANES" --summary detailed "repo:$target"
 }
 
 usage() {
@@ -87,6 +93,12 @@ command=${1:-help}
 if (($#)); then shift; fi
 case "$command" in
   help|-h|--help) usage ;;
+  _job-budget)
+    (($# == 1)) || { printf 'usage: ./repo.sh _job-budget JOBS\n' >&2; exit 2; }
+    [[ $1 =~ ^[1-9][0-9]*$ ]] || { printf 'error: JOBS must be a positive integer\n' >&2; exit 2; }
+    compute_job_budget "$1"
+    printf '%s %s\n' "$BUILD_LANES" "$BUILD_INNER_JOBS"
+    ;;
   target) "$ROOT/toolchain/target.sh" "$@" ;;
   bootstrap) "$ROOT/toolchain/bootstrap.sh" "$@" ;;
   doctor) "$ROOT/toolchain/doctor.sh" "$@" ;;

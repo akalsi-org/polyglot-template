@@ -41,6 +41,11 @@ for removed in python-check ts-check go-check tsweb-check; do
   ! grep -Eq "^  ${removed}( |$)" <<<"$help"
 done
 
+[[ $($root/repo.sh _job-budget 1) == '1 1' ]]
+[[ $($root/repo.sh _job-budget 4) == '2 2' ]]
+[[ $($root/repo.sh _job-budget 8) == '4 2' ]]
+[[ $($root/repo.sh _job-budget 16) == '5 3' ]]
+
 grep -Fq 'repo: "."' "$root/.moon/workspace.yml"
 for task in cpp-build python-build ts-build go-build tsweb-build compile-commands build test; do
   grep -Eq "^  ${task}:$" "$root/moon.yml"

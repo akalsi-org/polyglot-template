@@ -34,7 +34,9 @@ or unbounded nested parallelism?
 4. Pinned Moon schedules coarse build and test DAGs. Its proto, Wasmtime, global,
    and task caches all live under ignored repository-local paths.
 5. `POLYGLOT_JOBS` is the total host budget. Moon receives at most five coarse
-   lanes; nested Ninja and Go work receive a divided budget.
+   lanes, with the lane count capped at half the budget so nested Ninja and Go
+   work retain at least two workers. The product of coarse and inner jobs never
+   exceeds the declared total.
 6. Test tasks depend on their build tasks in the DAG. Direct language test
    commands remain self-contained when invoked without Moon.
 7. Moon output caching is enabled only where artifacts are location-independent.
