@@ -1,4 +1,12 @@
 {
+  "editor.detectIndentation": false,
+  "editor.insertSpaces": true,
+  "editor.tabSize": 2,
+  "[go]": {
+    "editor.detectIndentation": false,
+    "editor.insertSpaces": false,
+    "editor.tabSize": 2
+  },
   "clangd.arguments": [
     "--compile-commands-dir=${workspaceFolder}"
   ],

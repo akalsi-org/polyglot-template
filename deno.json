@@ -24,7 +24,9 @@
     "lib": ["deno.ns", "dom", "dom.iterable", "esnext"]
   },
   "fmt": {
-    "include": ["ts/", "tsweb/"]
+    "include": ["ts/", "tsweb/"],
+    "indentWidth": 2,
+    "useTabs": false
   },
   "lint": {
     "include": ["ts/", "tsweb/"]

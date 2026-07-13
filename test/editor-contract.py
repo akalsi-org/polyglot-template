@@ -13,12 +13,27 @@ ROOT = Path(__file__).resolve().parents[1]
 def main() -> None:
     settings = json.loads((ROOT / ".vscode" / "settings.json").read_text())
     extensions = json.loads((ROOT / ".vscode" / "extensions.json").read_text())
+    editorconfig = (ROOT / ".editorconfig").read_text()
+
+    assert "[*]\n" in editorconfig
+    assert "indent_style = space\nindent_size = 2\ntab_width = 2\n" in editorconfig
+    assert "[*.go]\nindent_style = tab\nindent_size = tab\ntab_width = 2\n" in editorconfig
+    assert settings["editor.detectIndentation"] is False
+    assert settings["editor.insertSpaces"] is True
+    assert settings["editor.tabSize"] == 2
+    assert settings["[go]"] == {
+        "editor.detectIndentation": False,
+        "editor.insertSpaces": False,
+        "editor.tabSize": 2,
+    }
 
     assert settings["clangd.arguments"] == ["--compile-commands-dir=${workspaceFolder}"]
     assert settings["deno.enable"] is True
     assert settings["deno.enablePaths"] == ["./ts", "./tsweb"]
     assert settings["deno.config"] == "${workspaceFolder}/deno.json"
     deno_config = json.loads((ROOT / "deno.json").read_text())
+    assert deno_config["fmt"]["indentWidth"] == 2
+    assert deno_config["fmt"]["useTabs"] is False
     assert deno_config["nodeModulesDir"] == "auto"
     assert deno_config["imports"] == {
         "@deno/vite-plugin": "npm:@deno/vite-plugin@2.0.2",
