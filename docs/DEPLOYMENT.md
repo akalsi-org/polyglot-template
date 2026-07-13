@@ -236,7 +236,7 @@ NYC and EWR reduce normal quorum latency but share meaningful regional risks. As
 
 Do not synchronously replicate large blobs between VPS hosts. Use R2 or another declared object store. Database replication policy is database-specific and must not be inferred from host count.
 
-## Public Commands
+## Proposed Command Surface (Not Implemented)
 
 ```text
 ./repo.sh deploy plan <group> --env <environment>

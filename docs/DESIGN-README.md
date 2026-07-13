@@ -1,6 +1,6 @@
 # Polyglot Repository Template Decision Package
 
-Status: proposed design baseline with executable pinned C++, Python, Go, TypeScript, React 19/browser-TypeScript, bootstrap, and package slices at the repository root. Schema work, tag publication, and fleet deployment remain gated as documented.
+Status: proposed design baseline with executable pinned C++, Python, Go, TypeScript, React 19/browser-TypeScript, bootstrap, package, and tag-release slices at the repository root. Schema work and fleet deployment remain proposed.
 
 This document set defines a cloneable, non-JVM, AI-ready monorepo template for C/C++, Go, Python with native extensions, and Deno TypeScript/React. It records both the concrete design and the reasoning rules that produced it.
 
@@ -11,7 +11,7 @@ This document set defines a cloneable, non-JVM, AI-ready monorepo template for C
 - [DEPLOYMENT.md](DEPLOYMENT.md) — VPS application placement, package composition, systemd activation, HAProxy subdomain routing, wildcard DNS, and hot certificate delivery.
 - [FLEET.md](FLEET.md) — optional infrastructure profile, inventory authority, OpenTofu provisioning, isolated Ansible convergence, host lifecycle, trust, locks, receipts, and scaling boundary.
 - [FLEET-NEXT.md](FLEET-NEXT.md) — remaining provider, SLO, trust-implementation, service-policy, stateful-workload, and recovery questions.
-- [CI-RELEASE.md](CI-RELEASE.md) — GitHub Actions packaging, provenance, artifact retention, and tag-gated release contract.
+- [CI-RELEASE.md](CI-RELEASE.md) — GitHub Actions packaging, target archives, checksum sidecars, and tag-gated release contract.
 - [spikes/serialization/README.md](spikes/serialization/README.md) — nested-array IDL spike comparing Fory, Bebop, FlatBuffers, and a minimal borrowed-view lower bound.
 - [../README.md](../README.md) — runnable target, lock/bootstrap, C++ graph, language source layout, package/runtime closure, AI guide, tests, and live two-runner CI.
 
@@ -24,7 +24,7 @@ repo.sh
       -> Go toolchain             Go modules/build/test
       -> Python backend           wheels/native extensions
       -> Deno + Vite              TypeScript/React
-      -> schema compiler          shared generated contracts
+      -> schema compiler          proposed shared generated contracts
       -> package staging          one independently versioned package at a time
 ```
 
@@ -34,18 +34,18 @@ The repository owns tool provenance, lifecycle policy, packaging, benchmarks, an
 
 1. `repo.sh` is the stable human and CI interface.
 2. All tools are pinned in a committed lock and installed transactionally under ignored `.local/`.
-3. `toolchain check-updates` discovers current stable releases without mutation; explicit updates produce reviewed lock diffs and run affected verification.
+3. Normal bootstrap consumes exact committed pins; toolchain-update commands are not implemented in this checkout.
 4. moon schedules coarse project tasks and optionally caches declared final outputs.
 5. Every C/C++ consumer emits a language-owned compile-action fragment on build; native actions derive from the Ninja model, Python extension actions capture the exact pinned-ABI command, and both merge into one complete root `compile_commands.json`.
-6. The canonical compilation database includes first-party, generated, vendored, and external third-party translation units by default.
+6. The root compilation database currently merges C++ and Python native-extension fragments; third-party and generated-source import is proposed.
 7. Upstream CMake, Meson, Autotools, or custom builds are optional dependency adapters, not the repository build system.
-8. Go produces native binaries; Green Tea GC is the Go 1.26 default. `jsonv2` remains an explicit experimental validation profile.
-9. Deno owns TypeScript checking, formatting, linting, testing, coverage, benchmarks, and local execution. Vite owns React 19 browser bundles.
+8. Go produces native binaries; Green Tea GC is the Go 1.26 default. The current wrapper enables `jsonv2` for every Go command.
+9. Deno owns the implemented TypeScript checking, formatting, linting, testing, and local execution; Vite owns React 19 browser bundles.
 10. Python applications reference one compatible, independently released runtime package. The default stripped standalone runtime makes no JIT claim; an experimental source-built JIT variant is separate.
-11. Packages and runtimes are independently versioned and released. A package declares a runtime requirement such as `runtime = "python"`; resolution selects the matching host-triplet runtime release. A package release may carry a compatible runtime artifact when an incompatible runtime upgrade requires atomic distribution. No global repository tarball is required.
-12. The canonical package is deterministic `tar.zst`; consumers receive a static extractor or self-extracting `.run` artifact so host Zstandard is not required.
+11. Packages and runtimes are independently versioned and released. Package runtime requirements are declared in `package.toml`; resolution selects the matching host-triplet runtime closure. No global repository tarball is required.
+12. The implemented package format is deterministic `.tar.gz`, with consumer smoke checks from clean extraction.
 13. `.agents/md/overview.md` is the canonical AI guide and root `AGENTS.md` is a relative symlink to it.
-14. `.agents/skills/` is the tracked repository skill root. Vendor-specific `.claude/`, `.codex/`, `.grok/`, and runtime state remain ignored and machine-local.
+14. `.agents/skills/` is the repository skill root when repository-owned skills are added. Vendor-specific `.claude/`, `.codex/`, `.grok/`, and runtime state remain ignored and machine-local.
 15. Deployment groups select independently versioned packages and run directly under systemd on inexpensive VPS hosts.
 16. HAProxy owns low-overhead TLS termination, exact subdomain routing, health checks, blue/green activation, and draining through durable plus runtime state. Mesh-safe service discovery supplies backend endpoints through a unicast registry or DNS-backed selector feed, and blue/green slots need not share a host.
 17. Applications declare only a logical subdomain and scope; environments own TLDs, zones, certificate bindings, fleet selectors, and placement policy, while fleet-generated inventory supplies observed addresses.
@@ -71,12 +71,10 @@ The repository owns tool provenance, lifecycle policy, packaging, benchmarks, an
 Start implementation with one vertical slice only:
 
 - one C or C++ library and executable;
-- one vendored or locked third-party native dependency;
 - one Go executable;
 - one Python application with a tiny native extension;
 - one Deno React 19 application and one local Deno command;
-- one schema generating C, Python, Go, and TypeScript outputs;
 - one complete compilation database validated by clangd;
-- two independently versioned self-contained packages, each with a deterministic archive and consumer smoke test.
+- one self-contained package with a deterministic archive and consumer smoke test.
 
 Do not expand the template until this slice proves offline normal operation, runtime deduplication, package closure, and manageable configuration ownership.

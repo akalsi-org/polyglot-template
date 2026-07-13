@@ -232,7 +232,7 @@ Re-evaluate a scheduler when the system must continuously select placement, repl
 
 Execution may evolve from direct SSH fan-out to regional relays or signed pull-based convergence without changing application manifests. If dynamic scheduling becomes necessary, compile deployment-group manifests into Nomad jobs rather than adding scheduling logic to the deployer.
 
-## Public Commands
+## Proposed Command Surface (Not Implemented)
 
 ```text
 ./repo.sh bootstrap --profile infra
