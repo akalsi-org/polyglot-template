@@ -38,7 +38,29 @@ class CppGraphTest(unittest.TestCase):
     output = self.configure("dbg")
     compdb = json.loads((output / "compile_commands.json").read_text())
     sources = {Path(row["file"]).relative_to(ROOT).as_posix() for row in compdb}
-    self.assertEqual(sources, {"cpp/app/hello/main.cc", "cpp/lib/example/example.cc"})
+    self.assertEqual(
+      sources,
+      {
+        "cpp/app/hello/main.cc",
+        "cpp/lib/example/example.cc",
+        "cpp/test/doctest_runner.cc",
+        "cpp/test/example_edge_test.cc",
+        "cpp/test/example_test.cc",
+      },
+    )
+
+  def test_doctest_runner_is_compiled_once_and_linked_into_each_test(self):
+    output = self.configure("dbg")
+    ninja = (output / "build.ninja").read_text()
+    runner = "build/cpp/dbg/obj/test-framework/doctest_runner.o"
+    self.assertEqual(ninja.count(f"build {runner}: compile"), 1)
+    self.assertIn(f"build build/cpp/dbg/bin/example_test: link {runner}", ninja)
+    self.assertIn(f"build build/cpp/dbg/bin/example_edge_test: link {runner}", ninja)
+    inventory = json.loads((output / "cpp-tests.json").read_text())
+    self.assertEqual(
+      inventory["tests"],
+      ["build/cpp/dbg/bin/example_edge_test", "build/cpp/dbg/bin/example_test"],
+    )
 
   def test_adapter_projection_reconciles_with_owned_compdb_subset(self):
     output = self.configure("dbg")

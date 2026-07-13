@@ -19,19 +19,21 @@ done
 target=$($ROOT/toolchain/target.sh)
 
 install_one() {
-  local tool=$1 version url sha archive expected install stamp cache tmp old listing link resolved
+  local tool=$1 version url sha archive expected kind install stamp cache tmp old listing link resolved
   version=$(lock_value "$tool" "$target" version)
   url=$(lock_value "$tool" "$target" url)
   sha=$(lock_value "$tool" "$target" sha256)
   archive=$(lock_value "$tool" "$target" archive)
   expected=$(lock_value "$tool" "$target" expected)
+  kind=$(lock_value "$tool" "$target" kind)
+  kind=${kind:-executable}
   [[ -n $version && -n $archive && -n $expected ]] || {
     printf 'error: no complete %s artifact for %s\n' "$tool" "$target" >&2; return 1;
   }
   install="$LOCAL/toolchain/$target/$tool-$version"
   stamp="$install/.installed-$sha"
   cache="$LOCAL/downloads/$sha-$archive"
-  if [[ -f $stamp && -x $install/$expected ]]; then
+  if [[ -f $stamp && (($kind == header && -f $install/$expected) || ($kind == executable && -x $install/$expected)) ]]; then
     [[ $tool != go ]] || chmod -R u+w -- "$install"
     printf 'bootstrap: %s %s already installed\n' "$tool" "$version"; return
   fi
@@ -75,7 +77,13 @@ install_one() {
     resolved=$(realpath -m -- "$link")
     case "$resolved" in "$tmp"/*) :;; *) printf 'error: archive contains escaping symlink: %s\n' "$link" >&2; return 1;; esac
   done < <(find "$tmp" -type l -print0)
-  [[ -x $tmp/$expected ]] || { printf 'error: %s missing expected executable %s\n' "$tool" "$expected" >&2; return 1; }
+  if [[ $kind == header ]]; then
+    [[ -f $tmp/$expected ]] || { printf 'error: %s missing expected header %s\n' "$tool" "$expected" >&2; return 1; }
+  elif [[ $kind == executable ]]; then
+    [[ -x $tmp/$expected ]] || { printf 'error: %s missing expected executable %s\n' "$tool" "$expected" >&2; return 1; }
+  else
+    printf 'error: unsupported artifact kind for %s: %s\n' "$tool" "$kind" >&2; return 1
+  fi
   if [[ $tool == python ]]; then
     local gcc_version loader gcc_install loader_dir
     gcc_version=$(lock_value gcc-musl "$target" version)
@@ -102,8 +110,12 @@ install_one() {
     }
   elif [[ $tool == go ]]; then
     "$tmp/$expected" version | grep -q "go$version" || { printf 'error: Go capability probe failed\n' >&2; return 1; }
-  else
+  elif [[ $kind == executable ]]; then
     "$tmp/$expected" --version >/dev/null 2>&1 || { printf 'error: %s capability probe failed\n' "$tool" >&2; return 1; }
+  elif [[ $tool == doctest ]]; then
+    grep -q '^#define DOCTEST_VERSION_MAJOR 2$' "$tmp/$expected" || {
+      printf 'error: doctest header capability probe failed\n' >&2; return 1;
+    }
   fi
   old="$install.replaced.$$"
   [[ ! -e $install ]] || mv -- "$install" "$old"

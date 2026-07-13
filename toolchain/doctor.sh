@@ -16,11 +16,15 @@ while IFS= read -r tool; do
   version=$(lock_value "$tool" "$target" version)
   sha=$(lock_value "$tool" "$target" sha256)
   expected=$(lock_value "$tool" "$target" expected)
+  kind=$(lock_value "$tool" "$target" kind)
+  kind=${kind:-executable}
   install="$LOCAL/toolchain/$target/$tool-$version"
   if [[ ! $sha =~ ^[0-9a-f]{64}$ ]]; then
     printf 'unresolved: %s %s\n' "$tool" "$version"; failed=1; continue
   fi
-  if [[ ! -f $install/.installed-$sha || ! -x $install/$expected ]]; then
+  if [[ ! -f $install/.installed-$sha ]] || \
+     [[ $kind == executable && ! -x $install/$expected ]] || \
+     [[ $kind == header && ! -f $install/$expected ]]; then
     printf 'missing: %s %s\n' "$tool" "$version"; failed=1; continue
   fi
   if ((deep)); then
@@ -50,8 +54,10 @@ while IFS= read -r tool; do
       [[ $("$install/$expected" version | awk '{ print $3 }') == "go$version" ]] || {
         printf 'invalid: Go version mismatch\n'; failed=1; continue;
       }
-    else
+    elif [[ $kind == executable ]]; then
       "$install/$expected" --version >/dev/null
+    elif [[ $tool == doctest ]]; then
+      grep -q '^#define DOCTEST_VERSION_MAJOR 2$' "$install/$expected"
     fi
   fi
   printf 'ok: %s %s\n' "$tool" "$version"

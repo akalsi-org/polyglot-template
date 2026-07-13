@@ -71,4 +71,27 @@ second=$("$ROOT/repo.sh" bootstrap --offline)
 [[ $second == *'already installed'* ]]
 "$ROOT/repo.sh" doctor --deep | grep -q 'ok: fixture 1.0'
 
+# Header-only artifacts are pinned and installed without pretending to be
+# executable tools.
+mkdir -p "$tmp/header-payload/include"
+printf '#define FIXTURE_HEADER 1\n' >"$tmp/header-payload/include/fixture.h"
+tar -czf "$tmp/header.tar.gz" -C "$tmp/header-payload" .
+header_sha=$(sha256sum "$tmp/header.tar.gz" | awk '{print $1}')
+cp "$tmp/header.tar.gz" "$POLYGLOT_LOCAL_DIR/downloads/$header_sha-header.tar.gz"
+cat >"$tmp/header.lock.toml" <<EOF
+schema = 1
+[[artifact]]
+tool = "header-fixture"
+target = "$target"
+version = "1.0"
+url = "https://invalid.example/header.tar.gz"
+sha256 = "$header_sha"
+archive = "header.tar.gz"
+expected = "include/fixture.h"
+kind = "header"
+EOF
+export POLYGLOT_LOCK_FILE="$tmp/header.lock.toml"
+"$ROOT/repo.sh" bootstrap --offline | grep -q 'installed header-fixture 1.0'
+"$ROOT/repo.sh" doctor --deep | grep -q 'ok: header-fixture 1.0'
+
 printf 'bootstrap smoke: ok\n'

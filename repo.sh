@@ -90,9 +90,13 @@ case "$command" in
     [[ $profile == dbg || $profile == opt ]] || { printf 'error: profile must be dbg or opt\n' >&2; exit 2; }
     target=$("$ROOT/toolchain/target.sh")
     cxx=$(tool_path gcc-musl)
+    doctest_header=$(tool_path doctest)
     [[ -x $cxx ]] || { printf 'error: pinned compiler is not installed; run ./repo.sh bootstrap\n' >&2; exit 1; }
+    [[ -f $doctest_header ]] || { printf 'error: pinned doctest is not installed; run ./repo.sh bootstrap\n' >&2; exit 1; }
+    doctest_include=$(dirname -- "$(dirname -- "$doctest_header")")
     python3 "$ROOT/tools/cpp_graph.py" configure --root "$ROOT" --profile "$profile" \
-      --output "$ROOT/build/cpp/$target/$profile" --cxx "$cxx"
+      --output "$ROOT/build/cpp/$target/$profile" --cxx "$cxx" \
+      --doctest-include "$doctest_include"
     python3 "$ROOT/tools/compdb.py" --root "$ROOT" \
       --fragment "$ROOT/build/cpp/$target/$profile/compile_commands.json" \
       --replace-prefix cpp
@@ -124,6 +128,17 @@ case "$command" in
   cpp-test)
     "$ROOT/repo.sh" cpp-build dbg
     python3 -m unittest discover -s "$ROOT/cpp/test" -p 'test_*.py'
+    target=$("$ROOT/toolchain/target.sh")
+    export POLYGLOT_LOCK_FILE=${POLYGLOT_LOCK_FILE:-$ROOT/tools.lock.toml}
+    . "$ROOT/toolchain/lock.sh"
+    version=$(lock_value gcc-musl "$target" version)
+    loader=$(lock_value gcc-musl "$target" loader)
+    install="$POLYGLOT_LOCAL_DIR/toolchain/$target/gcc-musl-$version"
+    loader_dir=$(dirname -- "$install/$loader")
+    while IFS= read -r test_binary; do
+      "$install/$loader" --library-path "$loader_dir" "$ROOT/$test_binary"
+    done < <(python3 -c 'import json,sys; print(*json.load(open(sys.argv[1]))["tests"], sep="\n")' \
+      "$ROOT/build/cpp/$target/dbg/cpp-tests.json")
     "$ROOT/repo.sh" cpp-run dbg
     ;;
   python)

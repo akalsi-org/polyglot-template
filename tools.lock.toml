@@ -96,3 +96,23 @@ url = "https://go.dev/dl/go1.26.5.linux-arm64.tar.gz"
 sha256 = "fe4789e92b1f33358680864bbe8704289e7bb5fc207d80623c308935bd696d49"
 archive = "go1.26.5.linux-arm64.tar.gz"
 expected = "go/bin/go"
+
+[[artifact]]
+tool = "doctest"
+target = "x86_64-linux-musl"
+version = "2.5.3"
+url = "https://github.com/doctest/doctest/archive/refs/tags/v2.5.3.tar.gz"
+sha256 = "174ebc4e769928959614789c5b4e9c3d0a0f81a62bb608756b127bfebfb21331"
+archive = "doctest-v2.5.3.tar.gz"
+expected = "doctest-2.5.3/doctest/doctest.h"
+kind = "header"
+
+[[artifact]]
+tool = "doctest"
+target = "aarch64-linux-musl"
+version = "2.5.3"
+url = "https://github.com/doctest/doctest/archive/refs/tags/v2.5.3.tar.gz"
+sha256 = "174ebc4e769928959614789c5b4e9c3d0a0f81a62bb608756b127bfebfb21331"
+archive = "doctest-v2.5.3.tar.gz"
+expected = "doctest-2.5.3/doctest/doctest.h"
+kind = "header"

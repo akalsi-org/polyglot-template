@@ -104,7 +104,7 @@ def load_adapter(root: Path, declaration: dict[str, Any], cxx: str, common: list
   return actions
 
 
-def build_graph(root: Path, data: dict[str, Any], profile: str, build: str | None = None) -> tuple[list[Action], dict[str, list[str]], list[str]]:
+def build_graph(root: Path, data: dict[str, Any], profile: str, build: str | None = None) -> tuple[list[Action], dict[str, list[str]], list[str], list[str]]:
   toolchain = data["toolchain"]
   cxx = toolchain.get("cxx")
   standard = toolchain.get("standard")
@@ -120,6 +120,7 @@ def build_graph(root: Path, data: dict[str, Any], profile: str, build: str | Non
   build = build or f"build/cpp/{profile}"
   actions: list[Action] = []
   links: dict[str, list[str]] = {}
+  test_names: list[str] = []
   for target in data.get("targets", []):
     name = target.get("name")
     if not isinstance(name, str) or not name or target.get("type") != "executable":
@@ -134,13 +135,41 @@ def build_graph(root: Path, data: dict[str, Any], profile: str, build: str | Non
       outputs.append(output)
     adapter_dependencies = string_list(target.get("adapter_dependencies", []), field=f"target {name} adapter_dependencies")
     links[name] = outputs + [f"@adapter:{item}" for item in adapter_dependencies]
+  framework = data.get("test_framework")
+  tests = data.get("tests", [])
+  if tests:
+    if not isinstance(framework, dict):
+      fail("C++ tests require [test_framework]")
+    include_dir = framework.get("include_dir")
+    runner_source = framework.get("runner_source")
+    if not isinstance(include_dir, str) or not include_dir or not isinstance(runner_source, str):
+      fail("test_framework include_dir and runner_source must be strings")
+    runner_source = f"cpp/{relpath(runner_source, field='test framework runner_source')}"
+    runner_output = f"{build}/obj/test-framework/doctest_runner.o"
+    runner_arguments = (cxx, *common, f"-I{include_dir}", "-c", runner_source, "-o", runner_output)
+    actions.append(Action("test-framework:doctest", runner_source, runner_output, tuple(runner_arguments)))
+    for test in tests:
+      name = test.get("name")
+      if not isinstance(name, str) or not name or name in links:
+        fail("C++ test names must be non-empty and globally unique")
+      includes = [f"-Icpp/{relpath(item, field=f'test {name} include')}" for item in string_list(test.get("include_dirs", []), field=f"test {name} include_dirs")]
+      outputs: list[str] = []
+      for source in string_list(test.get("sources", []), field=f"test {name} sources"):
+        source = f"cpp/{relpath(source, field=f'test {name} source')}"
+        output = f"{build}/obj/tests/{name}/{source}.o"
+        arguments = (cxx, *common, f"-I{include_dir}", *includes, "-c", source, "-o", output)
+        actions.append(Action(f"test:{name}", source, output, tuple(arguments)))
+        outputs.append(output)
+      dependencies = string_list(test.get("adapter_dependencies", []), field=f"test {name} adapter_dependencies")
+      links[name] = [runner_output, *outputs, *[f"@adapter:{item}" for item in dependencies]]
+      test_names.append(name)
   for adapter in data.get("adapters", []):
     if adapter.get("include_in_compdb", True):
       actions.extend(load_adapter(root, adapter, cxx, common, build))
   actions.sort(key=lambda action: (action.source, action.output, action.owner))
   if len({action.source for action in actions}) != len(actions):
     fail("each translation unit must have exactly one canonical compile action")
-  return actions, links, [cxx, *tool_search, *link_flags]
+  return actions, links, [cxx, *tool_search, *link_flags], sorted(test_names)
 
 
 def shell_join(arguments: tuple[str, ...] | list[str]) -> str:
@@ -176,17 +205,19 @@ def write_if_changed(path: Path, content: str) -> None:
     path.write_text(content)
 
 
-def configure(root: Path, manifest: Path, profile: str, output: Path, cxx: str | None = None) -> None:
+def configure(root: Path, manifest: Path, profile: str, output: Path, cxx: str | None = None, doctest_include: str | None = None) -> None:
   data = load_manifest(manifest)
   if cxx is not None:
     data["toolchain"]["cxx"] = cxx
+  if doctest_include is not None:
+    data["test_framework"]["include_dir"] = doctest_include
   try:
     build = output.resolve().relative_to(root).as_posix()
   except ValueError:
     # Unit tests may write generated presentations to an external scratch
     # directory while retaining repository-relative build action paths.
     build = f"build/cpp/{profile}"
-  actions, links, linker = build_graph(root, data, profile, build)
+  actions, links, linker, tests = build_graph(root, data, profile, build)
   write_if_changed(output / "build.ninja", ninja_text(actions, links, linker, build))
   compdb = [action.compdb(root) for action in actions]
   write_if_changed(output / "compile_commands.json", json.dumps(compdb, indent=2, sort_keys=True) + "\n")
@@ -194,6 +225,8 @@ def configure(root: Path, manifest: Path, profile: str, output: Path, cxx: str |
   for action in actions:
     projections.setdefault(action.owner, []).append(action.compdb(root))
   write_if_changed(output / "cpp-actions.json", json.dumps({"schema_version": 1, "actions": projections}, indent=2, sort_keys=True) + "\n")
+  test_outputs = [f"{build}/bin/{name}" for name in tests]
+  write_if_changed(output / "cpp-tests.json", json.dumps({"schema_version": 1, "tests": test_outputs}, indent=2, sort_keys=True) + "\n")
 
 
 def probe_command(manifest: Path, cxx: str | None = None) -> None:
@@ -211,6 +244,7 @@ def main() -> None:
   parser.add_argument("--profile", choices=("dbg", "opt"), default="dbg")
   parser.add_argument("--output", type=Path)
   parser.add_argument("--cxx")
+  parser.add_argument("--doctest-include")
   args = parser.parse_args()
   root = args.root.resolve()
   manifest = args.manifest or root / "cpp" / "cpp.toml"
@@ -218,7 +252,7 @@ def main() -> None:
     probe_command(manifest, args.cxx)
     return
   output = args.output or root / "build" / "cpp" / args.profile
-  configure(root, manifest, args.profile, output, args.cxx)
+  configure(root, manifest, args.profile, output, args.cxx, args.doctest_include)
 
 
 if __name__ == "__main__":

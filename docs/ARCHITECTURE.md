@@ -147,6 +147,8 @@ python/lib/*/*.{c,cc}
 
 Every command that may compile C or C++ refreshes its language-owned compilation-database fragment and merges that ownership slice into the root database. Native C++ actions come from the same objects that generate Ninja; Python extension actions are captured from the exact command executed against the pinned interpreter ABI. A successful build with a stale or incomplete database is a build-system defect.
 
+C++ unit tests use pinned doctest as a header artifact. One runner translation unit defines doctest's implementation and `main`, producing one object per target/profile. Every declared test executable links that shared object with its own test translation units and dependencies; the generated test inventory drives `cpp-test`, so adding a test target does not require shell orchestration changes.
+
 The canonical database includes first-party, generated, vendored, and external third-party translation units. `--first-party-only` is an explicit diagnostic derivative, never the canonical database. Complete database coverage does not imply that ordinary lint runs policy checks over all upstream source; `lint --third-party` does that explicitly.
 
 Every dependency adapter must export or capture its executed compile actions as a normalized fragment. The C++ graph importer canonicalizes paths, arguments, target triplets, and duplicates before merging the fragment into the same compile-action IR. Verification requires the adapter's executed translation-unit set, normalized imported set, and canonical compilation-database set to agree.
