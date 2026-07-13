@@ -30,3 +30,6 @@ The checked-in GitHub workflow performs a real native bootstrap on x64 and ARM64
 `polyglot-demo` is the complete consumer proof: one target archive contains the C++ executable and musl loader, static Go executable, Python application/native extension and exactly one CPython runtime, plus the React static bundle. Its package smoke runs every executable and validates every referenced web asset from an isolated extraction without host Python, Deno, Go, compiler, or source-tree state.
 
 The command surface is uniform across lanes: `cpp-build`/`cpp-test`, `python-build`/`python-test`, `ts-build`/`ts-test`, `go-build`/`go-test`, and `tsweb-build`/`tsweb-test`. Aggregate `build` and `test` use pinned Moon to execute independent lanes concurrently with a bounded host budget and detailed critical-path timings; `lint` owns formatting and static policy for every language. C++ components own nearby `build.toml` files while `cpp/cpp.toml` retains only global policy. Atomic C++ and Python fragments feed one race-free root compilation database. See [the completed parallel-build spike](docs/spikes/parallel-build.md).
+
+For task-oriented source layout, command, and validation guidance by language,
+see the [language guide](docs/LANGUAGE-GUIDE.md).

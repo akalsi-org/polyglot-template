@@ -44,7 +44,7 @@ class CppGraphTest(unittest.TestCase):
     self.assertEqual([item["name"] for item in data["targets"]], ["hello"])
     self.assertEqual(
       sorted(item["name"] for item in data["tests"]),
-      ["example_edge_test", "example_test"],
+      ["example_edge_test", "example_test", "pgt_core_test"],
     )
     self.assertEqual(data["targets"][0]["sources"], ["app/hello/main.cc"])
 
@@ -58,6 +58,7 @@ class CppGraphTest(unittest.TestCase):
         "cpp/app/hello/main.cc",
         "cpp/lib/example/example.cc",
         "cpp/test/doctest_runner.cc",
+        "cpp/test/core_test.cc",
         "cpp/test/example_edge_test.cc",
         "cpp/test/example_test.cc",
       },
@@ -70,10 +71,15 @@ class CppGraphTest(unittest.TestCase):
     self.assertEqual(ninja.count(f"build {runner}: compile"), 1)
     self.assertIn(f"build build/cpp/dbg/bin/example_test: link {runner}", ninja)
     self.assertIn(f"build build/cpp/dbg/bin/example_edge_test: link {runner}", ninja)
+    self.assertIn(f"build build/cpp/dbg/bin/pgt_core_test: link {runner}", ninja)
     inventory = json.loads((output / "cpp-tests.json").read_text())
     self.assertEqual(
       inventory["tests"],
-      ["build/cpp/dbg/bin/example_edge_test", "build/cpp/dbg/bin/example_test"],
+      [
+        "build/cpp/dbg/bin/example_edge_test",
+        "build/cpp/dbg/bin/example_test",
+        "build/cpp/dbg/bin/pgt_core_test",
+      ],
     )
 
   def test_adapter_projection_reconciles_with_owned_compdb_subset(self):

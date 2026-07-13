@@ -13,3 +13,8 @@ name = "example_edge_test"
 sources = ["example_edge_test.cc"]
 include_dirs = ["//lib"]
 adapter_dependencies = ["example-vendor"]
+
+[[tests]]
+name = "pgt_core_test"
+sources = ["core_test.cc"]
+include_dirs = ["//lib"]
