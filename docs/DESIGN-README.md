@@ -36,7 +36,7 @@ The repository owns tool provenance, lifecycle policy, packaging, benchmarks, an
 2. All tools are pinned in a committed lock and installed transactionally under ignored `.local/`.
 3. `toolchain check-updates` discovers current stable releases without mutation; explicit updates produce reviewed lock diffs and run affected verification.
 4. moon schedules coarse project tasks and optionally caches declared final outputs.
-5. C/C++ uses one manifest-derived compile-action model to emit Ninja and a complete `compile_commands.json` on every native build.
+5. Every C/C++ consumer emits a language-owned compile-action fragment on build; native actions derive from the Ninja model, Python extension actions capture the exact pinned-ABI command, and both merge into one complete root `compile_commands.json`.
 6. The canonical compilation database includes first-party, generated, vendored, and external third-party translation units by default.
 7. Upstream CMake, Meson, Autotools, or custom builds are optional dependency adapters, not the repository build system.
 8. Go produces native binaries; Green Tea GC is the Go 1.26 default. `jsonv2` remains an explicit experimental validation profile.

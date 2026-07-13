@@ -74,7 +74,9 @@ case "$command" in
     [[ -x $cxx ]] || { printf 'error: pinned compiler is not installed; run ./repo.sh bootstrap\n' >&2; exit 1; }
     python3 "$ROOT/tools/cpp_graph.py" configure --root "$ROOT" --profile "$profile" \
       --output "$ROOT/build/cpp/$target/$profile" --cxx "$cxx"
-    ln -sfn "build/cpp/$target/$profile/compile_commands.json" "$ROOT/compile_commands.json"
+    python3 "$ROOT/tools/compdb.py" --root "$ROOT" \
+      --fragment "$ROOT/build/cpp/$target/$profile/compile_commands.json" \
+      --replace-prefix cpp
     ;;
   cpp-build)
     profile=${1:-dbg}
@@ -247,6 +249,7 @@ case "$command" in
     bash "$ROOT/test/bootstrap-smoke.sh"
     bash "$ROOT/test/workflow-contract.sh"
     python3 "$ROOT/test/editor-contract.py"
+    python3 -m unittest discover -s "$ROOT/test" -p 'test_*.py'
     bash "$ROOT/test/test-package-model.sh"
     bash "$ROOT/test/test-package-release.sh"
     "$ROOT/repo.sh" cpp-test

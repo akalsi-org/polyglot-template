@@ -133,9 +133,14 @@ cpp/cpp.toml
       -> test inventory
       -> benchmark inventory
       -> package staging inventory
+
+python/lib/*/*.{c,cc}
+  -> exact pinned-interpreter extension compile actions
+      -> build/python/<arch>/compile_commands.json
+      -> merged root compile_commands.json
 ```
 
-Every command that may compile C or C++ first refreshes Ninja and the compilation database atomically from the same action objects. A successful build with a stale or incomplete database is a build-system defect.
+Every command that may compile C or C++ refreshes its language-owned compilation-database fragment and merges that ownership slice into the root database. Native C++ actions come from the same objects that generate Ninja; Python extension actions are captured from the exact command executed against the pinned interpreter ABI. A successful build with a stale or incomplete database is a build-system defect.
 
 The canonical database includes first-party, generated, vendored, and external third-party translation units. `--first-party-only` is an explicit diagnostic derivative, never the canonical database. Complete database coverage does not imply that ordinary lint runs policy checks over all upstream source; `lint --third-party` does that explicitly.
 
