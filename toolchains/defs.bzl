@@ -4,6 +4,7 @@ BUCK files use a restricted dialect that forbids top-level `for`/`if`, so the
 generation loop lives here and toolchains/BUCK just calls it.
 """
 
+load("//rules:group.bzl", "group")
 load("//rules:toolchain.bzl", "gcc_musl_toolchain", "header_probe_toolchain", "python_toolchain", "version_probe_toolchain")
 load(":lock.bzl", "TOOLCHAINS")
 
@@ -71,3 +72,24 @@ def define_toolchains():
       probe_pattern = "^#define DOCTEST_VERSION_MAJOR 2$",
       visibility = ["PUBLIC"],
     )
+
+  # //toolchains:native: only the host-native triple's toolchain targets
+  # (6 of the 12 defined above - every one of //toolchains:'s tool kinds,
+  # once, for native_target only). Each CI matrix leg only ever needs its
+  # own triple (see .github/workflows/ci-release.yml), so building this
+  # group instead of //toolchains/... halves the cache payload materialized
+  # per leg without dropping the other triple's toolchains from the graph
+  # entirely - they stay buildable individually, just not swept in by
+  # default.
+  group(
+    name = "native",
+    deps = [
+      ":gcc-musl-" + native_target,
+      ":python-" + native_target,
+      ":go-" + native_target,
+      ":deno-" + native_target,
+      ":ninja-" + native_target,
+      ":doctest-" + native_target,
+    ],
+    visibility = ["PUBLIC"],
+  )

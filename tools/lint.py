@@ -25,6 +25,13 @@ def source_files(root: Path, suffix: str):
       yield path
 
 
+def starlark_files(root: Path):
+  # BUCK files carry no file extension, so they need their own glob;
+  # rglob("*BUCK") also happens to match them since "*" matches zero chars.
+  for suffix in ("BUCK", ".bzl", ".bxl"):
+    yield from source_files(root, suffix)
+
+
 def check_python_indentation(source: str, path: Path) -> list[str]:
   failures: list[str] = []
   levels = [0]
@@ -50,6 +57,13 @@ def main() -> int:
   root = Path(__file__).resolve().parent.parent
   failures: list[str] = []
   for path in source_files(root, ".py"):
+    source = path.read_text(encoding="utf-8")
+    try:
+      ast.parse(source, filename=str(path))
+    except (OSError, SyntaxError) as error:
+      failures.append(f"{path.relative_to(root)}: {error}")
+    failures.extend(check_python_indentation(source, path.relative_to(root)))
+  for path in starlark_files(root):
     source = path.read_text(encoding="utf-8")
     try:
       ast.parse(source, filename=str(path))

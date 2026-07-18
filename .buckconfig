@@ -16,3 +16,35 @@
 # every other lane's state inside the checkout. Set isolation_dir only if
 # multiple concurrent buck2 invocations against the same checkout are needed
 # (e.g. a CI matrix sharing one clone).
+
+# Persistent local action cache across daemon restarts: investigated against
+# this pinned buck2 build (769ca6220bec1a2a5b17241abb337312d13fed0f4bcf143b
+# 9524367b1f06b449, 2026-07-15) and NOT enabled here - no working option was
+# found. What was tried, empirically, using an isolated `--isolation-dir` so
+# the experiment didn't disturb the shared default daemon:
+#   - Baseline: `buck2 build //cpp/test:example_test` (6 local actions) ->
+#     `buck2 kill` -> rebuild with no config changes: still 6 local actions,
+#     0 cached, i.e. buck2's DICE-computed action results do not survive a
+#     daemon restart on this build. (Downloaded network artifacts DO survive
+#     restart already, via the existing buck-out/v2/{art,cache} sqlite
+#     materializer state - see ci-release.yml's Buck2 toolchain cache step -
+#     this gap is specifically about re-executing already-successful local
+#     actions like cxx_compile, not re-downloading toolchains.)
+#   - `-c buck2.sqlite_incremental_state=true`: no observable change (still
+#     6 local / 0 cached after a restart+rebuild).
+#   - `-c buck2.invalidation_tracking_enabled=true`: no observable change.
+#   - `-c buck2.use_network_action_output_cache=true`: broke the toolchain
+#     build outright (unrelated to local re-execution; looks tied to a
+#     network/RE-backed action cache this OSS build has no server for).
+# Recommendation: without a configured RE (remote execution) backend, this
+# buck2 build appears to have no supported on-disk local action-result
+# cache - DICE's computed action results are process-local and lost on
+# daemon restart by design in this OSS distribution. The practical mitigation
+# already in place is keeping the daemon warm (avoid `buck2 kill`/restarts
+# within one CI job or dev session; see ci-release.yml, which now runs the
+# toolchain smoke and `buck2 test //...` in the same daemon lifetime) and the
+# existing artifact/materializer-state caching, which does survive restarts
+# and avoids re-downloads even though it can't avoid re-execution. Revisit if
+# a future pinned buck2 version documents a first-class local action cache
+# (`buck2 docs starlark-builtins`/`buck2 help` on that version) or if this
+# repo ever stands up a real RE backend.
