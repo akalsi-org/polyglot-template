@@ -101,8 +101,8 @@ def assemble_polyglot_demo(args: argparse.Namespace, entry: dict[str, Any], stag
   copy_executable(root / f"build/cpp/{target}/{args.profile}/bin/hello", stage / "libexec/cpp-hello")
   copy_executable(root / f"build/go/{target}/hello", stage / "bin/go-hello")
   copy_tree(python_install, stage / "runtime/python", ignore=("__pycache__", "*.pyc"))
-  copy_tree(root / "python/lib", stage / "app/python/lib", ignore=("*.cc", "__pycache__", "*.pyc"))
-  copy_tree(root / "python/app", stage / "app/python/app", ignore=("__pycache__", "*.pyc"))
+  copy_tree(root / "python/lib", stage / "app/python/lib", ignore=("*.cc", "__pycache__", "*.pyc", "BUCK"))
+  copy_tree(root / "python/app", stage / "app/python/app", ignore=("__pycache__", "*.pyc", "BUCK"))
   copy_tree(root / f"build/python/{target}/lib", stage / "app/python/lib", ignore=("__pycache__", "*.pyc"))
   copy_tree(root / "build/tsweb/site", stage / "app/web")
 

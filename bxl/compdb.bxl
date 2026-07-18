@@ -1,0 +1,55 @@
+"""Materializes a clang compilation database for the buck2-built cpp lane.
+
+Walks every action under //cpp/... and //python/... via aquery, keeps the
+cxx_compile ones (rules/python.bzl's py_extension reuses the same
+"cxx_compile" category/action shape as rules/cxx.bzl's cxx_library/cxx_test,
+so the fastbytes compile action is picked up here without any extra
+filtering logic), and re-renders each as a standard {directory, file,
+arguments} compdb entry. Does NOT write to the repo-root
+compile_commands.json: moon (tools/compdb.py) owns that file until the moon
+lane is retired. Invoke with:
+
+  buck2 bxl //bxl:compdb.bxl:compdb
+
+The printed path (an ensured artifact under buck-out) is the generated
+compile_commands.json for this invocation's active profile (dbg by default;
+pass -m //config:opt / --target-platforms to generate the opt one instead,
+same as any other cpp lane build).
+"""
+
+def _parse_rendered_list(value: str) -> list[str]:
+  # aquery's attrs.cmd.value() renders a cmd_args list as its Starlark
+  # repr, "[a, b, c]" (comma-space joined); parse it back into tokens.
+  inner = value[1:-1]
+  if not inner:
+    return []
+  return [item.strip() for item in inner.split(", ")]
+
+def _impl(ctx: bxl.Context):
+  targets = ctx.uquery().eval("//cpp/... + //python/...")
+  actions = ctx.aquery().all_actions(targets)
+  root = ctx.root()
+  entries = []
+  for action in actions:
+    info = action.attrs
+    if info.category.value() != "cxx_compile":
+      continue
+    cmd = _parse_rendered_list(info.cmd.value())
+    # Every cxx_compile action ends in `-c <source> -o <output>`
+    # (rules/cxx.bzl's _compile_one); the source is 3 tokens from the end.
+    source = cmd[-3]
+    file_path = source if source.startswith("/") else "{}/{}".format(root, source)
+    entries.append({
+      "directory": root,
+      "file": file_path,
+      "arguments": cmd,
+    })
+  entries = sorted(entries, key = lambda entry: entry["file"])
+  output = ctx.bxl_actions().actions.write_json("compile_commands.json", entries, pretty = True)
+  ensured = ctx.output.ensure(output)
+  ctx.output.print(ensured)
+
+compdb = bxl_main(
+  impl = _impl,
+  cli_args = {},
+)

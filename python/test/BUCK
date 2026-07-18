@@ -1,0 +1,41 @@
+# repo.sh's python-test lane equivalent: unittest discovery over
+# python/test, a `python -m compileall` lint-parity check across the whole
+# lane, and a lock-consistency check that the tools.lock.toml python
+# ext_suffix/include_subpath snapshot still matches the pinned interpreter's
+# own sysconfig (see rules/python.bzl's py_lock_consistency_test).
+
+load("//rules:python.bzl", "py_compileall_check", "py_lock_consistency_test", "py_test")
+
+py_test(
+  name = "unittest",
+  srcs = [
+    "test_example.py",
+    "test_fastbytes.py",
+  ],
+  deps = [
+    "//python/lib:fastbytes",
+    "//python/lib:example",
+  ],
+)
+
+py_compileall_check(
+  name = "compileall",
+  dirs = [
+    "python/lib",
+    "python/app",
+    "python/test",
+  ],
+  srcs = [
+    "test_example.py",
+    "test_fastbytes.py",
+  ],
+  deps = [
+    "//python/lib:example",
+    "//python/lib:fastbytes",
+    "//python/app:hello",
+  ],
+)
+
+py_lock_consistency_test(
+  name = "lock_consistency",
+)
