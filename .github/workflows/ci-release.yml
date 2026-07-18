@@ -68,11 +68,37 @@ jobs:
             .local/cache/xdg
           key: polyglot-moon-v1-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('tools.lock.toml', 'moon.yml', '.moon/**') }}
 
+      - name: Restore exact Buck2 toolchain cache
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          # buck-out/v2/art holds the materialized (downloaded + extracted) toolchain
+          # trees that back //toolchains/...; buck-out/v2/cache holds buck2's action
+          # and materializer state db, which buck2 consults alongside the artifacts
+          # to recognize them as up to date and skip re-downloading them. Both are
+          # required together for a cache hit to also mean zero network transfer.
+          # buck-out/v2/log, buck-out/v2/tmp, and buck-out/v2/forkserver are
+          # per-invocation scratch state and are deliberately left uncached.
+          path: |
+            buck-out/v2/art
+            buck-out/v2/cache
+          key: polyglot-buck2-v1-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('tools.lock.toml', 'toolchains/**', 'rules/**', 'platforms/**', '.buckconfig') }}
+
       - name: Bootstrap and validate pinned tools
         run: |
           ./repo.sh bootstrap
           ./repo.sh bootstrap --offline
           ./repo.sh doctor --deep
+
+      - name: Buck2 toolchain smoke
+        run: |
+          ./repo.sh exec buck2 build //toolchains/...
+          ./repo.sh exec buck2 build //toolchains/...
+          # The second build above should be a full cache hit against the toolchain
+          # tree restored or produced above. Assert it performed no network transfer
+          # by reading buck2's own build summary rather than scraping console output,
+          # which is more robust to console-format changes across buck2 releases.
+          ./repo.sh exec buck2 log summary | grep -q 'Total downloaded: 0B'
+          ./repo.sh exec buck2 kill
 
       - name: Run repository quality gates
         run: |
