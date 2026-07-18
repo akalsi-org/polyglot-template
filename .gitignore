@@ -18,3 +18,5 @@
 /.agents/tmp/
 /.agents/logs/
 /.agents/sessions/
+/.headroom
+/.omc
