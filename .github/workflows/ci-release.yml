@@ -136,9 +136,18 @@ jobs:
           # x86_64 and aarch64) rather than //toolchains/... so the cache payload
           # restored/saved per leg above is roughly half of what building every
           # triple's toolchain would need.
+          # This step opts into `set -euo pipefail` above, but bash exempts
+          # any command negated with a leading `!` from errexit - `! grep -q
+          # ...` would return 0 (and the step would report success) even when
+          # the grep DID match, i.e. even when a real network download
+          # occurred. Use an explicit if/then instead so a nonzero download
+          # fails the step for real.
           ./repo.sh exec buck2 build //toolchains:native 2> buck2-second-build.log
           cat buck2-second-build.log
-          ! grep -q 'Down: [1-9]' buck2-second-build.log
+          if grep -q 'Down: [1-9]' buck2-second-build.log; then
+            echo "error: expected a cache-hit build with 0B network downloaded, but a nonzero download was recorded" >&2
+            exit 1
+          fi
           rm -f buck2-second-build.log
           # buck2 test //... builds and runs every buildable target's test in one
           # pass. In this graph that includes each lane's lint-as-test targets

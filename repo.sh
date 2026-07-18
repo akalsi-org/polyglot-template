@@ -38,6 +38,7 @@ setup_environment() {
   loader=$(lock_value gcc-musl "$target" loader)
   gcc_install="$POLYGLOT_LOCAL_DIR/toolchain/$target/gcc-musl-$(lock_value gcc-musl "$target" version)"
   loader_path="$gcc_install/$loader"
+  [[ -x $loader_path ]] || { printf 'error: pinned toolchain is not installed; run ./repo.sh bootstrap\n' >&2; return 1; }
   env_bin="$POLYGLOT_LOCAL_DIR/bin"
   export CC="${gcc%g++}gcc"
   export CXX=$gcc

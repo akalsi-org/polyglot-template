@@ -39,8 +39,18 @@ exists elsewhere in buck-out under a different config hash. _gcc_tools() /
 _python_tools() below therefore also return the raw extracted-toolchain
 Artifacts (gcc_dir, py_dir); every consuming action's/command's `hidden`
 list must include both directly, not just `written`.
+
+The same law applies to `roots` (a py_extension's built `pkg_dir` package
+directory, threaded through PyInfo.roots and embedded into the launcher
+script's PYTHONPATH via _pythonpath_env_lines()): a py_extension's staged
+package directory is itself a build output, not a repo source, so it is
+exactly the same kind of "reached transitively under a different
+configuration" hazard as gcc_dir/py_dir above. Every consuming action's/
+command's `hidden` list that calls _pythonpath_env_lines(roots) must
+therefore also include `roots` directly, alongside gcc_dir/py_dir.
 """
 
+load("//config:defs.bzl", "fail_if_cross_arch", "target_arch_attr")
 load("//config:flags.bzl", "COVERAGE_FLAG", "FORBIDDEN_FLAGS", "STANDARD", "coverage_enabled_flag", "profile_compile_flags", "profile_link_flags")
 load("//rules:coverage.bzl", "CoverageInfo")
 load("//toolchains:lock.bzl", "TOOLCHAINS")
@@ -80,6 +90,7 @@ def _check_flags(flags):
       fail("sanitizers are outside the pinned musl toolchain contract: {}".format(flag))
 
 def _gcc_tools(ctx):
+  fail_if_cross_arch(ctx, _NATIVE_TARGET)
   gcc_dir = ctx.attrs._gcc[DefaultInfo].default_outputs[0]
   # gcc_dir is kept alongside its .project()ed paths so callers can pass the
   # real extracted-toolchain Artifact into `hidden` directly. Embedding
@@ -115,6 +126,7 @@ def _python_tools(ctx):
 _TOOLCHAIN_ATTRS = {
   "_gcc": attrs.dep(default = "//toolchains:gcc-musl-" + _NATIVE_TARGET, providers = [DefaultInfo]),
   "_python": attrs.dep(default = "//toolchains:python-" + _NATIVE_TARGET, providers = [DefaultInfo]),
+  "_target_arch": target_arch_attr(),
 }
 
 # select() is only resolved as an attrs default (see rules/cxx.bzl's
@@ -270,7 +282,7 @@ def _py_binary_impl(ctx: AnalysisContext) -> list[Provider]:
     cmd_args(["exec"] + _loader_exec_prefix(gcc, py) + [ctx.attrs.main, "\"$@\""], delimiter = " "),
   ]
   launcher, written = ctx.actions.write(ctx.attrs.name + ".sh", lines, is_executable = True, allow_args = True)
-  command = cmd_args(launcher, hidden = srcs + written + [gcc.gcc_dir, py.py_dir])
+  command = cmd_args(launcher, hidden = srcs + written + roots + [gcc.gcc_dir, py.py_dir])
   return [
     DefaultInfo(default_output = launcher, other_outputs = written),
     RunInfo(args = command),
@@ -344,7 +356,7 @@ def _py_test_coverage_action(ctx, gcc, py, srcs, roots):
   ]
   script, written = ctx.actions.write(ctx.attrs.name + "-cov.sh", lines, is_executable = True, allow_args = True)
   ctx.actions.run(
-    cmd_args(["/bin/sh", script, lcov.as_output()], hidden = srcs + written + [gcc.gcc_dir, py.py_dir, ctx.attrs._py_cover]),
+    cmd_args(["/bin/sh", script, lcov.as_output()], hidden = srcs + written + roots + [gcc.gcc_dir, py.py_dir, ctx.attrs._py_cover]),
     category = "py_test_coverage",
     identifier = ctx.attrs.name,
   )
@@ -362,7 +374,7 @@ def _py_test_impl(ctx: AnalysisContext) -> list[Provider]:
     ),
   ]
   script, written = ctx.actions.write(ctx.attrs.name + ".sh", lines, is_executable = True, allow_args = True)
-  command = cmd_args(script, hidden = srcs + written + [gcc.gcc_dir, py.py_dir])
+  command = cmd_args(script, hidden = srcs + written + roots + [gcc.gcc_dir, py.py_dir])
   providers = [
     DefaultInfo(default_output = script, other_outputs = written),
     RunInfo(args = command),

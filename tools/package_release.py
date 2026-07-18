@@ -103,7 +103,17 @@ def assemble(args: argparse.Namespace) -> int:
   target = args.target
   require(target in entry["supported_targets"], f"{args.package}: target is not supported: {target}")
   closure, runtime_ref = resolve_closure(args, args.package, target)
-  build_dir = args.build_dir or args.root / "build" / "cpp" / target / args.profile
+  # There is no default build directory anymore: moon-era packages assumed
+  # `build/cpp/<target>/<profile>` was populated by the moon lane's own
+  # cpp-build step, but buck2 (this repo's sole build system - see
+  # rules/package.bzl) never writes there, and no package in package.toml
+  # was ever actually buildable through this fallback (aspirational,
+  # pre-migration). --build-dir is required so a missing/empty directory
+  # fails with an honest message instead of silently resolving to a path
+  # nothing populates.
+  build_dir = args.build_dir
+  require(build_dir is not None, f"{args.package}: --build-dir was not given; this package has no build target in this repository yet")
+  require(build_dir.is_dir() and any(build_dir.iterdir()), f"{args.package}: no built executables at {build_dir}; this package has no build target in this repository yet")
   package_id = f"{args.package}-{entry['version']}-{target}"
   dist_dir = args.dist_dir
   stage_parent = dist_dir / "stage"

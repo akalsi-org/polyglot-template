@@ -12,6 +12,7 @@ There is no prelude in this project, so cxx_test builds its own
 ExternalRunnerTestInfo rather than relying on a prelude-provided cxx_test.
 """
 
+load("//config:defs.bzl", "fail_if_cross_arch", "target_arch_attr")
 load("//config:flags.bzl", "COVERAGE_FLAG", "FORBIDDEN_FLAGS", "STANDARD", "profile_compile_flags", "profile_link_flags")
 load("//rules:coverage.bzl", "CoverageInfo")
 load("//toolchains:lock.bzl", "TOOLCHAINS")
@@ -43,6 +44,7 @@ def _check_flags(flags):
       fail("sanitizers are outside the pinned musl toolchain contract: {}".format(flag))
 
 def _toolchain_tools(ctx):
+  fail_if_cross_arch(ctx, _NATIVE_TARGET)
   gcc_dir = ctx.attrs._gcc[DefaultInfo].default_outputs[0]
   return struct(
     dir = gcc_dir,
@@ -146,6 +148,7 @@ def _loader_launcher(ctx, tools, binary):
 _TOOLCHAIN_ATTRS = {
   "_doctest": attrs.dep(default = "//toolchains:doctest-" + _NATIVE_TARGET, providers = [DefaultInfo]),
   "_gcc": attrs.dep(default = "//toolchains:gcc-musl-" + _NATIVE_TARGET, providers = [DefaultInfo]),
+  "_target_arch": target_arch_attr(),
 }
 
 # select() is only resolved by buck2 when used as an attrs default (the

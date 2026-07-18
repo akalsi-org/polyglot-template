@@ -31,7 +31,7 @@ supported) with DENO_NO_UPDATE_CHECK=1, so none of them touch the network.
 
 Coverage (default-on under dbg - see rules/coverage.bzl's module docstring):
 deno_test's coverage variant adds `--coverage=coverage_raw` to the same
-`deno test --frozen` invocation, as a SEPARATE ctx.actions.run() build
+`deno test --cached-only --frozen` invocation, as a SEPARATE ctx.actions.run() build
 action from the ExternalRunnerTestInfo path `buck2 test` uses for pass/fail
 reporting (mirrors rules/cxx.bzl's/rules/go.bzl's own coverage collection
 actions - see rules/coverage.bzl for why). `deno test --coverage=<dir>`
@@ -244,7 +244,7 @@ deno_run_check = rule(
 # --- deno_test: `deno test --frozen [flags] <paths>`, one buck2 test target
 # per lane's test/ directory.
 def _deno_test_impl(ctx: AnalysisContext) -> list[Provider]:
-  stamp, _ = _stage_and_run(ctx, {}, ["test", "--frozen"] + ctx.attrs.extra_flags + ctx.attrs.entries, "deno_test")
+  stamp, _ = _stage_and_run(ctx, {}, ["test", "--cached-only", "--frozen"] + ctx.attrs.extra_flags + ctx.attrs.entries, "deno_test")
   command = cmd_args(["/bin/sh", "-c", "exit 0"], hidden = [stamp])
   providers = [
     DefaultInfo(default_output = stamp),
@@ -260,7 +260,7 @@ def _deno_test_impl(ctx: AnalysisContext) -> list[Provider]:
     _, out_dir = _stage_and_run(
       ctx,
       {},
-      ["test", "--frozen"] + ctx.attrs.extra_flags + ["--coverage=coverage_raw"] + ctx.attrs.entries,
+      ["test", "--cached-only", "--frozen"] + ctx.attrs.extra_flags + ["--coverage=coverage_raw"] + ctx.attrs.entries,
       "deno_test_coverage",
       out_dir_name = "coverage_raw",
       name_suffix = "-cov",

@@ -53,6 +53,7 @@ different config hash. Every call site below now also passes tools.go_dir
 what actually makes buck2 track and materialize it per-configuration.
 """
 
+load("//config:defs.bzl", "fail_if_cross_arch", "target_arch_attr")
 load("//config:flags.bzl", "coverage_enabled_flag")
 load("//rules:coverage.bzl", "CoverageInfo")
 load("//toolchains:lock.bzl", "TOOLCHAINS")
@@ -77,9 +78,11 @@ GoInfo = provider(fields = ["srcs"])
 _TOOLCHAIN_ATTRS = {
   "_go": attrs.dep(default = "//toolchains:go-" + _NATIVE_TARGET, providers = [DefaultInfo]),
   "_gomod": attrs.source(default = "//:go.mod"),
+  "_target_arch": target_arch_attr(),
 }
 
 def _toolchain_tools(ctx):
+  fail_if_cross_arch(ctx, _NATIVE_TARGET)
   go_dir = ctx.attrs._go[DefaultInfo].default_outputs[0]
   # go_dir is kept alongside goroot (a .project() of it) so callers can pass
   # the real artifact into `hidden` directly - see _write_go_script's
@@ -198,7 +201,7 @@ def _go_binary_impl(ctx: AnalysisContext) -> list[Provider]:
     RunInfo(args = cmd_args(binary)),
   ]
 
-go_binary = rule(
+_go_binary_rule = rule(
   impl = _go_binary_impl,
   attrs = {
     "deps": attrs.list(attrs.dep(providers = [GoInfo]), default = []),
@@ -276,14 +279,21 @@ _go_test_rule = rule(
   } | _TOOLCHAIN_ATTRS,
 )
 
-# go_test is the only go_* rule with a select()-driven attr default
-# (_coverage_enabled); select() only resolves when the target has a
-# concrete configuration, which - absent a prelude - requires
-# `default_target_platform` to be set explicitly (see rules/cxx.bzl's
-# identical _DEFAULT_PLATFORM/macro pattern, used here for the same
-# reason). go_library/go_binary/go_lint have no select()-driven attrs and
-# so don't need this.
+# Every go_* rule except go_library now carries a select()-driven attr
+# default (_TOOLCHAIN_ATTRS' _target_arch, resolved via config/defs.bzl's
+# target_arch_attr() - see MAJOR 3's fail_if_cross_arch()/module docstring;
+# go_test additionally has its own _coverage_enabled). select() only
+# resolves when the target has a concrete configuration, which - absent a
+# prelude - requires `default_target_platform` to be set explicitly (see
+# rules/cxx.bzl's identical _DEFAULT_PLATFORM/macro pattern, used here for
+# the same reason). go_library has no select()-driven attrs (no
+# _TOOLCHAIN_ATTRS at all) and so is exported as a bare rule() below instead
+# of needing a macro.
 _DEFAULT_PLATFORM = "//config:{}-dbg".format(_NATIVE_TARGET)
+
+def go_binary(**kwargs):
+  kwargs.setdefault("default_target_platform", _DEFAULT_PLATFORM)
+  _go_binary_rule(**kwargs)
 
 def go_test(**kwargs):
   kwargs.setdefault("default_target_platform", _DEFAULT_PLATFORM)
@@ -329,7 +339,7 @@ def _go_lint_impl(ctx: AnalysisContext) -> list[Provider]:
     ),
   ]
 
-go_lint = rule(
+_go_lint_rule = rule(
   impl = _go_lint_impl,
   attrs = {
     "deps": attrs.list(attrs.dep(providers = [GoInfo]), default = []),
@@ -338,3 +348,7 @@ go_lint = rule(
     "srcs": attrs.list(attrs.source(), default = []),
   } | _TOOLCHAIN_ATTRS,
 )
+
+def go_lint(**kwargs):
+  kwargs.setdefault("default_target_platform", _DEFAULT_PLATFORM)
+  _go_lint_rule(**kwargs)

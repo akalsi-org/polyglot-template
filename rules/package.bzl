@@ -66,6 +66,7 @@ the root-exported manifest/lock/tools-lock files, so an edit to any of the
 four invalidates this test's buck2 cache entry.
 """
 
+load("//config:defs.bzl", "fail_if_cross_arch", "target_arch_attr")
 load("//rules:python.bzl", "PyInfo")
 load("//toolchains:lock.bzl", "TOOLCHAINS")
 
@@ -101,6 +102,7 @@ def _pick_short_path(srcs, short_path):
 # --- polyglot_package: stage the layout, then archive it deterministically.
 
 def _polyglot_package_impl(ctx: AnalysisContext) -> list[Provider]:
+  fail_if_cross_arch(ctx, _NATIVE_TARGET)
   gcc_dir = ctx.attrs._gcc[DefaultInfo].default_outputs[0]
   loader = gcc_dir.project(_GCC["loader"])
   libc = gcc_dir.project(_LOADER_DIR + "/libc.so")
@@ -332,6 +334,7 @@ _polyglot_package_rule = rule(
     "_gcc": attrs.dep(default = "//toolchains:gcc-musl-" + _NATIVE_TARGET, providers = [DefaultInfo]),
     "_package_model": attrs.source(default = "//:package_model.py"),
     "_python_runtime": attrs.dep(default = "//toolchains:python-" + _NATIVE_TARGET, providers = [DefaultInfo]),
+    "_target_arch": target_arch_attr(),
   },
 )
 
