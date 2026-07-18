@@ -1,6 +1,0 @@
-projects:
-  repo: "."
-
-vcs:
-  defaultBranch: "main"
-  provider: "github"

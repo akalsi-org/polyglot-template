@@ -1,6 +1,11 @@
 # Parallel Build And Manifest Scalability Spike
 
-Status: implemented.
+Status: historical. This spike evaluated and adopted Moon as the aggregate
+task scheduler; Moon and the jobserver/lane-budget scheme it describes were
+retired and replaced by Buck2 (one in-graph scheduler for every lane - see
+[ARCHITECTURE.md](../ARCHITECTURE.md)'s Build And Test Graph section). Kept
+for the historical record of the evaluation; do not treat its recommendations
+as the current contract.
 
 ## Question
 

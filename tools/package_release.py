@@ -67,74 +67,6 @@ def copy_executable(source: Path, destination: Path) -> None:
   os.chmod(destination, 0o755)
 
 
-def copy_tree(source: Path, destination: Path, *, ignore: tuple[str, ...] = ()) -> None:
-  require(source.is_dir(), f"missing built directory: {source}")
-  shutil.copytree(source, destination, dirs_exist_ok=True, symlinks=True, ignore=shutil.ignore_patterns(*ignore))
-
-
-def write_launcher(path: Path, body: str) -> None:
-  write_text(path, "#!/bin/sh\nset -eu\n" + body)
-  os.chmod(path, 0o755)
-
-
-def relative(root: Path, path: Path) -> str:
-  return path.relative_to(root).as_posix()
-
-
-def write_python_runtime_launcher(stage: Path, path: Path, python: Path, loader: Path, library_paths: list[Path]) -> None:
-  library_path = ":".join(f"$ROOT/{relative(stage, item)}" for item in library_paths)
-  write_launcher(
-    path,
-    f'ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)\nexec "$ROOT/{relative(stage, loader)}" --library-path "{library_path}" "$ROOT/{relative(stage, python)}" "$@"\n',
-  )
-
-
-def assemble_polyglot_demo(args: argparse.Namespace, entry: dict[str, Any], stage: Path, target: str) -> None:
-  root = args.root
-  local = root / ".local" / "toolchain" / target
-  tools = load(args.tools_lock).get("artifact", [])
-  gcc = next(item for item in tools if item.get("tool") == "gcc-musl" and item.get("target") == target)
-  python = next(item for item in tools if item.get("tool") == "python" and item.get("target") == target)
-  gcc_install = local / f"gcc-musl-{gcc['version']}"
-  python_install = local / f"python-{python['version']}" / "python"
-
-  copy_executable(root / f"build/cpp/{target}/{args.profile}/bin/hello", stage / "libexec/cpp-hello")
-  copy_executable(root / f"build/go/{target}/hello", stage / "bin/go-hello")
-  copy_tree(python_install, stage / "runtime/python", ignore=("__pycache__", "*.pyc"))
-  copy_tree(root / "python/lib", stage / "app/python/lib", ignore=("*.cc", "__pycache__", "*.pyc", "BUCK"))
-  copy_tree(root / "python/app", stage / "app/python/app", ignore=("__pycache__", "*.pyc", "BUCK"))
-  copy_tree(root / f"build/python/{target}/lib", stage / "app/python/lib", ignore=("__pycache__", "*.pyc"))
-  copy_tree(root / "build/tsweb/site", stage / "app/web")
-
-  loader_source = gcc_install / gcc["loader"]
-  libc_source = loader_source.parent / "libc.so"
-  loader_name = f"ld-musl-{'x86_64' if target.startswith('x86_64') else 'aarch64'}.so.1"
-  copy_executable(loader_source, stage / f"lib/{loader_name}")
-  copy_executable(libc_source, stage / "lib/libc.so")
-  write_python_runtime_launcher(
-    stage,
-    stage / "bin/python",
-    stage / "runtime/python/bin/python3",
-    stage / f"lib/{loader_name}",
-    [stage / "lib", stage / "runtime/python/lib"],
-  )
-  write_python_runtime_launcher(
-    stage,
-    stage / "bin/python3",
-    stage / "runtime/python/bin/python3",
-    stage / f"lib/{loader_name}",
-    [stage / "lib", stage / "runtime/python/lib"],
-  )
-  write_launcher(
-    stage / "bin/cpp-hello",
-    f'ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)\nexec "$ROOT/lib/{loader_name}" --library-path "$ROOT/lib" "$ROOT/libexec/cpp-hello" "$@"\n',
-  )
-  write_launcher(
-    stage / "bin/python-hello",
-    'ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)\nexport PYTHONPATH="$ROOT/app/python/lib:$ROOT/app/python/app"\nexec "$ROOT/bin/python" "$ROOT/app/python/app/hello/main.py" "$@"\n',
-  )
-
-
 def reset_tarinfo(info: tarfile.TarInfo) -> tarfile.TarInfo:
   info.uid = 0
   info.gid = 0
@@ -179,11 +111,9 @@ def assemble(args: argparse.Namespace) -> int:
   if stage.exists():
     shutil.rmtree(stage)
   stage.mkdir(parents=True)
-  if entry.get("layout") == "polyglot-demo":
-    assemble_polyglot_demo(args, entry, stage, target)
-  else:
-    for executable in entry["executables"]:
-      copy_executable(build_dir / "bin" / executable, stage / "bin" / executable)
+  require(entry.get("layout", "executables") != "polyglot-demo", f"{args.package}: polyglot-demo is assembled by //packages:polyglot-demo (buck2), not this tool")
+  for executable in entry["executables"]:
+    copy_executable(build_dir / "bin" / executable, stage / "bin" / executable)
   metadata = {
     "schema_version": 1,
     "package": args.package,

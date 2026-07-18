@@ -1,9 +1,9 @@
-"""Mirrors cpp/cpp.toml's [profiles.dbg] / [profiles.opt] flag sets so
-rules/cxx.bzl does not need to parse TOML at analysis time.
+"""Profile (dbg/opt) flag sets for the buck2-built cpp lane.
 
-cpp/cpp.toml (consumed by tools/cpp_graph.py) stays authoritative for the
-moon-driven `./repo.sh cpp-build` lane until that lane is retired; this file
-must be kept in sync with it by hand until then.
+This file is authoritative: cpp/cpp.toml and tools/cpp_graph.py (the
+moon-driven `./repo.sh cpp-build` lane's flag source) were retired along
+with moon, so rules/cxx.bzl's select()s reading these lists are now the
+only place these flags live.
 """
 
 STANDARD = "gnu++26"

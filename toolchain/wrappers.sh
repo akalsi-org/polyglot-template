@@ -38,8 +38,8 @@ exec \"\$ROOT/$loader_rel\" --library-path \"\$ROOT/$loader_dir_rel:\$ROOT/$pyth
 }
 
 write_repo_tool_wrappers() {
-  local local_dir=$1 cc=$2 cxx=$3 python=$4 loader=$5 deno=$6 go=$7 ninja=$8 moon=$9
-  local gcc_install=${10} target=${11} buck2=${12:-} env_bin binutil binutil_rel
+  local local_dir=$1 cc=$2 cxx=$3 python=$4 loader=$5 deno=$6 go=$7 ninja=$8 buck2=$9
+  local gcc_install=${10} target=${11} env_bin binutil binutil_rel
   env_bin="$local_dir/bin"
   mkdir -p "$env_bin"
   write_python_tool_wrapper "$local_dir" "$env_bin/python" "$python" "$loader"
@@ -49,8 +49,7 @@ write_repo_tool_wrappers() {
   write_direct_tool_wrapper "$local_dir" "$env_bin/go" "$go"
   write_direct_tool_wrapper "$local_dir" "$env_bin/deno" "$deno"
   write_direct_tool_wrapper "$local_dir" "$env_bin/ninja" "$ninja"
-  write_direct_tool_wrapper "$local_dir" "$env_bin/moon" "$moon"
-  [[ -z $buck2 ]] || write_direct_tool_wrapper "$local_dir" "$env_bin/buck2" "$buck2"
+  write_direct_tool_wrapper "$local_dir" "$env_bin/buck2" "$buck2"
   for binutil in ar ranlib nm strip objcopy ld; do
     binutil_rel=$(lock_value gcc-musl "$target" "$binutil")
     write_direct_tool_wrapper "$local_dir" "$env_bin/$binutil" "$gcc_install/$binutil_rel"

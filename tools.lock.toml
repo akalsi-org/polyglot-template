@@ -133,24 +133,6 @@ archive = "doctest-v2.5.3.tar.gz"
 expected = "doctest-2.5.3/doctest/doctest.h"
 kind = "header"
 
-[[artifact]]
-tool = "moon"
-target = "x86_64-linux-musl"
-version = "2.4.4"
-url = "https://github.com/moonrepo/moon/releases/download/v2.4.4/moon_cli-x86_64-unknown-linux-musl.tar.xz"
-sha256 = "ef0750a11ea244430b4950c3098b76dbe73001ba8ef396c67826d465c206cf3b"
-archive = "moon_cli-x86_64-unknown-linux-musl.tar.xz"
-expected = "moon_cli-x86_64-unknown-linux-musl/moon"
-
-[[artifact]]
-tool = "moon"
-target = "aarch64-linux-musl"
-version = "2.4.4"
-url = "https://github.com/moonrepo/moon/releases/download/v2.4.4/moon_cli-aarch64-unknown-linux-musl.tar.xz"
-sha256 = "cf970b684f02a7d6248035fc4f7f23939dbccf5422a984f640b64c3b190c14aa"
-archive = "moon_cli-aarch64-unknown-linux-musl.tar.xz"
-expected = "moon_cli-aarch64-unknown-linux-musl/moon"
-
 # buck2 --version reports a content hash, not semver; the "version" below is the
 # release tag. content_hash pins the exact reported hash so bootstrap/doctor can
 # fail loudly if the downloaded binary reports something else.

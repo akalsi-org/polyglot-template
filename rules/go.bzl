@@ -12,8 +12,9 @@ Determinism / caching note: `go build`/`go test`/`go vet` each keep their
 own content-addressed build cache under GOCACHE (see
 https://go.dev/cmd/go/#hdr-Build_and_test_caching). Left at its default
 location that cache is process-global and would leak state across buck2
-actions (and across the moon lane's own GOCACHE under .local/cache/go) if
-reused here. Every action below instead points GOCACHE/GOPATH/GOMODCACHE at
+actions (and across repo.sh's own `go`/`go-build`/`go-test` passthroughs'
+GOCACHE under .local/cache/go) if reused here. Every action below instead
+points GOCACHE/GOPATH/GOMODCACHE at
 a `mktemp -d` scratch directory private to that one invocation, torn down
 via an EXIT trap - never the repo's shared .local/cache/go and never the
 invoking user's ~/.cache. ($BUCK_SCRATCH_PATH, buck2's own per-build-action

@@ -1,4 +1,0 @@
-[[adapters]]
-name = "example-vendor"
-fragment = "example-vendor.json"
-include_in_compdb = true

@@ -17,14 +17,14 @@ repo/
 |- tools.lock.toml                 # exact bootstrap artifacts
 |- package.toml                    # package declarations
 |- runtime-resolution.lock.toml    # runtime closure lock
-|- moon.yml                        # aggregate task graph
+|- BUCK, rules/, config/, platforms/, toolchains/  # Buck2 build graph
 |- toolchain/                      # bootstrap, target, lock, doctor helpers
-|- cpp/{lib,app,test}/             # C++ graph manifests and sources
+|- cpp/{lib,app,test}/             # C++ sources (BUCK-owned targets)
 |- python/{lib,app,test}/          # Python and native extension sources
 |- go/{lib,app,test}/              # pure-Go lane
 |- ts/{lib,app,test}/              # Deno TypeScript lane
 |- tsweb/{lib,app,test}/           # React/Vite static application
-|- tools/                          # graph, package, lint, and smoke helpers
+|- tools/                          # package, lint, and smoke helpers
 |- test/                           # repository-contract tests
 |- .local/                         # ignored tools and caches
 |- build/                          # ignored build output
@@ -43,25 +43,27 @@ shell
 exec <command> [args...]
 bootstrap [--offline] [--dry-run]
 doctor [--deep]
+buck2 [args...]
 target
 lint
 build [dbg|opt]
 test
 compile-commands [dbg|opt]
-cpp-configure [dbg|opt] | cpp-build [dbg|opt] | cpp-run [dbg|opt] | cpp-test
+cpp-build [dbg|opt] | cpp-run [dbg|opt] | cpp-test
 python [args...] | python-build | python-test
 deno [args...] | ts-build | ts-test | tsweb-build | tsweb-test
 go [args...] | go-build | go-test
-cpp-reflection-probe
 package-validate | package-resolve <name> [out]
 package <name> [dbg|opt] | package-smoke <archive> <name>
 release-check <name> <tag> | release-notes <tag>
 ci
 ```
 
-`infra-lint`, the lane-specific lint commands, `infra-test`, and
-`_job-budget` are internal task entrypoints used by Moon or repository tests;
-they are intentionally omitted from the public help surface.
+`infra-lint` and `infra-test` are internal entrypoints used by `lint` and by
+repository tests respectively; they are intentionally omitted from this list
+but remain directly invocable. Every build/test/lint lane command above is a
+thin wrapper around a Buck2 target invocation - see the Build And Test Graph
+section below.
 
 ## Toolchain And Native Policy
 
@@ -77,28 +79,43 @@ and Python-extension work uses the pinned GCC+musl toolchain. The Python
 interpreter and C++ executables run through that toolchain's matching musl
 loader on glibc hosts. Go runs with `CGO_ENABLED=0`, a repo-local Go toolchain,
 isolated caches, and the currently global `GOEXPERIMENT=jsonv2` setting. Deno,
-Ninja, Moon, and doctest are likewise pinned.
+Ninja, Buck2, and doctest are likewise pinned; every non-Buck2 tool above is
+also wired into the Buck2 graph as an in-graph toolchain (see
+`toolchains/lock.bzl`, generated from `tools.lock.toml`), so buck2-driven
+builds never depend on a host-installed compiler, interpreter, or runtime.
 
 ## Build And Test Graph
 
 `repo.sh` delegates aggregate `lint`, `build`, `test`, and `ci` work to the
-pinned Moon binary. It derives a bounded coarse/inner job budget from
-`POLYGLOT_JOBS`; each language retains its native build semantics below that
-coarse scheduler. `run_moon` also opens a GNU-make-style FIFO jobserver sized
-to the full job budget and exports it via `MAKEFLAGS`. Ninja (cpp-build) joins
-that pool and can expand past its static inner share onto cores idle lanes
-aren't using; Go's `-p` and other lane-local `-P`/`--concurrency` caps stay
-static because those tools don't speak the jobserver protocol.
+pinned Buck2 binary; every lane command (`cpp-build`, `python-test`,
+`go-build`, `ts-test`, `tsweb-build`, ...) is a thin wrapper that invokes the
+corresponding Buck2 target. There is one scheduler: Buck2 owns caching,
+incrementality, and cross-lane concurrency directly, rather than a coarse
+task runner layered over a separate jobserver.
 
-The C++ graph is defined by `cpp/cpp.toml` plus component-local `build.toml`
-files. `tools/cpp_graph.py` generates Ninja, a C++ compile database fragment,
-and the test inventory. `tools/python_build.py` records the native-extension
-compile actions in a Python fragment. `./repo.sh compile-commands` merges the
-available fragments into the root `compile_commands.json`.
+- `build [dbg|opt]` runs `buck2 build //:build` (opt via
+  `--target-platforms //config:<target>-opt`; `-m`/`--modifier` does not
+  override a rule's own default target platform on the pinned buck2 - see
+  `config/defs.bzl`).
+- `test` runs `buck2 test //...`, which builds and runs every lane's tests
+  including its lint-as-test targets.
+- `lint` runs `buck2 test //... --labels lint` (every lane's
+  formatting/static-policy targets, selected by label) plus infra checks
+  (`bash -n` over the shell scripts, `tools/lint.py`) that have no buck2
+  target because they check files outside the buck2 graph.
+- `//:coverage` is a default-on-for-`dbg` merge target: every instrumented
+  lane's test collects coverage as a normal build output under `dbg`, and
+  `buck2 build //:coverage` merges it into one repo-relative lcov report plus
+  a per-file summary. `opt` builds stay uninstrumented.
 
-Direct language test commands are self-contained. Aggregate Moon test tasks
-depend on their corresponding build tasks and defer compilation-database merging
-until the dedicated merge task, avoiding concurrent root-file rewrites.
+Every first-party Buck2 rule (there is no prelude in this repository) lives
+under `rules/`: `rules/cxx.bzl`, `rules/go.bzl`, `rules/python.bzl`,
+`rules/deno.bzl`, `rules/package.bzl`, `rules/coverage.bzl`,
+`rules/toolchain.bzl`, plus small `constraint_setting`/`constraint_value`/
+`group`/`export_file` replacements for prelude rules this repository does not
+have. `./repo.sh compile-commands` materializes the root
+`compile_commands.json` from `bxl/compdb.bxl`'s BXL compilation-database
+query over the buck2-built cpp/python actions.
 
 ## Packages And Releases
 
@@ -108,11 +125,16 @@ closure. `./repo.sh package-validate` validates these contracts before package
 assembly.
 
 `./repo.sh package <name> [dbg|opt]` creates a deterministic gzip tar archive
-at `dist/<name>-<version>-<target>.tar.gz`. For `polyglot-demo`, it first builds
-the C++, Python, Go, and web outputs needed by its staging plan. Package smoke
-extracts an archive into a clean temporary location and runs the declared
-consumer checks. `release-check` verifies a package name and tag against the
-root `CHANGELOG.md`; `release-notes` prints that tag's changelog section.
+at `dist/<name>-<version>-<target>.tar.gz`. For `polyglot-demo`, the archive is
+built entirely in-graph by `//packages:polyglot-demo` (`rules/package.bzl`),
+which stages the same layout `tools/package_release.py` used to assemble by
+hand and produces byte-for-byte the same deterministic tar.gz; `repo.sh` then
+copies Buck2's output archive to `dist/` under the release naming convention.
+Other packages still assemble through `tools/package_release.py` from raw
+build-directory executables. Package smoke extracts an archive into a clean
+temporary location and runs the declared consumer checks. `release-check`
+verifies a package name and tag against the root `CHANGELOG.md`;
+`release-notes` prints that tag's changelog section.
 
 The GitHub workflow runs the normal quality gates on native x64 and ARM64
 runners. A `packages/<name>/v<version>` tag additionally packages that named

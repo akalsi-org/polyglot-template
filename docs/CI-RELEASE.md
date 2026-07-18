@@ -10,16 +10,21 @@ Pull requests, pushes to `main`, matching release tags, and manual dispatches
 run the native x64 and ARM64 matrix. Each job:
 
 1. checks that `./repo.sh target` matches its native runner;
-2. restores exact-key caches for the toolchain, Deno dependency graph, and Moon
-   task state;
+2. restores exact-key caches for the toolchain, Deno dependency graph, and the
+   Buck2 toolchain tree (`buck-out/v2/art` + `buck-out/v2/cache`);
 3. runs live bootstrap, offline bootstrap, and `./repo.sh doctor --deep`;
-4. runs `./repo.sh lint`, `./repo.sh package-validate`,
-   `./repo.sh build`, and `./repo.sh test`;
-5. builds and runs both C++ profiles; and
-6. exercises the pinned Python runtime.
+4. builds `//toolchains:native` twice to prove the second build is a zero-network
+   cache hit, then runs `buck2 test //...` (the primary gate: every lane's
+   build, test, and lint-as-test targets in one pass);
+5. runs `./repo.sh lint`, `./repo.sh package-validate`,
+   `./repo.sh build`, and `./repo.sh test` (each buck2-backed, as a repo.sh
+   command-surface check on top of step 4's direct buck2 invocation);
+6. builds and runs both C++ profiles; and
+7. exercises the pinned Python runtime.
 
-The cache keys include the target, relevant lock files, and bootstrap or Moon
-inputs. A cache hit remains untrusted until bootstrap and doctor revalidate it.
+The cache keys include the target, relevant lock files, and bootstrap or
+Buck2-graph inputs. A cache hit remains untrusted until bootstrap and doctor
+revalidate it.
 
 ## Release Tags
 
