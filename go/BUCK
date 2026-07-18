@@ -1,0 +1,41 @@
+load("//rules:go.bzl", "go_binary", "go_library", "go_lint", "go_test")
+
+# go/lib/greeting: shared package imported by both the hello app and its
+# test, mirroring the module's go/lib/greeting import path.
+go_library(
+  name = "greeting",
+  srcs = ["lib/greeting/greeting.go"],
+)
+
+# go/app/hello: repo.sh's go-build equivalent
+# (`go build -trimpath -o build/go/$target/hello ./go/app/hello`).
+go_binary(
+  name = "hello",
+  package = "./go/app/hello",
+  srcs = ["app/hello/main.go"],
+  deps = [":greeting"],
+  visibility = ["PUBLIC"],
+)
+
+# repo.sh's go-test equivalent (`go test ./go/...`).
+go_test(
+  name = "greeting_test",
+  srcs = ["test/greeting_test.go"],
+  deps = [":greeting"],
+  packages = ["./go/..."],
+)
+
+# repo.sh go-lint lane parity: gofmt-canonical formatting + `go vet`, as
+# their own test targets rather than deferred.
+go_lint(
+  name = "gofmt_check",
+  mode = "fmt",
+  srcs = glob(["**/*.go"]),
+)
+
+go_lint(
+  name = "go_vet",
+  mode = "vet",
+  packages = ["./go/..."],
+  srcs = glob(["**/*.go"]),
+)
