@@ -6,6 +6,7 @@ LOCAL=${POLYGLOT_LOCAL_DIR:-$ROOT/.local}
 POLYGLOT_LOCK_FILE=${POLYGLOT_LOCK_FILE:-$ROOT/tools.lock.toml}
 export POLYGLOT_LOCK_FILE
 . "$ROOT/toolchain/lock.sh"
+. "$ROOT/toolchain/wrappers.sh"
 
 offline=0 dry_run=0
 for arg in "$@"; do
@@ -18,8 +19,126 @@ done
 [[ -f $POLYGLOT_LOCK_FILE ]] || { printf 'error: lock file not found: %s\n' "$POLYGLOT_LOCK_FILE" >&2; exit 1; }
 target=$($ROOT/toolchain/target.sh)
 
+extract_archive() {
+  local archive=$1 cache=$2 destination=$3 listing
+  case "$archive" in
+    *.tar.gz|*.tgz) listing=$(tar -tzf "$cache"); validate_members "$listing"; tar -xzf "$cache" -C "$destination" --no-same-owner --no-same-permissions ;;
+    *.tar.xz) listing=$(tar -tJf "$cache"); validate_members "$listing"; tar -xJf "$cache" -C "$destination" --no-same-owner --no-same-permissions ;;
+    *.tar.zst) listing=$(tar --zstd -tf "$cache"); validate_members "$listing"; tar --zstd -xf "$cache" -C "$destination" --no-same-owner --no-same-permissions ;;
+    *.zip) command -v unzip >/dev/null; listing=$(unzip -Z1 "$cache"); validate_members "$listing"; unzip -q "$cache" -d "$destination" ;;
+    *) printf 'error: unsupported archive: %s\n' "$archive" >&2; return 1 ;;
+  esac
+}
+
+validate_expected_artifact() {
+  local tool=$1 kind=$2 root=$3 expected=$4
+  case "$kind" in
+    header) [[ -f $root/$expected ]] || { printf 'error: %s missing expected header %s\n' "$tool" "$expected" >&2; return 1; } ;;
+    executable) [[ -x $root/$expected ]] || { printf 'error: %s missing expected executable %s\n' "$tool" "$expected" >&2; return 1; } ;;
+    *) printf 'error: unsupported artifact kind for %s: %s\n' "$tool" "$kind" >&2; return 1 ;;
+  esac
+}
+
+normalize_gcc_loader() {
+  local root=$1 declared_loader loader_target
+  declared_loader=$(lock_value gcc-musl "$target" loader)
+  [[ -L $root/$declared_loader ]] || { printf 'error: gcc-musl declared loader is missing\n' >&2; return 1; }
+  loader_target=$(readlink -- "$root/$declared_loader")
+  [[ $loader_target != /lib/libc.so ]] || {
+    rm -- "$root/$declared_loader"
+    ln -s libc.so "$root/$declared_loader"
+  }
+}
+
+probe_python() {
+  local root=$1 expected=$2 gcc_version loader gcc_install loader_dir
+  gcc_version=$(lock_value gcc-musl "$target" version)
+  loader=$(lock_value gcc-musl "$target" loader)
+  gcc_install="$LOCAL/toolchain/$target/gcc-musl-$gcc_version"
+  [[ $loader != UNRESOLVED* && -x $gcc_install/$loader ]] || {
+    printf 'error: Python probe requires resolved musl loader from gcc-musl\n' >&2; return 1;
+  }
+  loader_dir=$(dirname -- "$gcc_install/$loader")
+  "$gcc_install/$loader" --library-path "$loader_dir:$root/python/lib" "$root/$expected" -I -c \
+    'import ctypes, hashlib, sqlite3, ssl, sys, zlib; print(sys.version)' >/dev/null || {
+    printf 'error: Python musl-loader capability probe failed\n' >&2; return 1;
+  }
+}
+
+probe_gcc() {
+  local root=$1 expected=$2 mold dumpmachine binutil binutil_rel
+  mold=$(lock_value gcc-musl "$target" mold)
+  [[ -x $root/$mold ]] || { printf 'error: gcc-musl missing declared mold executable\n' >&2; return 1; }
+  for binutil in ar ranlib nm strip objcopy ld; do
+    binutil_rel=$(lock_value gcc-musl "$target" "$binutil")
+    [[ -x $root/$binutil_rel ]] || { printf 'error: gcc-musl missing declared %s executable\n' "$binutil" >&2; return 1; }
+  done
+  dumpmachine=$("$root/$expected" -dumpmachine)
+  [[ $dumpmachine == "$target" ]] || { printf 'error: compiler target mismatch: %s\n' "$dumpmachine" >&2; return 1; }
+  "$root/$mold" --version | grep -q '^mold 2\.41\.0' || { printf 'error: mold capability probe failed\n' >&2; return 1; }
+  "$root/$expected" -std=gnu++26 -freflection -fsyntax-only "$ROOT/cpp/test/reflection.cc" || {
+    printf 'error: GCC C++26 reflection capability probe failed\n' >&2; return 1;
+  }
+}
+
+probe_go() {
+  local root=$1 expected=$2 version=$3
+  "$root/$expected" version | grep -q "go$version" || { printf 'error: Go capability probe failed\n' >&2; return 1; }
+}
+
+probe_executable() {
+  local tool=$1 root=$2 expected=$3
+  "$root/$expected" --version >/dev/null 2>&1 || { printf 'error: %s capability probe failed\n' "$tool" >&2; return 1; }
+}
+
+probe_doctest() {
+  local root=$1 expected=$2
+  grep -q '^#define DOCTEST_VERSION_MAJOR 2$' "$root/$expected" || {
+    printf 'error: doctest header capability probe failed\n' >&2; return 1;
+  }
+}
+
+probe_artifact() {
+  local tool=$1 kind=$2 root=$3 expected=$4 version=$5
+  case "$tool:$kind" in
+    python:*) probe_python "$root" "$expected" ;;
+    gcc-musl:*) probe_gcc "$root" "$expected" ;;
+    go:*) probe_go "$root" "$expected" "$version" ;;
+    doctest:*) probe_doctest "$root" "$expected" ;;
+    *:executable) probe_executable "$tool" "$root" "$expected" ;;
+  esac
+}
+
+tool_install_path() {
+  local tool=$1 version expected
+  version=$(lock_value "$tool" "$target" version)
+  expected=$(lock_value "$tool" "$target" expected)
+  [[ -n $version && -n $expected ]] || return 1
+  printf '%s/toolchain/%s/%s-%s/%s\n' "$LOCAL" "$target" "$tool" "$version" "$expected"
+}
+
+write_bootstrap_wrappers() {
+  local cxx cc python deno go ninja moon loader gcc_version loader_path gcc_install
+  cxx=$(tool_install_path gcc-musl) || return 0
+  cc="${cxx%g++}gcc"
+  python=$(tool_install_path python) || return 0
+  deno=$(tool_install_path deno) || return 0
+  go=$(tool_install_path go) || return 0
+  ninja=$(tool_install_path ninja) || return 0
+  moon=$(tool_install_path moon) || return 0
+  gcc_version=$(lock_value gcc-musl "$target" version)
+  loader=$(lock_value gcc-musl "$target" loader)
+  gcc_install="$LOCAL/toolchain/$target/gcc-musl-$gcc_version"
+  loader_path="$gcc_install/$loader"
+  for tool in "$cc" "$cxx" "$python" "$deno" "$go" "$ninja" "$moon" "$loader_path"; do
+    [[ -x $tool ]] || return 0
+  done
+  write_repo_tool_wrappers "$LOCAL" "$cc" "$cxx" "$python" "$loader_path" "$deno" "$go" "$ninja" "$moon" "$gcc_install" "$target"
+  printf 'bootstrap: wrote self-contained tool wrappers\n'
+}
+
 install_one() {
-  local tool=$1 version url sha archive expected kind install stamp cache tmp old listing link resolved
+  local tool=$1 version url sha archive expected kind install stamp cache tmp old link resolved
   version=$(lock_value "$tool" "$target" version)
   url=$(lock_value "$tool" "$target" url)
   sha=$(lock_value "$tool" "$target" sha256)
@@ -55,68 +174,15 @@ install_one() {
   tmp="$LOCAL/toolchain/$target/.${tool}-${version}.tmp.$$"
   rm -rf -- "$tmp"; mkdir -p "$tmp"
   trap 'rm -rf -- "$tmp"' RETURN
-  case "$archive" in
-    *.tar.gz|*.tgz) listing=$(tar -tzf "$cache"); validate_members "$listing"; tar -xzf "$cache" -C "$tmp" --no-same-owner --no-same-permissions ;;
-    *.tar.xz) listing=$(tar -tJf "$cache"); validate_members "$listing"; tar -xJf "$cache" -C "$tmp" --no-same-owner --no-same-permissions ;;
-    *.tar.zst) listing=$(tar --zstd -tf "$cache"); validate_members "$listing"; tar --zstd -xf "$cache" -C "$tmp" --no-same-owner --no-same-permissions ;;
-    *.zip) command -v unzip >/dev/null; listing=$(unzip -Z1 "$cache"); validate_members "$listing"; unzip -q "$cache" -d "$tmp" ;;
-    *) printf 'error: unsupported archive: %s\n' "$archive" >&2; return 1 ;;
-  esac
+  extract_archive "$archive" "$cache" "$tmp"
   [[ $tool != go ]] || chmod -R u+w -- "$tmp"
-  if [[ $tool == gcc-musl ]]; then
-    local declared_loader loader_target
-    declared_loader=$(lock_value "$tool" "$target" loader)
-    [[ -L $tmp/$declared_loader ]] || { printf 'error: gcc-musl declared loader is missing\n' >&2; return 1; }
-    loader_target=$(readlink -- "$tmp/$declared_loader")
-    if [[ $loader_target == /lib/libc.so ]]; then
-      rm -- "$tmp/$declared_loader"
-      ln -s libc.so "$tmp/$declared_loader"
-    fi
-  fi
+  [[ $tool != gcc-musl ]] || normalize_gcc_loader "$tmp"
   while IFS= read -r -d '' link; do
     resolved=$(realpath -m -- "$link")
     case "$resolved" in "$tmp"/*) :;; *) printf 'error: archive contains escaping symlink: %s\n' "$link" >&2; return 1;; esac
   done < <(find "$tmp" -type l -print0)
-  if [[ $kind == header ]]; then
-    [[ -f $tmp/$expected ]] || { printf 'error: %s missing expected header %s\n' "$tool" "$expected" >&2; return 1; }
-  elif [[ $kind == executable ]]; then
-    [[ -x $tmp/$expected ]] || { printf 'error: %s missing expected executable %s\n' "$tool" "$expected" >&2; return 1; }
-  else
-    printf 'error: unsupported artifact kind for %s: %s\n' "$tool" "$kind" >&2; return 1
-  fi
-  if [[ $tool == python ]]; then
-    local gcc_version loader gcc_install loader_dir
-    gcc_version=$(lock_value gcc-musl "$target" version)
-    loader=$(lock_value gcc-musl "$target" loader)
-    gcc_install="$LOCAL/toolchain/$target/gcc-musl-$gcc_version"
-    [[ $loader != UNRESOLVED* && -x $gcc_install/$loader ]] || {
-      printf 'error: Python probe requires resolved musl loader from gcc-musl\n' >&2; return 1;
-    }
-    loader_dir=$(dirname -- "$gcc_install/$loader")
-    "$gcc_install/$loader" --library-path "$loader_dir:$tmp/python/lib" "$tmp/$expected" -I -c \
-      'import ctypes, hashlib, sqlite3, ssl, sys, zlib; print(sys.version)' >/dev/null || {
-      printf 'error: Python musl-loader capability probe failed\n' >&2; return 1;
-    }
-  elif [[ $tool == gcc-musl ]]; then
-    local mold dumpmachine probe_source
-    mold=$(lock_value "$tool" "$target" mold)
-    [[ -x $tmp/$mold ]] || { printf 'error: gcc-musl missing declared mold executable\n' >&2; return 1; }
-    dumpmachine=$("$tmp/$expected" -dumpmachine)
-    [[ $dumpmachine == "$target" ]] || { printf 'error: compiler target mismatch: %s\n' "$dumpmachine" >&2; return 1; }
-    "$tmp/$mold" --version | grep -q '^mold 2\.41\.0' || { printf 'error: mold capability probe failed\n' >&2; return 1; }
-    probe_source="$ROOT/cpp/test/reflection.cc"
-    "$tmp/$expected" -std=gnu++26 -freflection -fsyntax-only "$probe_source" || {
-      printf 'error: GCC C++26 reflection capability probe failed\n' >&2; return 1;
-    }
-  elif [[ $tool == go ]]; then
-    "$tmp/$expected" version | grep -q "go$version" || { printf 'error: Go capability probe failed\n' >&2; return 1; }
-  elif [[ $kind == executable ]]; then
-    "$tmp/$expected" --version >/dev/null 2>&1 || { printf 'error: %s capability probe failed\n' "$tool" >&2; return 1; }
-  elif [[ $tool == doctest ]]; then
-    grep -q '^#define DOCTEST_VERSION_MAJOR 2$' "$tmp/$expected" || {
-      printf 'error: doctest header capability probe failed\n' >&2; return 1;
-    }
-  fi
+  validate_expected_artifact "$tool" "$kind" "$tmp" "$expected"
+  probe_artifact "$tool" "$kind" "$tmp" "$expected" "$version"
   old="$install.replaced.$$"
   [[ ! -e $install ]] || mv -- "$install" "$old"
   if ! mv -- "$tmp" "$install"; then [[ ! -e $old ]] || mv -- "$old" "$install"; return 1; fi
@@ -140,6 +206,8 @@ validate_members() {
 while IFS= read -r tool; do install_one "$tool"; done < <(locked_tools)
 
 if ((dry_run == 0)); then
+  write_bootstrap_wrappers
+
   deno_version=$(lock_value deno "$target" version)
   deno_expected=$(lock_value deno "$target" expected)
   deno_install="$LOCAL/toolchain/$target/deno-$deno_version"

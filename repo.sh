@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 export POLYGLOT_ROOT=${POLYGLOT_ROOT:-$ROOT}
 export POLYGLOT_LOCAL_DIR=${POLYGLOT_LOCAL_DIR:-$ROOT/.local}
+. "$ROOT/toolchain/wrappers.sh"
 
 tool_path() {
   local tool=$1 target version expected
@@ -13,6 +14,58 @@ tool_path() {
   version=$(lock_value "$tool" "$target" version)
   expected=$(lock_value "$tool" "$target" expected)
   printf '%s/toolchain/%s/%s-%s/%s\n' "$POLYGLOT_LOCAL_DIR" "$target" "$tool" "$version" "$expected"
+}
+
+setup_environment() {
+  local target gcc python deno go ninja moon gcc_bin go_root path_prefix loader loader_path env_bin gcc_install
+  target=$("$ROOT/toolchain/target.sh")
+  export POLYGLOT_TARGET=$target
+  export POLYGLOT_LOCK_FILE=${POLYGLOT_LOCK_FILE:-$ROOT/tools.lock.toml}
+
+  gcc=$(tool_path gcc-musl)
+  python=$(tool_path python)
+  deno=$(tool_path deno)
+  go=$(tool_path go)
+  ninja=$(tool_path ninja)
+  moon=$(tool_path moon)
+  for tool in "$gcc" "$python" "$deno" "$go" "$ninja" "$moon"; do
+    [[ -x $tool ]] || { printf 'error: pinned toolchain is not installed; run ./repo.sh bootstrap\n' >&2; return 1; }
+  done
+
+  gcc_bin=$(dirname -- "$gcc")
+  go_root=$(dirname -- "$(dirname -- "$go")")
+  . "$ROOT/toolchain/lock.sh"
+  loader=$(lock_value gcc-musl "$target" loader)
+  gcc_install="$POLYGLOT_LOCAL_DIR/toolchain/$target/gcc-musl-$(lock_value gcc-musl "$target" version)"
+  loader_path="$gcc_install/$loader"
+  env_bin="$POLYGLOT_LOCAL_DIR/bin"
+  export CC="${gcc%g++}gcc"
+  export CXX=$gcc
+  write_repo_tool_wrappers "$POLYGLOT_LOCAL_DIR" "$CC" "$CXX" "$python" "$loader_path" "$deno" "$go" "$ninja" "$moon" "$gcc_install" "$target"
+  export POLYGLOT_CXX=$gcc
+  export POLYGLOT_PYTHON=$python
+  export POLYGLOT_DENO=$deno
+  export POLYGLOT_GO=$go
+  export POLYGLOT_NINJA=$ninja
+  export POLYGLOT_MOON=$moon
+  export GOROOT=$go_root
+  export GOPATH="$POLYGLOT_LOCAL_DIR/cache/go/path"
+  export GOMODCACHE="$POLYGLOT_LOCAL_DIR/cache/go/mod"
+  export GOCACHE="$POLYGLOT_LOCAL_DIR/cache/go/build"
+  export GOBIN="$POLYGLOT_LOCAL_DIR/bin"
+  export GOTOOLCHAIN=local
+  export CGO_ENABLED=0
+  export GOEXPERIMENT=jsonv2
+  export GOFLAGS="-p=${POLYGLOT_INNER_JOBS:-$(host_jobs)}"
+  export DENO_DIR="$POLYGLOT_LOCAL_DIR/cache/deno"
+  export MOON_TOOLCHAIN_FORCE_GLOBALS=true
+  export MOON_HOME="$POLYGLOT_LOCAL_DIR/cache/moon/home"
+  export PROTO_HOME="$POLYGLOT_LOCAL_DIR/cache/proto"
+  export XDG_CACHE_HOME="$POLYGLOT_LOCAL_DIR/cache/xdg"
+  export PYTHONPATH="$ROOT/build/python/$target/lib:$ROOT/python/lib:$ROOT/python/app${PYTHONPATH:+:$PYTHONPATH}"
+  path_prefix="$env_bin:$gcc_bin:$go_root/bin:$(dirname -- "$deno"):$(dirname -- "$ninja"):$(dirname -- "$moon")"
+  export POLYGLOT_PATH_PREFIX=$path_prefix
+  export PATH="$path_prefix:$PATH"
 }
 
 host_jobs() {
@@ -30,8 +83,27 @@ compute_job_budget() {
   BUILD_INNER_JOBS=$((jobs / BUILD_LANES))
 }
 
+jobserver_start() {
+  local tokens=$1 dir fifo i
+  dir=$(mktemp -d)
+  fifo="$dir/jobserver.fifo"
+  mkfifo "$fifo"
+  exec {JOBSERVER_FD}<>"$fifo"
+  for ((i = 0; i < tokens; i++)); do printf '.' >&"$JOBSERVER_FD"; done
+  JOBSERVER_DIR=$dir
+  JOBSERVER_FIFO=$fifo
+  export MAKEFLAGS="--jobserver-auth=fifo:$fifo"
+}
+
+jobserver_stop() {
+  [[ -n ${JOBSERVER_FD:-} ]] || return 0
+  exec {JOBSERVER_FD}>&-
+  rm -rf -- "$JOBSERVER_DIR"
+  unset JOBSERVER_FD JOBSERVER_DIR JOBSERVER_FIFO MAKEFLAGS
+}
+
 run_moon() {
-  local target=$1 jobs moon
+  local target=$1 jobs moon tokens
   jobs=$(host_jobs)
   compute_job_budget "$jobs"
   export POLYGLOT_INNER_JOBS=$BUILD_INNER_JOBS
@@ -41,7 +113,10 @@ run_moon() {
   export XDG_CACHE_HOME="$POLYGLOT_LOCAL_DIR/cache/xdg"
   moon=$(tool_path moon)
   [[ -x $moon ]] || { printf 'error: pinned Moon is not installed; run ./repo.sh bootstrap\n' >&2; return 1; }
-  printf 'build budget: total=%s coarse=%s inner=%s\n' "$jobs" "$BUILD_LANES" "$BUILD_INNER_JOBS"
+  tokens=$jobs
+  jobserver_start "$((tokens - 1))"
+  trap jobserver_stop RETURN
+  printf 'build budget: total=%s coarse=%s inner=%s tokens=%s\n' "$jobs" "$BUILD_LANES" "$BUILD_INNER_JOBS" "$tokens"
   "$moon" run --concurrency "$BUILD_LANES" --summary detailed "repo:$target"
 }
 
@@ -50,6 +125,8 @@ usage() {
 Usage: ./repo.sh <command> [options]
 
 Commands:
+  shell                        Start an interactive shell (the default).
+  exec <command> [args...]     Run a command in the pinned repository environment.
   help                         Show this help.
   target                       Print the CPU-native musl output triplet.
   bootstrap [--offline] [--dry-run]
@@ -89,9 +166,19 @@ use tools beneath .local/toolchain and never fall back to host compilers.
 EOF
 }
 
-command=${1:-help}
+command=${1:-shell}
 if (($#)); then shift; fi
 case "$command" in
+  shell)
+    (($# == 0)) || { printf 'usage: ./repo.sh\n' >&2; exit 2; }
+    setup_environment
+    exec bash --noprofile --rcfile "$ROOT/toolchain/repo-shell.bashrc" -i
+    ;;
+  exec)
+    (($# >= 1)) || { printf 'usage: ./repo.sh exec <command> [args...]\n' >&2; exit 2; }
+    setup_environment
+    exec "$@"
+    ;;
   help|-h|--help) usage ;;
   _job-budget)
     (($# == 1)) || { printf 'usage: ./repo.sh _job-budget JOBS\n' >&2; exit 2; }
@@ -164,7 +251,9 @@ case "$command" in
     [[ -x $ninja ]] || { printf 'error: pinned Ninja is not installed; run ./repo.sh bootstrap\n' >&2; exit 1; }
     cxx=$(tool_path gcc-musl)
     (cd "$ROOT" && "$cxx" -std=gnu++26 -freflection -fsyntax-only cpp/test/reflection.cc)
-    (cd "$ROOT" && "$ninja" -j "${POLYGLOT_INNER_JOBS:-$(host_jobs)}" -f "build/cpp/$target/$profile/build.ninja")
+    ninja_jobs=()
+    [[ ${MAKEFLAGS:-} == *--jobserver-auth=* ]] || ninja_jobs=(-j "${POLYGLOT_INNER_JOBS:-$(host_jobs)}")
+    (cd "$ROOT" && "$ninja" "${ninja_jobs[@]}" -f "build/cpp/$target/$profile/build.ninja")
     [[ ${POLYGLOT_DEFER_COMPDB:-0} == 1 ]] || "$ROOT/repo.sh" compile-commands "$profile"
     ;;
   cpp-run)

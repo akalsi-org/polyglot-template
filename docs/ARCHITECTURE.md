@@ -39,6 +39,8 @@ Each language owns `lib/<name>/`, `app/<name>/`, and `test/`. Use
 Run `./repo.sh help` for the canonical, current list. The primary commands are:
 
 ```text
+shell
+exec <command> [args...]
 bootstrap [--offline] [--dry-run]
 doctor [--deep]
 target
@@ -82,7 +84,11 @@ Ninja, Moon, and doctest are likewise pinned.
 `repo.sh` delegates aggregate `lint`, `build`, `test`, and `ci` work to the
 pinned Moon binary. It derives a bounded coarse/inner job budget from
 `POLYGLOT_JOBS`; each language retains its native build semantics below that
-coarse scheduler.
+coarse scheduler. `run_moon` also opens a GNU-make-style FIFO jobserver sized
+to the full job budget and exports it via `MAKEFLAGS`. Ninja (cpp-build) joins
+that pool and can expand past its static inner share onto cores idle lanes
+aren't using; Go's `-p` and other lane-local `-P`/`--concurrency` caps stay
+static because those tools don't speak the jobserver protocol.
 
 The C++ graph is defined by `cpp/cpp.toml` plus component-local `build.toml`
 files. `tools/cpp_graph.py` generates Ninja, a C++ compile database fragment,

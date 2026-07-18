@@ -6,12 +6,20 @@ Editors use two-space indentation across the repository. Go source remains `gofm
 
 ```bash
 ./repo.sh help
+./repo.sh
+./repo.sh exec <command> [args...]
 ./repo.sh lint
 ./repo.sh build
 ./repo.sh test
 ```
 
-CPython 3.14.6, CPU-native GCC 16.1+musl, bundled mold 2.41, Ninja 1.13.1, Deno 2.9.2, Go 1.26.5, and Moon 2.4.3 are pinned for x64 and ARM64 using immutable upstream URLs and verified SHA-256 values. The Python artifacts and C++ outputs are dynamically linked musl programs, so repository commands invoke them through the exact pinned loader/libc closure on glibc hosts.
+Running `./repo.sh` starts an interactive shell with the exact pinned
+toolchain, runtime, cache, and source-root environment. Use `./repo.sh exec`
+to run one command in that same environment; `python`/`python3`, `go`,
+`deno`, and the binutils `ar`/`ranlib`/`nm`/`strip`/`objcopy`/`ld` resolve to
+repository wrappers, while `CC` and `CXX` name the pinned native compiler.
+
+CPython 3.14.6, CPU-native GCC 16.1+musl, bundled mold 2.41, Ninja 1.13.1, Deno 2.9.2, Go 1.26.5, and Moon 2.4.4 are pinned for x64 and ARM64 using immutable upstream URLs and verified SHA-256 values. The Python artifacts and C++ outputs are dynamically linked musl programs, so repository commands invoke them through the exact pinned loader/libc closure on glibc hosts.
 
 The userdocs compiler source is intentional rather than historical accident. Against cross-tools release `20260515`, userdocs release `2628` is about half the compressed download and 22–24% smaller unpacked. Its ARM archive also contains an ARM64-hosted compiler suitable for `ubuntu-24.04-arm`; the cross-tools ARM64-target archive inspected during selection contains an x86-64-hosted compiler. See the parent architecture document for the measured table.
 
@@ -29,7 +37,7 @@ The checked-in GitHub workflow performs a real native bootstrap on x64 and ARM64
 
 `polyglot-demo` is the complete consumer proof: one target archive contains the C++ executable and musl loader, static Go executable, Python application/native extension and exactly one CPython runtime, plus the React static bundle. Its package smoke runs every executable and validates every referenced web asset from an isolated extraction without host Python, Deno, Go, compiler, or source-tree state.
 
-The command surface is uniform across lanes: `cpp-build`/`cpp-test`, `python-build`/`python-test`, `ts-build`/`ts-test`, `go-build`/`go-test`, and `tsweb-build`/`tsweb-test`. Aggregate `build` and `test` use pinned Moon to execute independent lanes concurrently with a bounded host budget and detailed critical-path timings; `lint` owns formatting and static policy for every language. C++ components own nearby `build.toml` files while `cpp/cpp.toml` retains only global policy. Atomic C++ and Python fragments feed one race-free root compilation database. See [the completed parallel-build spike](docs/spikes/parallel-build.md).
+The command surface is uniform across lanes: `cpp-build`/`cpp-test`, `python-build`/`python-test`, `ts-build`/`ts-test`, `go-build`/`go-test`, and `tsweb-build`/`tsweb-test`. Aggregate `build` and `test` use pinned Moon to execute independent lanes concurrently with a bounded host budget and detailed critical-path timings; `lint` owns formatting and static policy for every language. Alongside that lane budget, `run_moon` opens a GNU make FIFO jobserver sized to the full host job count; Ninja joins the pool through `MAKEFLAGS` and can absorb cores idle lanes leave free, while Go's `-p` and other lane-local concurrency flags keep their static caps. C++ components own nearby `build.toml` files while `cpp/cpp.toml` retains only global policy. Atomic C++ and Python fragments feed one race-free root compilation database. See [the completed parallel-build spike](docs/spikes/parallel-build.md).
 
 For task-oriented source layout, command, and validation guidance by language,
 see the [language guide](docs/LANGUAGE-GUIDE.md).

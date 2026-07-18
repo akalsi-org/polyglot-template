@@ -34,7 +34,7 @@ for command in \
 done
 
 help=$($root/repo.sh help)
-for command in build test cpp-test python-test ts-test go-test tsweb-test; do
+for command in shell exec build test cpp-test python-test ts-test go-test tsweb-test; do
   grep -Eq "^  ${command}( |$)" <<<"$help"
 done
 for removed in python-check ts-check go-check tsweb-check; do
@@ -45,6 +45,52 @@ done
 [[ $($root/repo.sh _job-budget 4) == '2 2' ]]
 [[ $($root/repo.sh _job-budget 8) == '4 2' ]]
 [[ $($root/repo.sh _job-budget 16) == '5 3' ]]
+
+grep -Fq 'jobserver_start' "$root/repo.sh"
+grep -Fq 'jobserver_stop' "$root/repo.sh"
+grep -Fq 'mkfifo' "$root/repo.sh"
+grep -Fq 'MAKEFLAGS="--jobserver-auth=fifo:' "$root/repo.sh"
+grep -Fq 'export MAKEFLAGS' "$root/repo.sh"
+grep -Fq 'tokens=' "$root/repo.sh"
+grep -Fq -- '--jobserver-auth=' "$root/repo.sh"
+
+environment=$($root/repo.sh exec bash -c 'printf "%s|%s|%s|%s|%s|%s\n" "$POLYGLOT_ROOT" "$POLYGLOT_TARGET" "$CXX" "$GOROOT" "$DENO_DIR" "$PYTHONPATH"')
+IFS='|' read -r env_root env_target env_cxx env_goroot env_deno_dir env_pythonpath <<<"$environment"
+[[ $env_root == "$root" ]]
+[[ $env_target =~ ^(x86_64|aarch64)-linux-musl$ ]]
+[[ -x $env_cxx && -d $env_goroot && -d $env_deno_dir ]]
+[[ $env_pythonpath == "$root/build/python/$env_target/lib:$root/python/lib:$root/python/app" ]]
+[[ $($root/repo.sh exec python -I -c 'print("python launcher")') == 'python launcher' ]]
+[[ $($root/repo.sh exec go version) == 'go version go1.'* ]]
+[[ $($root/repo.sh exec deno --version | head -n1) == 'deno 2.9.2 '* ]]
+[[ $($root/repo.sh exec bash -c 'which python') == "$root/.local/bin/python" ]]
+[[ $($root/repo.sh exec bash -c 'which go') == "$root/.local/bin/go" ]]
+[[ $($root/repo.sh exec bash -c 'which gcc') == "$root/.local/bin/gcc" ]]
+[[ $($root/repo.sh exec bash -c 'which g++') == "$root/.local/bin/g++" ]]
+for binutil in ar ranlib nm strip objcopy ld; do
+  [[ $($root/repo.sh exec bash -c "which $binutil") == "$root/.local/bin/$binutil" ]]
+done
+[[ $(env -i PATH=/usr/bin:/bin "$root/.local/bin/python" -I -c 'print("self-contained python")') == 'self-contained python' ]]
+[[ $(env -i PATH=/usr/bin:/bin "$root/.local/bin/go" version) == 'go version go1.'* ]]
+[[ $(env -i PATH=/usr/bin:/bin "$root/.local/bin/gcc" -dumpmachine) == "$env_target" ]]
+[[ $(env -i PATH=/usr/bin:/bin "$root/.local/bin/g++" -dumpmachine) == "$env_target" ]]
+env -i PATH=/usr/bin:/bin "$root/.local/bin/ar" --version >/dev/null
+env -i PATH=/usr/bin:/bin "$root/.local/bin/strip" --version >/dev/null
+
+shell_home=$(mktemp -d)
+trap 'rm -rf -- "$shell_home"' EXIT
+printf 'export PATH=/usr/bin:/bin\n' >"$shell_home/.bashrc"
+shell_paths=$(printf 'which python\nwhich go\nwhich gcc\nwhich g++\npython -I -c "print(42)"\ngo version\nexit\n' | HOME=$shell_home "$root/repo.sh" shell 2>/dev/null)
+mapfile -t shell_path_lines <<<"$shell_paths"
+[[ ${shell_path_lines[0]} == "$root/.local/bin/python" ]]
+[[ ${shell_path_lines[1]} == "$root/.local/bin/go" ]]
+[[ ${shell_path_lines[2]} == "$root/.local/bin/gcc" ]]
+[[ ${shell_path_lines[3]} == "$root/.local/bin/g++" ]]
+[[ $shell_paths == *$'\n42\n'* ]]
+[[ $shell_paths == *$'\ngo version go1.'* ]]
+grep -Fq 'repo-shell.bashrc' "$root/repo.sh"
+! grep -Fq -- '--login' "$root/repo.sh"
+! grep -Fq 'toolchain/env' "$root/repo.sh"
 
 grep -Fq 'repo: "."' "$root/.moon/workspace.yml"
 for task in cpp-build python-build ts-build go-build tsweb-build compile-commands build test; do

@@ -77,6 +77,18 @@ def write_launcher(path: Path, body: str) -> None:
   os.chmod(path, 0o755)
 
 
+def relative(root: Path, path: Path) -> str:
+  return path.relative_to(root).as_posix()
+
+
+def write_python_runtime_launcher(stage: Path, path: Path, python: Path, loader: Path, library_paths: list[Path]) -> None:
+  library_path = ":".join(f"$ROOT/{relative(stage, item)}" for item in library_paths)
+  write_launcher(
+    path,
+    f'ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)\nexec "$ROOT/{relative(stage, loader)}" --library-path "{library_path}" "$ROOT/{relative(stage, python)}" "$@"\n',
+  )
+
+
 def assemble_polyglot_demo(args: argparse.Namespace, entry: dict[str, Any], stage: Path, target: str) -> None:
   root = args.root
   local = root / ".local" / "toolchain" / target
@@ -99,13 +111,27 @@ def assemble_polyglot_demo(args: argparse.Namespace, entry: dict[str, Any], stag
   loader_name = f"ld-musl-{'x86_64' if target.startswith('x86_64') else 'aarch64'}.so.1"
   copy_executable(loader_source, stage / f"lib/{loader_name}")
   copy_executable(libc_source, stage / "lib/libc.so")
+  write_python_runtime_launcher(
+    stage,
+    stage / "bin/python",
+    stage / "runtime/python/bin/python3",
+    stage / f"lib/{loader_name}",
+    [stage / "lib", stage / "runtime/python/lib"],
+  )
+  write_python_runtime_launcher(
+    stage,
+    stage / "bin/python3",
+    stage / "runtime/python/bin/python3",
+    stage / f"lib/{loader_name}",
+    [stage / "lib", stage / "runtime/python/lib"],
+  )
   write_launcher(
     stage / "bin/cpp-hello",
     f'ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)\nexec "$ROOT/lib/{loader_name}" --library-path "$ROOT/lib" "$ROOT/libexec/cpp-hello" "$@"\n',
   )
   write_launcher(
     stage / "bin/python-hello",
-    f'ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)\nexport PYTHONPATH="$ROOT/app/python/lib:$ROOT/app/python/app"\nexec "$ROOT/lib/{loader_name}" --library-path "$ROOT/lib:$ROOT/runtime/python/lib" "$ROOT/runtime/python/bin/python3" "$ROOT/app/python/app/hello/main.py" "$@"\n',
+    'ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)\nexport PYTHONPATH="$ROOT/app/python/lib:$ROOT/app/python/app"\nexec "$ROOT/bin/python" "$ROOT/app/python/app/hello/main.py" "$@"\n',
   )
 
 
@@ -219,6 +245,8 @@ def smoke(args: argparse.Namespace) -> int:
         subprocess.run([str(path)], cwd=scratch, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if entry.get("layout") == "polyglot-demo":
       require((scratch / "app/web/index.html").is_file(), "packaged React index is missing")
+      require((scratch / "bin/python").is_file(), "packaged Python launcher is missing")
+      require((scratch / "bin/python3").is_file(), "packaged Python3 launcher is missing")
       subprocess.run(
         [sys.executable, str(args.root / "tools/tsweb_smoke.py"), "--root", str(scratch / "app/web")],
         check=True,

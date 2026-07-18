@@ -5,6 +5,11 @@ runtime contract. `./repo.sh` is the only supported command surface: it selects
 the pinned toolchain, runtime, caches, and target ABI. Do not call host
 compilers, interpreters, package managers, or generated build files directly.
 
+Run `./repo.sh` without arguments for an interactive shell with that
+environment, or `./repo.sh exec <command> [args...]` for one command. In either
+case, `python`/`python3`, `go`, `deno`, and the binutils
+`ar`/`ranlib`/`nm`/`strip`/`objcopy`/`ld` resolve to the pinned wrappers.
+
 Before making a change, inspect the owning `lib/`, `app/`, and `test/` paths.
 Afterward, run the lane's test command. Run `./repo.sh lint` when changing more
 than a narrowly isolated lane or before handing off a multi-file change.
