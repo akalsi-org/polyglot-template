@@ -1,0 +1,131 @@
+# Buck2 mirror of the moon-owned tsweb-build/tsweb-test/tsweb-lint fragments
+# (see moon.yml and repo.sh's tsweb-build/tsweb-test cases), plus the one
+# deno_cache population action shared with the ts/ lane (see ts/BUCK) and
+# the tsconfig/prettier emission deliverable (deno.json stays authoritative;
+# see rules/deno.bzl's tsconfig_emit/tsconfig_drift_test doc comment).
+
+load("//rules:deno.bzl", "deno_cache", "deno_lint", "deno_test", "smoke_test", "tsconfig_drift_test", "tsconfig_emit", "vite_build")
+load("//rules:file.bzl", "export_file")
+
+export_file(name = "index.html", src = "app/site/index.html")
+export_file(name = "main.tsx", src = "app/site/main.tsx")
+export_file(name = "style.css", src = "app/site/style.css")
+export_file(name = "app.tsx", src = "lib/app/app.tsx")
+export_file(name = "title.ts", src = "lib/title/title.ts")
+export_file(name = "app_test.tsx", src = "test/app_test.tsx")
+export_file(name = "title_test.ts", src = "test/title_test.ts")
+export_file(name = "vite_config.ts", src = "vite.config.ts")
+
+_TSWEB_SRCS = {
+  "tsweb/app/site/index.html": ":index.html",
+  "tsweb/app/site/main.tsx": ":main.tsx",
+  "tsweb/app/site/style.css": ":style.css",
+  "tsweb/lib/app/app.tsx": ":app.tsx",
+  "tsweb/lib/title/title.ts": ":title.ts",
+  "tsweb/test/app_test.tsx": ":app_test.tsx",
+  "tsweb/test/title_test.ts": ":title_test.ts",
+  "tsweb/vite.config.ts": ":vite_config.ts",
+}
+
+# The one network-permitted action for both the ts/ and tsweb/ lanes.
+deno_cache(
+  name = "cache",
+  deno = "//toolchains:deno-x86_64-linux-musl",
+  deno_json = "//:deno.json",
+  deno_lock = "//:deno.lock",
+  entries = [
+    "ts/app/hello/main.ts",
+    "ts/test/greeting_test.ts",
+    "tsweb/app/site/main.tsx",
+    "tsweb/test/app_test.tsx",
+    "tsweb/test/title_test.ts",
+    "tsweb/vite.config.ts",
+  ],
+  srcs = _TSWEB_SRCS | {
+    "ts/app/hello/main.ts": "//ts:main.ts",
+    "ts/lib/greeting/greeting.ts": "//ts:greeting.ts",
+    "ts/test/greeting_test.ts": "//ts:greeting_test.ts",
+  },
+  visibility = ["PUBLIC"],
+)
+
+# tsweb-test parity: `deno test --frozen --allow-env=NODE_ENV tsweb/test/`.
+deno_test(
+  name = "test",
+  deno = "//toolchains:deno-x86_64-linux-musl",
+  deno_dir = ":cache[deno-dir]",
+  deno_json = "//:deno.json",
+  deno_lock = "//:deno.lock",
+  entries = ["tsweb/test/"],
+  extra_flags = ["--allow-env=NODE_ENV"],
+  node_modules = ":cache[node-modules]",
+  srcs = _TSWEB_SRCS,
+  visibility = ["PUBLIC"],
+)
+
+# tsweb-build parity: `deno run --cached-only --frozen -A npm:vite@8.1.4
+# build --config tsweb/vite.config.ts`. vite.config.ts's outDir resolves
+# "../build/tsweb/site" relative to itself, i.e. <staged-root>/build/tsweb/site.
+vite_build(
+  name = "site",
+  config = "tsweb/vite.config.ts",
+  deno = "//toolchains:deno-x86_64-linux-musl",
+  deno_dir = ":cache[deno-dir]",
+  deno_json = "//:deno.json",
+  deno_lock = "//:deno.lock",
+  node_modules = ":cache[node-modules]",
+  out_dir = "build/tsweb/site",
+  srcs = _TSWEB_SRCS,
+  vite_version = "8.1.4",
+  visibility = ["PUBLIC"],
+)
+
+# tsweb-test parity, part 2: python3 tools/tsweb_smoke.py --root <site>.
+smoke_test(
+  name = "smoke",
+  root = ":site",
+  script = "//:tsweb_smoke.py",
+  visibility = ["PUBLIC"],
+)
+
+# tsweb-lint parity: `deno fmt --check` and `deno lint`, scoped to tsweb/.
+deno_lint(
+  name = "fmt_check",
+  args = ["fmt", "--check"],
+  deno = "//toolchains:deno-x86_64-linux-musl",
+  deno_dir = ":cache[deno-dir]",
+  deno_json = "//:deno.json",
+  deno_lock = "//:deno.lock",
+  entries = ["tsweb/"],
+  node_modules = ":cache[node-modules]",
+  srcs = _TSWEB_SRCS,
+  visibility = ["PUBLIC"],
+)
+
+deno_lint(
+  name = "lint",
+  args = ["lint"],
+  deno = "//toolchains:deno-x86_64-linux-musl",
+  deno_dir = ":cache[deno-dir]",
+  deno_json = "//:deno.json",
+  deno_lock = "//:deno.lock",
+  entries = ["tsweb/"],
+  node_modules = ":cache[node-modules]",
+  srcs = _TSWEB_SRCS,
+  visibility = ["PUBLIC"],
+)
+
+# tsconfig/prettier emission (deferred where-it-finally-lives decision; see
+# rules/deno.bzl doc comment). Materialize with:
+#   ./repo.sh exec buck2 build //tsweb:tsconfig --show-full-output
+tsconfig_emit(
+  name = "tsconfig",
+  deno_json = "//:deno.json",
+  visibility = ["PUBLIC"],
+)
+
+tsconfig_drift_test(
+  name = "tsconfig_drift",
+  deno_json = "//:deno.json",
+  visibility = ["PUBLIC"],
+)
