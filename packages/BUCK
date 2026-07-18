@@ -1,0 +1,33 @@
+# Buck2 mirror of package.toml's polyglot-demo application package (moon
+# owns tools/package_release.py / `./repo.sh package polyglot-demo`; see
+# rules/package.bzl for the full mirroring rationale). dbg is the default
+# profile, like every other already-ported lane's macros; override with
+# `-m //config:opt` to match repo.sh's own `[dbg|opt]` opt-in.
+
+load("//rules:package.bzl", "package_manifest_test", "package_smoke", "polyglot_package")
+
+polyglot_package(
+  name = "polyglot-demo",
+  cpp_hello = "//cpp/app/hello:hello",
+  go_hello = "//go:hello",
+  python_app = "//python/app:hello",
+  python_lib_example = "//python/lib:example",
+  python_lib_fastbytes = "//python/lib:fastbytes",
+  web_site = "//tsweb:site",
+  visibility = ["PUBLIC"],
+)
+
+package_smoke(
+  name = "polyglot-demo-smoke",
+  package = ":polyglot-demo",
+  smoke_script = "//:tsweb_smoke.py",
+  visibility = ["PUBLIC"],
+)
+
+package_manifest_test(
+  name = "manifest-validate",
+  lock = "//:runtime-resolution.lock.toml",
+  manifest = "//:package.toml",
+  tools_lock = "//:tools.lock.toml",
+  visibility = ["PUBLIC"],
+)
