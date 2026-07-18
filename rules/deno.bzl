@@ -28,7 +28,27 @@ writes sqlite scratch back even on --cached-only/frozen runs — plus a
 read-only symlink of node_modules placed next to a staged copy of the
 sources it needs. All consumers pass --frozen (and --cached-only where
 supported) with DENO_NO_UPDATE_CHECK=1, so none of them touch the network.
+
+Coverage (default-on under dbg - see rules/coverage.bzl's module docstring):
+deno_test's coverage variant adds `--coverage=coverage_raw` to the same
+`deno test --frozen` invocation, as a SEPARATE ctx.actions.run() build
+action from the ExternalRunnerTestInfo path `buck2 test` uses for pass/fail
+reporting (mirrors rules/cxx.bzl's/rules/go.bzl's own coverage collection
+actions - see rules/coverage.bzl for why). `deno test --coverage=<dir>`
+auto-generates coverage_raw/lcov.info with NO extra `deno coverage --lcov`
+step needed (validated empirically against the pinned deno 2.9.2: it always
+writes an lcov + html report at the end unless
+--coverage-raw-data-only is passed). Its SF: paths are ABSOLUTE, rooted at
+this action's own ephemeral `$WORK/proj` staging directory (torn down by
+this same script's EXIT trap, same as every other _stage_and_run consumer)
+- tools/coverage_merge.py fixes this up by slicing each SF: path at its
+last "/proj/" segment, which is safe because `_stage_and_run` always names
+the staging directory exactly "proj" and stages sources at their real
+repo-relative paths (e.g. "ts/lib/greeting/greeting.ts") underneath it.
 """
+
+load("//config:flags.bzl", "coverage_enabled_flag")
+load("//rules:coverage.bzl", "CoverageInfo")
 
 def _entries_to_layout(deno_json, deno_lock, srcs):
   # `srcs` maps the path the staged layout needs (e.g. "ts/app/hello/main.ts",
@@ -121,17 +141,22 @@ def _stage_and_run(
     extra_layout: dict,
     deno_args: list,
     category: str,
-    out_dir_name: [str, None] = None) -> (Artifact, [Artifact, None]):
+    out_dir_name: [str, None] = None,
+    name_suffix: str = "") -> (Artifact, [Artifact, None]):
+  # name_suffix disambiguates output paths when a single rule instance calls
+  # _stage_and_run more than once (e.g. deno_test's plain run plus its
+  # coverage-collection run - see _deno_test_impl) - every declared output
+  # below is otherwise keyed only on ctx.label.name, which would collide.
   layout = _entries_to_layout(ctx.attrs.deno_json, ctx.attrs.deno_lock, ctx.attrs.srcs)
   layout.update(extra_layout)
-  staged = ctx.actions.symlinked_dir(ctx.label.name + "-staged", layout)
+  staged = ctx.actions.symlinked_dir(ctx.label.name + name_suffix + "-staged", layout)
 
   deno_dir = ctx.attrs.deno_dir[DefaultInfo].default_outputs[0]
   node_modules = ctx.attrs.node_modules[DefaultInfo].default_outputs[0]
   deno = _deno_bin(ctx)
 
-  stamp = ctx.actions.declare_output(ctx.label.name + ".stamp")
-  out_dir = ctx.actions.declare_output(out_dir_name) if out_dir_name else None
+  stamp = ctx.actions.declare_output(ctx.label.name + name_suffix + ".stamp")
+  out_dir = ctx.actions.declare_output((out_dir_name + name_suffix) if out_dir_name else None) if out_dir_name else None
 
   lines = [
     "#!/bin/sh",
@@ -163,7 +188,7 @@ def _stage_and_run(
     lines.append("cp -R \"$WORK/proj/%s\"/. \"$OUT_DIR\"/" % out_dir_name)
   lines.append("echo ok >\"$STAMP\"")
 
-  script = ctx.actions.write(ctx.label.name + "-run.sh", lines, is_executable = True)
+  script = ctx.actions.write(ctx.label.name + name_suffix + "-run.sh", lines, is_executable = True)
   run_args = [
     "/bin/sh",
     script,
@@ -221,18 +246,49 @@ deno_run_check = rule(
 def _deno_test_impl(ctx: AnalysisContext) -> list[Provider]:
   stamp, _ = _stage_and_run(ctx, {}, ["test", "--frozen"] + ctx.attrs.extra_flags + ctx.attrs.entries, "deno_test")
   command = cmd_args(["/bin/sh", "-c", "exit 0"], hidden = [stamp])
-  return [
+  providers = [
     DefaultInfo(default_output = stamp),
     ExternalRunnerTestInfo(type = "deno", command = [command], run_from_project_root = True),
   ]
+  if ctx.attrs._coverage_enabled:
+    # Second, separate `deno test` run (mirrors rules/cxx.bzl's/
+    # rules/go.bzl's own coverage collection actions - see this file's
+    # module docstring and rules/coverage.bzl for why) with
+    # --coverage=coverage_raw added; deno auto-generates
+    # coverage_raw/lcov.info, which _stage_and_run's out_dir_name copies out
+    # whole as this action's declared output.
+    _, out_dir = _stage_and_run(
+      ctx,
+      {},
+      ["test", "--frozen"] + ctx.attrs.extra_flags + ["--coverage=coverage_raw"] + ctx.attrs.entries,
+      "deno_test_coverage",
+      out_dir_name = "coverage_raw",
+      name_suffix = "-cov",
+    )
+    providers.append(CoverageInfo(kind = "deno", primary = out_dir, tool = None, gcnos = None, toolchain_dir = None))
+  return providers
 
-deno_test = rule(
+_deno_test_rule = rule(
   impl = _deno_test_impl,
   attrs = _CONSUMER_ATTRS | {
     "entries": attrs.list(attrs.string()),
     "extra_flags": attrs.list(attrs.string(), default = []),
+    "_coverage_enabled": attrs.bool(default = coverage_enabled_flag()),
   },
 )
+
+# deno_test is the only deno_* rule with a select()-driven attr default
+# (_coverage_enabled) - see rules/go.bzl's identical go_test macro for why
+# that requires default_target_platform to be set explicitly.
+_DEFAULT_PLATFORM = "//config:x86_64-linux-musl-dbg"
+
+def deno_test(**kwargs):
+  kwargs.setdefault("default_target_platform", _DEFAULT_PLATFORM)
+  # See rules/cxx.bzl's cxx_test macro for why: //:coverage now depends on
+  # deno_test targets directly, which need to be reachable from the root
+  # package without editing ts/BUCK or tsweb/BUCK's existing call sites.
+  kwargs.setdefault("visibility", ["PUBLIC"])
+  _deno_test_rule(**kwargs)
 
 # --- deno_lint: shared shape for `deno fmt --check` and `deno lint` parity
 # targets, wired up as buck2 tests.
@@ -241,7 +297,7 @@ def _deno_lint_impl(ctx: AnalysisContext) -> list[Provider]:
   command = cmd_args(["/bin/sh", "-c", "exit 0"], hidden = [stamp])
   return [
     DefaultInfo(default_output = stamp),
-    ExternalRunnerTestInfo(type = "deno", command = [command], run_from_project_root = True),
+    ExternalRunnerTestInfo(type = "deno", command = [command], run_from_project_root = True, labels = ["lint"]),
   ]
 
 deno_lint = rule(
@@ -376,7 +432,7 @@ def _tsconfig_drift_test_impl(ctx: AnalysisContext) -> list[Provider]:
   command = cmd_args(["/bin/sh", "-c", "exit 0"], hidden = [stamp])
   return [
     DefaultInfo(default_output = stamp),
-    ExternalRunnerTestInfo(type = "tsconfig_drift", command = [command], run_from_project_root = True),
+    ExternalRunnerTestInfo(type = "tsconfig_drift", command = [command], run_from_project_root = True, labels = ["lint"]),
   ]
 
 tsconfig_drift_test = rule(

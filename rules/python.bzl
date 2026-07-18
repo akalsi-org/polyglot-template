@@ -41,7 +41,8 @@ Artifacts (gcc_dir, py_dir); every consuming action's/command's `hidden`
 list must include both directly, not just `written`.
 """
 
-load("//config:flags.bzl", "FORBIDDEN_FLAGS", "STANDARD", "profile_compile_flags", "profile_link_flags")
+load("//config:flags.bzl", "COVERAGE_FLAG", "FORBIDDEN_FLAGS", "STANDARD", "coverage_enabled_flag", "profile_compile_flags", "profile_link_flags")
+load("//rules:coverage.bzl", "CoverageInfo")
 load("//toolchains:lock.bzl", "TOOLCHAINS")
 
 def _native_target() -> str:
@@ -186,8 +187,20 @@ _py_library_rule = rule(
 def _py_extension_impl(ctx: AnalysisContext) -> list[Provider]:
   gcc = _gcc_tools(ctx)
   py = _python_tools(ctx)
-  _check_flags(ctx.attrs.compile_flags)
-  _check_flags(ctx.attrs.link_flags)
+  # fastbytes' C++ side is deliberately out of scope for the coverage lane
+  # (see rules/coverage.bzl's module docstring: only python/lib + python/app
+  # .py files are measured, via tools/py_cover.py - not the compiled
+  # extension). COVERAGE_FLAG still arrives here via config/flags.bzl's
+  # shared profile_compile_flags()/profile_link_flags() (the same select()
+  # cxx_test/cxx_binary use), so it has to be stripped explicitly: applying
+  # --coverage to a -shared link pulls in the toolchain's non-PIC static
+  # libgcov.a/libstdc++.a objects, which mold then refuses to link into a
+  # shared object ("relocation ... can not be used; recompile with -fPIC") -
+  # empirically confirmed against the pinned toolchain.
+  compile_flags = [f for f in ctx.attrs.compile_flags if f != COVERAGE_FLAG]
+  link_flags = [f for f in ctx.attrs.link_flags if f != COVERAGE_FLAG]
+  _check_flags(compile_flags)
+  _check_flags(link_flags)
 
   objects = []
   for src in ctx.attrs.srcs:
@@ -198,7 +211,7 @@ def _py_extension_impl(ctx: AnalysisContext) -> list[Provider]:
       cmd_args(gcc.bin_dir, format = "-B{}"),
       cmd_args(py.include_dir, format = "-I{}"),
     ] + [cmd_args(d, format = "-I{}") for d in ctx.attrs.include_dirs]
-    args += ["-fPIC"] + ctx.attrs.compile_flags
+    args += ["-fPIC"] + compile_flags
     args += ["-c", src, "-o", obj.as_output()]
     ctx.actions.run(
       cmd_args(args),
@@ -209,7 +222,7 @@ def _py_extension_impl(ctx: AnalysisContext) -> list[Provider]:
 
   native_name = "_native" + _EXT_SUFFIX
   shared_obj = ctx.actions.declare_output(ctx.attrs.name + "-" + native_name)
-  link_args = [gcc.gxx] + objects + [cmd_args(gcc.bin_dir, format = "-B{}"), "-shared"] + ctx.attrs.link_flags
+  link_args = [gcc.gxx] + objects + [cmd_args(gcc.bin_dir, format = "-B{}"), "-shared"] + link_flags
   link_args += ["-o", shared_obj.as_output()]
   ctx.actions.run(cmd_args(link_args), category = "cxx_link", identifier = ctx.attrs.name)
 
@@ -276,6 +289,67 @@ _py_binary_rule = rule(
 # mirroring repo.sh's `python -m unittest discover -s python/test -p
 # 'test_*.py'`, exposed as ExternalRunnerTestInfo so `buck2 test` runs it.
 
+# Coverage (default-on under dbg - see rules/coverage.bzl's module
+# docstring): runs the SAME unittest discovery a second time, in-process
+# under tools/py_cover.py's PEP 669 (sys.monitoring) line collector instead
+# of a plain `python -m unittest`, as its own ctx.actions.run() build action
+# separate from the ExternalRunnerTestInfo path `buck2 test` uses for
+# pass/fail reporting (mirrors rules/cxx.bzl's/rules/go.bzl's/
+# rules/deno.bzl's own coverage collection actions - see rules/coverage.bzl
+# for why). Only python/lib and python/app are measured (python/test itself
+# is excluded) - see tools/py_cover.py's own docstring. py_cover.py emits
+# lcov directly, so no further conversion is needed at merge time.
+def _py_test_coverage_action(ctx, gcc, py, srcs, roots):
+  lcov = ctx.actions.declare_output(ctx.attrs.name + ".lcov")
+  # Every py_extension dep (e.g. python/lib/fastbytes) contributes a build
+  # -output package dir as its PYTHONPATH root (a COPY of __init__.py
+  # staged next to the compiled extension - see rules/python.bzl's
+  # py_extension rule) rather than the original source dir; at runtime
+  # that's the file py_cover.py actually observes executing. Map each such
+  # root back to "python/lib" (this repo's actual source dir for every
+  # py_extension) via --rewrite so the emitted lcov still names the real
+  # repo-relative source path - see tools/py_cover.py's docstring. Plain
+  # py_library roots are already repo-relative strings (e.g. "python/lib"
+  # itself) and need no rewriting.
+  rewrite_args = []
+  for root in roots:
+    if type(root) == "Artifact":
+      rewrite_args += ["--rewrite", cmd_args(root, "=python/lib", delimiter = "")]
+  lines = ["#!/bin/sh", "set -eu"] + _pythonpath_env_lines(roots) + [
+    "OUT=\"$1\"",
+    "shift",
+    cmd_args(
+      ["exec"] + _loader_exec_prefix(gcc, py) + [
+        ctx.attrs._py_cover,
+        "--root",
+        "python/lib",
+        "--root",
+        "python/app",
+        "--exclude",
+        "python/test",
+      ] + rewrite_args + [
+        "--out",
+        "\"$OUT\"",
+        "--",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        ctx.attrs.start,
+        "-p",
+        ctx.attrs.pattern,
+      ],
+      delimiter = " ",
+    ),
+  ]
+  script, written = ctx.actions.write(ctx.attrs.name + "-cov.sh", lines, is_executable = True, allow_args = True)
+  ctx.actions.run(
+    cmd_args(["/bin/sh", script, lcov.as_output()], hidden = srcs + written + [gcc.gcc_dir, py.py_dir, ctx.attrs._py_cover]),
+    category = "py_test_coverage",
+    identifier = ctx.attrs.name,
+  )
+  return lcov
+
 def _py_test_impl(ctx: AnalysisContext) -> list[Provider]:
   gcc = _gcc_tools(ctx)
   py = _python_tools(ctx)
@@ -289,7 +363,7 @@ def _py_test_impl(ctx: AnalysisContext) -> list[Provider]:
   ]
   script, written = ctx.actions.write(ctx.attrs.name + ".sh", lines, is_executable = True, allow_args = True)
   command = cmd_args(script, hidden = srcs + written + [gcc.gcc_dir, py.py_dir])
-  return [
+  providers = [
     DefaultInfo(default_output = script, other_outputs = written),
     RunInfo(args = command),
     ExternalRunnerTestInfo(
@@ -298,6 +372,10 @@ def _py_test_impl(ctx: AnalysisContext) -> list[Provider]:
       run_from_project_root = True,
     ),
   ]
+  if ctx.attrs._coverage_enabled:
+    lcov = _py_test_coverage_action(ctx, gcc, py, srcs, roots)
+    providers.append(CoverageInfo(kind = "python_lcov", primary = lcov, tool = None, gcnos = None, toolchain_dir = None))
+  return providers
 
 _py_test_rule = rule(
   impl = _py_test_impl,
@@ -306,6 +384,8 @@ _py_test_rule = rule(
     "pattern": attrs.string(default = "test_*.py"),
     "srcs": attrs.list(attrs.source(), default = []),
     "start": attrs.string(default = "python/test"),
+    "_coverage_enabled": attrs.bool(default = coverage_enabled_flag()),
+    "_py_cover": attrs.source(default = "//:py_cover.py"),
   } | _TOOLCHAIN_ATTRS,
 )
 
@@ -331,6 +411,7 @@ def _py_compileall_check_impl(ctx: AnalysisContext) -> list[Provider]:
       type = "python_compileall",
       command = [command],
       run_from_project_root = True,
+      labels = ["lint"],
     ),
   ]
 
@@ -394,6 +475,7 @@ def _py_lock_consistency_test_impl(ctx: AnalysisContext) -> list[Provider]:
       type = "python_lock_consistency",
       command = [command],
       run_from_project_root = True,
+      labels = ["lint"],
     ),
   ]
 
@@ -421,6 +503,10 @@ def py_binary(**kwargs):
 
 def py_test(**kwargs):
   kwargs.setdefault("default_target_platform", _DEFAULT_PLATFORM)
+  # See rules/cxx.bzl's cxx_test macro for why: //:coverage now depends on
+  # py_test targets directly, which need to be reachable from the root
+  # package without editing every existing python/test/BUCK call site.
+  kwargs.setdefault("visibility", ["PUBLIC"])
   _py_test_rule(**kwargs)
 
 def py_compileall_check(**kwargs):

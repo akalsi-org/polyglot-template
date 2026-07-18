@@ -52,6 +52,8 @@ different config hash. Every call site below now also passes tools.go_dir
 what actually makes buck2 track and materialize it per-configuration.
 """
 
+load("//config:flags.bzl", "coverage_enabled_flag")
+load("//rules:coverage.bzl", "CoverageInfo")
 load("//toolchains:lock.bzl", "TOOLCHAINS")
 
 def _native_target() -> str:
@@ -209,6 +211,32 @@ go_binary = rule(
 # so `buck2 test` can run it directly instead of going through go_binary +
 # a separate runner.
 
+# Coverage collection runs `go test` a SECOND time, with -coverprofile
+# pointed at a declared output, as its own ctx.actions.run() build action -
+# separate from the ExternalRunnerTestInfo/RunInfo path `buck2 test` uses
+# for pass/fail reporting - so the profile is a real cacheable build
+# artifact //:coverage can depend on (mirrors rules/cxx.bzl's
+# _coverage_collect_action; see rules/coverage.bzl's module docstring for
+# why every lane does it this way). -coverpkg is set to the same package
+# set under test so coverage of an imported-but-not-directly-tested package
+# (e.g. go/lib/greeting, exercised only via go/test's external test
+# package) is still attributed - plain `go test -coverprofile` on its own
+# only instruments the package(s) actually under test.
+def _go_test_coverage_action(ctx, tools, all_srcs):
+  cov_file = ctx.actions.declare_output(ctx.attrs.name + ".cov")
+  coverpkg = ",".join(ctx.attrs.packages)
+  tail = [
+    "exec \"$GOROOT/bin/go\" test -trimpath -coverpkg=" + coverpkg +
+    " -coverprofile=\"$1\" " + " ".join(ctx.attrs.packages),
+  ]
+  script, written = _write_go_script(ctx, ctx.attrs.name + "-cov", tools, tail)
+  ctx.actions.run(
+    cmd_args(["/bin/sh", script, cov_file.as_output()], hidden = all_srcs + written + [tools.go_dir]),
+    category = "go_test_coverage",
+    identifier = ctx.attrs.name,
+  )
+  return cov_file
+
 def _go_test_impl(ctx: AnalysisContext) -> list[Provider]:
   tools = _toolchain_tools(ctx)
   all_srcs = list(ctx.attrs.srcs) + _merge_dep_srcs(ctx.attrs.deps) + [ctx.attrs._gomod]
@@ -217,7 +245,7 @@ def _go_test_impl(ctx: AnalysisContext) -> list[Provider]:
   ]
   script, written = _write_go_script(ctx, ctx.attrs.name, tools, tail)
   command = cmd_args(script, hidden = all_srcs + written + [tools.go_dir])
-  return [
+  providers = [
     DefaultInfo(default_output = script),
     RunInfo(args = command),
     ExternalRunnerTestInfo(
@@ -226,15 +254,43 @@ def _go_test_impl(ctx: AnalysisContext) -> list[Provider]:
       run_from_project_root = True,
     ),
   ]
+  if ctx.attrs._coverage_enabled:
+    cov_file = _go_test_coverage_action(ctx, tools, all_srcs)
+    providers.append(CoverageInfo(
+      kind = "go_profile",
+      primary = cov_file,
+      tool = None,
+      gcnos = None,
+      toolchain_dir = None,
+    ))
+  return providers
 
-go_test = rule(
+_go_test_rule = rule(
   impl = _go_test_impl,
   attrs = {
     "deps": attrs.list(attrs.dep(providers = [GoInfo]), default = []),
     "packages": attrs.list(attrs.string(), default = ["./go/..."]),
     "srcs": attrs.list(attrs.source(), default = []),
+    "_coverage_enabled": attrs.bool(default = coverage_enabled_flag()),
   } | _TOOLCHAIN_ATTRS,
 )
+
+# go_test is the only go_* rule with a select()-driven attr default
+# (_coverage_enabled); select() only resolves when the target has a
+# concrete configuration, which - absent a prelude - requires
+# `default_target_platform` to be set explicitly (see rules/cxx.bzl's
+# identical _DEFAULT_PLATFORM/macro pattern, used here for the same
+# reason). go_library/go_binary/go_lint have no select()-driven attrs and
+# so don't need this.
+_DEFAULT_PLATFORM = "//config:{}-dbg".format(_NATIVE_TARGET)
+
+def go_test(**kwargs):
+  kwargs.setdefault("default_target_platform", _DEFAULT_PLATFORM)
+  # See rules/cxx.bzl's cxx_test macro for why: //:coverage now depends on
+  # go_test targets directly, which need to be reachable from the root
+  # package without editing every existing go/BUCK call site.
+  kwargs.setdefault("visibility", ["PUBLIC"])
+  _go_test_rule(**kwargs)
 
 # --- go_lint: two flavors selected by `mode`, mirroring repo.sh's go-lint
 # lane semantics (gofmt-canonical formatting + `go vet`), each its own
@@ -268,6 +324,7 @@ def _go_lint_impl(ctx: AnalysisContext) -> list[Provider]:
       type = "go_lint_" + ctx.attrs.mode,
       command = [command],
       run_from_project_root = True,
+      labels = ["lint"],
     ),
   ]
 

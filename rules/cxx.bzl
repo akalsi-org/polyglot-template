@@ -12,7 +12,8 @@ There is no prelude in this project, so cxx_test builds its own
 ExternalRunnerTestInfo rather than relying on a prelude-provided cxx_test.
 """
 
-load("//config:flags.bzl", "FORBIDDEN_FLAGS", "STANDARD", "profile_compile_flags", "profile_link_flags")
+load("//config:flags.bzl", "COVERAGE_FLAG", "FORBIDDEN_FLAGS", "STANDARD", "profile_compile_flags", "profile_link_flags")
+load("//rules:coverage.bzl", "CoverageInfo")
 load("//toolchains:lock.bzl", "TOOLCHAINS")
 
 def _native_target() -> str:
@@ -32,7 +33,7 @@ _GCC_BIN_DIR = _GCC["expected"].rsplit("/", 1)[0]
 _LOADER_DIR = _GCC["loader"].rsplit("/", 1)[0]
 _DOCTEST_INCLUDE_DIR = _DOCTEST["expected"].rsplit("/", 2)[0]
 
-CxxInfo = provider(fields = ["include_dirs", "hdrs", "objects"])
+CxxInfo = provider(fields = ["include_dirs", "hdrs", "objects", "gcnos"])
 
 def _check_flags(flags):
   for flag in flags:
@@ -50,6 +51,12 @@ def _toolchain_tools(ctx):
     bin_dir = gcc_dir.project(_GCC_BIN_DIR),
     loader = gcc_dir.project(_GCC["loader"]),
     loader_dir = gcc_dir.project(_LOADER_DIR),
+    # Same bin dir as g++ (userdocs' qbt-musl-cross-make layout installs
+    # gcov as a sibling of g++), named "<target>-gcov" - not in
+    # toolchains/lock.bzl's TOOLCHAINS dict (only g++/ar/ld/... are, since
+    # only those were needed before the coverage lane existed), so derived
+    # here the same way _GCC_BIN_DIR itself is derived from _GCC["expected"].
+    gcov = gcc_dir.project(_GCC_BIN_DIR + "/" + _NATIVE_TARGET + "-gcov"),
   )
 
 def _doctest_include(ctx):
@@ -60,12 +67,14 @@ def _merge_deps(deps):
   include_dirs = []
   hdrs = []
   objects = []
+  gcnos = []
   for dep in deps:
     info = dep[CxxInfo]
     include_dirs += info.include_dirs
     hdrs += info.hdrs
     objects += info.objects
-  return include_dirs, hdrs, objects
+    gcnos += info.gcnos
+  return include_dirs, hdrs, objects, gcnos
 
 def _dedupe_artifacts(artifacts):
   seen = {}
@@ -91,12 +100,20 @@ def _compile_one(ctx, tools, src, include_dirs, hdrs, compile_flags, extra_args,
   args += extra_args
   args += compile_flags
   args += ["-c", src, "-o", obj.as_output()]
+  # --coverage makes gcc write a .gcno sidecar next to -o's path (same
+  # basename, swapped extension) at compile time; the matching .gcda is
+  # only written at test-run time (see cxx_test's coverage collection
+  # action below). Declare it as a second output of this same action
+  # whenever coverage is on, so downstream CxxInfo can carry it forward.
+  gcno = None
+  if COVERAGE_FLAG in compile_flags:
+    gcno = ctx.actions.declare_output("__objects__/{}/{}.gcno".format(ctx.attrs.name, identifier))
   ctx.actions.run(
-    cmd_args(args, hidden = hdrs),
+    cmd_args(args, hidden = hdrs + ([gcno.as_output()] if gcno else [])),
     category = "cxx_compile",
     identifier = identifier,
   )
-  return obj
+  return obj, gcno
 
 def _link(ctx, tools, objects, link_flags, identifier):
   _check_flags(link_flags)
@@ -146,18 +163,21 @@ _PROFILE_ATTRS = {
 
 def _cxx_library_impl(ctx: AnalysisContext) -> list[Provider]:
   tools = _toolchain_tools(ctx)
-  dep_include_dirs, dep_hdrs, dep_objects = _merge_deps(ctx.attrs.deps)
+  dep_include_dirs, dep_hdrs, dep_objects, dep_gcnos = _merge_deps(ctx.attrs.deps)
   include_dirs = list(ctx.attrs.include_dirs) + dep_include_dirs
   hdrs = list(ctx.attrs.hdrs) + dep_hdrs
-  own_objects = [
+  compiled = [
     _compile_one(ctx, tools, src, include_dirs, hdrs, ctx.attrs.compile_flags, [], False, src.short_path)
     for src in ctx.attrs.srcs
   ]
+  own_objects = [obj for obj, _gcno in compiled]
+  own_gcnos = [gcno for _obj, gcno in compiled if gcno != None]
   objects = own_objects + dep_objects
+  gcnos = own_gcnos + dep_gcnos
   outputs = own_objects if own_objects else hdrs
   return [
     DefaultInfo(default_outputs = outputs),
-    CxxInfo(include_dirs = include_dirs, hdrs = hdrs, objects = objects),
+    CxxInfo(include_dirs = include_dirs, hdrs = hdrs, objects = objects, gcnos = gcnos),
   ]
 
 _cxx_library_rule = rule(
@@ -178,12 +198,12 @@ _cxx_library_rule = rule(
 
 def _cxx_adapter_impl(ctx: AnalysisContext) -> list[Provider]:
   tools = _toolchain_tools(ctx)
-  include_dirs, hdrs, _ = _merge_deps(ctx.attrs.deps)
+  include_dirs, hdrs, _objects, _gcnos = _merge_deps(ctx.attrs.deps)
   hdrs = list(ctx.attrs.hdrs) + hdrs
-  obj = _compile_one(ctx, tools, ctx.attrs.src, include_dirs, hdrs, ctx.attrs.compile_flags, ctx.attrs.extra_args, ctx.attrs.doctest, ctx.attrs.name)
+  obj, gcno = _compile_one(ctx, tools, ctx.attrs.src, include_dirs, hdrs, ctx.attrs.compile_flags, ctx.attrs.extra_args, ctx.attrs.doctest, ctx.attrs.name)
   return [
     DefaultInfo(default_outputs = [obj]),
-    CxxInfo(include_dirs = [], hdrs = hdrs, objects = [obj]),
+    CxxInfo(include_dirs = [], hdrs = hdrs, objects = [obj], gcnos = [gcno] if gcno != None else []),
   ]
 
 # Also used for the shared doctest runner object (cpp/test/BUCK,
@@ -204,16 +224,22 @@ _cxx_adapter_rule = rule(
 
 def _cxx_binary_impl(ctx: AnalysisContext) -> list[Provider]:
   tools = _toolchain_tools(ctx)
-  dep_include_dirs, dep_hdrs, dep_objects = _merge_deps(ctx.attrs.deps)
+  dep_include_dirs, dep_hdrs, dep_objects, _dep_gcnos = _merge_deps(ctx.attrs.deps)
   include_dirs = list(ctx.attrs.include_dirs) + dep_include_dirs
   hdrs = list(ctx.attrs.hdrs) + dep_hdrs
-  own_objects = [
+  compiled = [
     _compile_one(ctx, tools, src, include_dirs, hdrs, ctx.attrs.compile_flags, [], False, src.short_path)
     for src in ctx.attrs.srcs
   ]
+  own_objects = [obj for obj, _gcno in compiled]
   objects = _dedupe_artifacts(own_objects + dep_objects)
   binary = _link(ctx, tools, objects, ctx.attrs.link_flags, ctx.attrs.name)
   launcher, written = _loader_launcher(ctx, tools, binary)
+  # cxx_binary is deliberately left uninstrumented-output-free even under
+  # dbg's --coverage compile/link flags: `buck2 run` executes RunInfo
+  # directly (not through a declared-output-producing action), so any
+  # runtime counter writes here would go nowhere declared - only cxx_test's
+  # coverage collection action below actually feeds the report.
   return [
     DefaultInfo(default_output = binary, other_outputs = [launcher] + written),
     RunInfo(args = cmd_args(launcher, hidden = [binary, tools.dir] + written)),
@@ -234,21 +260,70 @@ _cxx_binary_rule = rule(
 # that depends on it, since buck2 shares identical configured subgraphs) and
 # provides ExternalRunnerTestInfo so `buck2 test` can run it.
 
+def _coverage_collect_action(ctx, tools, binary, gcnos):
+  # Runs the test binary a second time (separately from the
+  # ExternalRunnerTestInfo/RunInfo path `buck2 test` uses for pass/fail
+  # reporting) as a normal ctx.actions.run() build action, so its coverage
+  # counters land in a real declared output buck2 can cache and //:coverage
+  # can depend on - see rules/coverage.bzl's module docstring for why this
+  # is a second, separate run rather than reusing the `buck2 test` one.
+  #
+  # GCOV_PREFIX/GCOV_PREFIX_STRIP route the runtime's .gcda writes (which
+  # gcc always locates at an ABSOLUTE path derived from the object file's
+  # path at compile time - here that's "$(pwd)/<declared .o path>", since
+  # every action in this project runs with cwd = project root) into this
+  # action's own declared output dir instead of wherever that absolute path
+  # would otherwise land. GCOV_PREFIX_STRIP must strip exactly the number of
+  # leading path components in the compile-time (== here, run-time) project
+  # root absolute path, which is why it's computed at run time via `pwd`
+  # rather than hardcoded - the project root's absolute path length is not
+  # something this rule can know at analysis time (and differs machine to
+  # machine / CI to CI). Empirically validated locally: this reproduces a
+  # .gcda tree that mirrors the repo-relative .o path exactly, matching
+  # where the .gcno siblings declared by _compile_one already live.
+  gcov_dir = ctx.actions.declare_output(ctx.attrs.name + ".gcov_data", dir = True)
+  script, written = ctx.actions.write(
+    ctx.attrs.name + "-cov.sh",
+    [
+      "#!/bin/sh",
+      "set -eu",
+      "OUT=\"$1\"",
+      "shift",
+      "mkdir -p \"$OUT\"",
+      "STRIP=$(pwd | awk -F/ '{print NF-1}')",
+      cmd_args("GCOV_PREFIX=\"$(pwd)/$OUT\"", delimiter = ""),
+      "export GCOV_PREFIX",
+      "export GCOV_PREFIX_STRIP=\"$STRIP\"",
+      cmd_args("exec", tools.loader, "--library-path", tools.loader_dir, binary, delimiter = " "),
+    ],
+    is_executable = True,
+    allow_args = True,
+  )
+  ctx.actions.run(
+    cmd_args(["/bin/sh", script, gcov_dir.as_output()], hidden = [binary, tools.dir] + written),
+    category = "cxx_test_coverage",
+    identifier = ctx.attrs.name,
+  )
+  return gcov_dir
+
 def _cxx_test_impl(ctx: AnalysisContext) -> list[Provider]:
   tools = _toolchain_tools(ctx)
-  dep_include_dirs, dep_hdrs, dep_objects = _merge_deps(ctx.attrs.deps)
+  dep_include_dirs, dep_hdrs, dep_objects, dep_gcnos = _merge_deps(ctx.attrs.deps)
   runner_objects = ctx.attrs._runner[CxxInfo].objects
+  runner_gcnos = ctx.attrs._runner[CxxInfo].gcnos
   include_dirs = list(ctx.attrs.include_dirs) + dep_include_dirs
   hdrs = list(ctx.attrs.hdrs) + dep_hdrs
-  own_objects = [
+  compiled = [
     _compile_one(ctx, tools, src, include_dirs, hdrs, ctx.attrs.compile_flags, [], True, src.short_path)
     for src in ctx.attrs.srcs
   ]
+  own_objects = [obj for obj, _gcno in compiled]
+  own_gcnos = [gcno for _obj, gcno in compiled if gcno != None]
   objects = _dedupe_artifacts(runner_objects + own_objects + dep_objects)
   binary = _link(ctx, tools, objects, ctx.attrs.link_flags, ctx.attrs.name)
   launcher, written = _loader_launcher(ctx, tools, binary)
   command = cmd_args(launcher, hidden = [binary, tools.dir] + written)
-  return [
+  providers = [
     DefaultInfo(default_output = binary, other_outputs = [launcher] + written),
     RunInfo(args = command),
     ExternalRunnerTestInfo(
@@ -257,6 +332,17 @@ def _cxx_test_impl(ctx: AnalysisContext) -> list[Provider]:
       run_from_project_root = True,
     ),
   ]
+  if COVERAGE_FLAG in ctx.attrs.compile_flags:
+    gcnos = _dedupe_artifacts(runner_gcnos + own_gcnos + dep_gcnos)
+    gcov_dir = _coverage_collect_action(ctx, tools, binary, gcnos)
+    providers.append(CoverageInfo(
+      kind = "cxx_gcov",
+      primary = gcov_dir,
+      tool = tools.gcov,
+      gcnos = gcnos,
+      toolchain_dir = tools.dir,
+    ))
+  return providers
 
 _cxx_test_rule = rule(
   impl = _cxx_test_impl,
@@ -292,4 +378,13 @@ def cxx_binary(**kwargs):
 
 def cxx_test(**kwargs):
   kwargs.setdefault("default_target_platform", _DEFAULT_PLATFORM)
+  # Every test target this rule produces is now also a coverage source (see
+  # rules/coverage.bzl's module docstring): //:coverage depends on cpp/test's
+  # cxx_test targets directly, which - absent a repo-wide PACKAGE file
+  # setting a default - would otherwise stay package-private (buck2's
+  # unstated default) and be unreachable from the root package. Default to
+  # PUBLIC here rather than editing every existing cpp/test/BUCK call site
+  # (out of this change's file ownership); callers that already pass their
+  # own `visibility` are unaffected by setdefault().
+  kwargs.setdefault("visibility", ["PUBLIC"])
   _cxx_test_rule(**kwargs)
