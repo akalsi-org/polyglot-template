@@ -1,0 +1,10 @@
+load(":defs.bzl", "execution_platforms", "platform")
+
+platform(
+  name = "host",
+)
+
+execution_platforms(
+  name = "execution_platforms",
+  platforms = [":host"],
+)

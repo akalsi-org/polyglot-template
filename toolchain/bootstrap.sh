@@ -20,12 +20,17 @@ done
 target=$($ROOT/toolchain/target.sh)
 
 extract_archive() {
-  local archive=$1 cache=$2 destination=$3 listing
+  local archive=$1 cache=$2 destination=$3 expected=$4 listing
   case "$archive" in
     *.tar.gz|*.tgz) listing=$(tar -tzf "$cache"); validate_members "$listing"; tar -xzf "$cache" -C "$destination" --no-same-owner --no-same-permissions ;;
     *.tar.xz) listing=$(tar -tJf "$cache"); validate_members "$listing"; tar -xJf "$cache" -C "$destination" --no-same-owner --no-same-permissions ;;
     *.tar.zst) listing=$(tar --zstd -tf "$cache"); validate_members "$listing"; tar --zstd -xf "$cache" -C "$destination" --no-same-owner --no-same-permissions ;;
     *.zip) command -v unzip >/dev/null; listing=$(unzip -Z1 "$cache"); validate_members "$listing"; unzip -q "$cache" -d "$destination" ;;
+    *.zst)
+      command -v zstd >/dev/null || { printf 'error: bootstrap requires zstd for %s\n' "$archive" >&2; return 1; }
+      zstd -d -q -f -o "$destination/$expected" "$cache"
+      chmod +x "$destination/$expected"
+      ;;
     *) printf 'error: unsupported archive: %s\n' "$archive" >&2; return 1 ;;
   esac
 }
@@ -91,6 +96,18 @@ probe_executable() {
   "$root/$expected" --version >/dev/null 2>&1 || { printf 'error: %s capability probe failed\n' "$tool" >&2; return 1; }
 }
 
+probe_buck2() {
+  local root=$1 expected=$2 declared_hash reported
+  "$root/$expected" --version >/dev/null 2>&1 || { printf 'error: buck2 capability probe failed\n' >&2; return 1; }
+  declared_hash=$(lock_value buck2 "$target" content_hash)
+  [[ -z $declared_hash ]] && return 0
+  reported=$("$root/$expected" --version | awk '{ print $2 }')
+  [[ $reported == "$declared_hash" ]] || {
+    printf 'error: buck2 reported content hash %s does not match pinned %s\n' "$reported" "$declared_hash" >&2
+    return 1
+  }
+}
+
 probe_doctest() {
   local root=$1 expected=$2
   grep -q '^#define DOCTEST_VERSION_MAJOR 2$' "$root/$expected" || {
@@ -105,6 +122,7 @@ probe_artifact() {
     gcc-musl:*) probe_gcc "$root" "$expected" ;;
     go:*) probe_go "$root" "$expected" "$version" ;;
     doctest:*) probe_doctest "$root" "$expected" ;;
+    buck2:*) probe_buck2 "$root" "$expected" ;;
     *:executable) probe_executable "$tool" "$root" "$expected" ;;
   esac
 }
@@ -118,7 +136,7 @@ tool_install_path() {
 }
 
 write_bootstrap_wrappers() {
-  local cxx cc python deno go ninja moon loader gcc_version loader_path gcc_install
+  local cxx cc python deno go ninja moon buck2 loader gcc_version loader_path gcc_install
   cxx=$(tool_install_path gcc-musl) || return 0
   cc="${cxx%g++}gcc"
   python=$(tool_install_path python) || return 0
@@ -126,6 +144,7 @@ write_bootstrap_wrappers() {
   go=$(tool_install_path go) || return 0
   ninja=$(tool_install_path ninja) || return 0
   moon=$(tool_install_path moon) || return 0
+  buck2=$(tool_install_path buck2) || buck2=""
   gcc_version=$(lock_value gcc-musl "$target" version)
   loader=$(lock_value gcc-musl "$target" loader)
   gcc_install="$LOCAL/toolchain/$target/gcc-musl-$gcc_version"
@@ -133,7 +152,8 @@ write_bootstrap_wrappers() {
   for tool in "$cc" "$cxx" "$python" "$deno" "$go" "$ninja" "$moon" "$loader_path"; do
     [[ -x $tool ]] || return 0
   done
-  write_repo_tool_wrappers "$LOCAL" "$cc" "$cxx" "$python" "$loader_path" "$deno" "$go" "$ninja" "$moon" "$gcc_install" "$target"
+  [[ -z $buck2 || -x $buck2 ]] || buck2=""
+  write_repo_tool_wrappers "$LOCAL" "$cc" "$cxx" "$python" "$loader_path" "$deno" "$go" "$ninja" "$moon" "$gcc_install" "$target" "$buck2"
   printf 'bootstrap: wrote self-contained tool wrappers\n'
 }
 
@@ -174,7 +194,7 @@ install_one() {
   tmp="$LOCAL/toolchain/$target/.${tool}-${version}.tmp.$$"
   rm -rf -- "$tmp"; mkdir -p "$tmp"
   trap 'rm -rf -- "$tmp"' RETURN
-  extract_archive "$archive" "$cache" "$tmp"
+  extract_archive "$archive" "$cache" "$tmp" "$expected"
   [[ $tool != go ]] || chmod -R u+w -- "$tmp"
   [[ $tool != gcc-musl ]] || normalize_gcc_loader "$tmp"
   while IFS= read -r -d '' link; do

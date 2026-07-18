@@ -76,6 +76,18 @@ deep_validate_doctest() {
   grep -q '^#define DOCTEST_VERSION_MAJOR 2$' "$install/$expected"
 }
 
+deep_validate_buck2() {
+  local install=$1 expected=$2 declared_hash reported
+  "$install/$expected" --version >/dev/null
+  declared_hash=$(lock_value buck2 "$target" content_hash)
+  [[ -z $declared_hash ]] && return 0
+  reported=$("$install/$expected" --version | awk '{ print $2 }')
+  [[ $reported == "$declared_hash" ]] || {
+    printf 'invalid: buck2 reported content hash %s does not match pinned %s\n' "$reported" "$declared_hash" >&2
+    return 1
+  }
+}
+
 deep_validate() {
   local tool=$1 kind=$2 install=$3 expected=$4 version=$5
   case "$tool:$kind" in
@@ -85,6 +97,7 @@ deep_validate() {
     ninja:*) deep_validate_ninja "$install" "$expected" "$version" ;;
     go:*) deep_validate_go "$install" "$expected" "$version" ;;
     doctest:*) deep_validate_doctest "$install" "$expected" ;;
+    buck2:*) deep_validate_buck2 "$install" "$expected" ;;
     *:executable) "$install/$expected" --version >/dev/null ;;
   esac
 }

@@ -12,7 +12,11 @@ import tomllib
 from pathlib import Path
 
 
-IGNORED_PARTS = {".git", ".local", "build", "dist", "__pycache__"}
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import gen_toolchain_lock  # noqa: E402
+
+
+IGNORED_PARTS = {".git", ".local", "build", "dist", "__pycache__", "buck-out"}
 
 
 def source_files(root: Path, suffix: str):
@@ -63,6 +67,14 @@ def main() -> int:
       json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
       failures.append(f"{path.relative_to(root)}: {error}")
+  lock = root / "tools.lock.toml"
+  generated = root / "toolchains/lock.bzl"
+  expected = gen_toolchain_lock.render_starlark(
+    gen_toolchain_lock.build_toolchains(gen_toolchain_lock.load_artifacts(lock))
+  )
+  actual = generated.read_text(encoding="utf-8") if generated.exists() else ""
+  if actual != expected:
+    failures.append(f"{generated.relative_to(root)}: stale; run tools/gen_toolchain_lock.py to refresh it")
   if failures:
     print("\n".join(failures), file=sys.stderr)
     return 1

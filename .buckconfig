@@ -1,0 +1,18 @@
+[cells]
+  root = .
+
+[buildfile]
+  name = BUCK
+
+[build]
+  # A first-party platform target; see platforms/BUCK. Required for BXL actions
+  # such as toolchains/compdb.bxl, which need a concrete execution platform to
+  # bind bxl_actions() to (buck2 otherwise has no default when there is no
+  # prelude to supply one).
+  execution_platforms = root//platforms:execution_platforms
+
+# No [buck2] isolation_dir is set: buck2 state (buck-out/, the daemon) stays
+# repo-local under ./buck-out by default, mirroring how .local/ and build/ keep
+# every other lane's state inside the checkout. Set isolation_dir only if
+# multiple concurrent buck2 invocations against the same checkout are needed
+# (e.g. a CI matrix sharing one clone).

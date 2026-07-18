@@ -17,7 +17,7 @@ tool_path() {
 }
 
 setup_environment() {
-  local target gcc python deno go ninja moon gcc_bin go_root path_prefix loader loader_path env_bin gcc_install
+  local target gcc python deno go ninja moon buck2 gcc_bin go_root path_prefix loader loader_path env_bin gcc_install
   target=$("$ROOT/toolchain/target.sh")
   export POLYGLOT_TARGET=$target
   export POLYGLOT_LOCK_FILE=${POLYGLOT_LOCK_FILE:-$ROOT/tools.lock.toml}
@@ -28,7 +28,8 @@ setup_environment() {
   go=$(tool_path go)
   ninja=$(tool_path ninja)
   moon=$(tool_path moon)
-  for tool in "$gcc" "$python" "$deno" "$go" "$ninja" "$moon"; do
+  buck2=$(tool_path buck2)
+  for tool in "$gcc" "$python" "$deno" "$go" "$ninja" "$moon" "$buck2"; do
     [[ -x $tool ]] || { printf 'error: pinned toolchain is not installed; run ./repo.sh bootstrap\n' >&2; return 1; }
   done
 
@@ -41,13 +42,14 @@ setup_environment() {
   env_bin="$POLYGLOT_LOCAL_DIR/bin"
   export CC="${gcc%g++}gcc"
   export CXX=$gcc
-  write_repo_tool_wrappers "$POLYGLOT_LOCAL_DIR" "$CC" "$CXX" "$python" "$loader_path" "$deno" "$go" "$ninja" "$moon" "$gcc_install" "$target"
+  write_repo_tool_wrappers "$POLYGLOT_LOCAL_DIR" "$CC" "$CXX" "$python" "$loader_path" "$deno" "$go" "$ninja" "$moon" "$gcc_install" "$target" "$buck2"
   export POLYGLOT_CXX=$gcc
   export POLYGLOT_PYTHON=$python
   export POLYGLOT_DENO=$deno
   export POLYGLOT_GO=$go
   export POLYGLOT_NINJA=$ninja
   export POLYGLOT_MOON=$moon
+  export POLYGLOT_BUCK2=$buck2
   export GOROOT=$go_root
   export GOPATH="$POLYGLOT_LOCAL_DIR/cache/go/path"
   export GOMODCACHE="$POLYGLOT_LOCAL_DIR/cache/go/mod"
@@ -319,6 +321,10 @@ case "$command" in
     [[ -x $deno ]] || { printf 'error: pinned Deno is not installed; run ./repo.sh bootstrap\n' >&2; exit 1; }
     export DENO_DIR="$POLYGLOT_LOCAL_DIR/cache/deno"
     exec "$deno" "$@"
+    ;;
+  buck2)
+    setup_environment
+    exec "$POLYGLOT_BUCK2" "$@"
     ;;
   ts-build)
     "$ROOT/repo.sh" deno check --frozen ts/app/hello/main.ts

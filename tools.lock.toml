@@ -45,6 +45,8 @@ url = "https://github.com/astral-sh/python-build-standalone/releases/download/20
 sha256 = "54eca143d09ed3c596ecad5e3bfcb7724387818f8f984f44f3d8c0e9f36681d3"
 archive = "cpython-3.14.6+20260610-x86_64-unknown-linux-musl-install_only_stripped.tar.gz"
 expected = "python/bin/python3"
+ext_suffix = ".cpython-314-x86_64-linux-musl.so"
+include_subpath = "include/python3.14"
 
 [[artifact]]
 tool = "ninja"
@@ -72,6 +74,8 @@ url = "https://github.com/astral-sh/python-build-standalone/releases/download/20
 sha256 = "5c75bea22f425ebc94912c618518a5aa4753eedeea6b5da5939f027d3a9c0fec"
 archive = "cpython-3.14.6+20260610-aarch64-unknown-linux-musl-install_only_stripped.tar.gz"
 expected = "python/bin/python3"
+ext_suffix = ".cpython-314-aarch64-linux-musl.so"
+include_subpath = "include/python3.14"
 
 [[artifact]]
 tool = "deno"
@@ -146,3 +150,26 @@ url = "https://github.com/moonrepo/moon/releases/download/v2.4.4/moon_cli-aarch6
 sha256 = "cf970b684f02a7d6248035fc4f7f23939dbccf5422a984f640b64c3b190c14aa"
 archive = "moon_cli-aarch64-unknown-linux-musl.tar.xz"
 expected = "moon_cli-aarch64-unknown-linux-musl/moon"
+
+# buck2 --version reports a content hash, not semver; the "version" below is the
+# release tag. content_hash pins the exact reported hash so bootstrap/doctor can
+# fail loudly if the downloaded binary reports something else.
+[[artifact]]
+tool = "buck2"
+target = "x86_64-linux-musl"
+version = "2026-07-15"
+url = "https://github.com/facebook/buck2/releases/download/2026-07-15/buck2-x86_64-unknown-linux-musl.zst"
+sha256 = "4d31666ece6f66bedc0c0df53f1e966e93aee13491529bb301fc83e8607d0955"
+archive = "buck2-x86_64-unknown-linux-musl.zst"
+expected = "buck2"
+content_hash = "769ca6220bec1a2a5b17241abb337312d13fed0f4bcf143b9524367b1f06b449"
+
+[[artifact]]
+tool = "buck2"
+target = "aarch64-linux-musl"
+version = "2026-07-15"
+url = "https://github.com/facebook/buck2/releases/download/2026-07-15/buck2-aarch64-unknown-linux-musl.zst"
+sha256 = "3176576bb21a5b0b59d1fd6bd7b1e4b1d3d9b264285e678bae4fa7891fba80bb"
+archive = "buck2-aarch64-unknown-linux-musl.zst"
+expected = "buck2"
+content_hash = "769ca6220bec1a2a5b17241abb337312d13fed0f4bcf143b9524367b1f06b449"
