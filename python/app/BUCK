@@ -11,5 +11,6 @@ py_binary(
     "//python/lib:fastbytes",
     "//python/lib:example",
   ],
+  pkg_name = "python-hello",
   visibility = ["PUBLIC"],
 )

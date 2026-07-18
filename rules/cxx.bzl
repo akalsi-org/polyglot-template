@@ -15,6 +15,7 @@ ExternalRunnerTestInfo rather than relying on a prelude-provided cxx_test.
 load("//config:defs.bzl", "fail_if_cross_arch", "target_arch_attr")
 load("//config:flags.bzl", "COVERAGE_FLAG", "FORBIDDEN_FLAGS", "STANDARD", "profile_compile_flags", "profile_link_flags")
 load("//rules:coverage.bzl", "CoverageInfo")
+load("//rules:pkg.bzl", "PACKAGE_LABELS_ATTR", "PackageEntry", "package_info")
 load("//toolchains:lock.bzl", "TOOLCHAINS")
 
 def _native_target() -> str:
@@ -178,9 +179,14 @@ def _cxx_library_impl(ctx: AnalysisContext) -> list[Provider]:
   objects = own_objects + dep_objects
   gcnos = own_gcnos + dep_gcnos
   outputs = own_objects if own_objects else hdrs
+  # cxx_library stages nothing of its own (a compiled .o is not something the
+  # package layout wants directly), but still calls package_info() with empty
+  # entries/needs so PackageInfo flows through a library-only dependency
+  # chain uniformly - see rules/pkg.bzl's module docstring.
   return [
     DefaultInfo(default_outputs = outputs),
     CxxInfo(include_dirs = include_dirs, hdrs = hdrs, objects = objects, gcnos = gcnos),
+    package_info(ctx, deps = ctx.attrs.deps),
   ]
 
 _cxx_library_rule = rule(
@@ -190,7 +196,7 @@ _cxx_library_rule = rule(
     "hdrs": attrs.list(attrs.source(), default = []),
     "include_dirs": attrs.list(attrs.string(), default = []),
     "srcs": attrs.list(attrs.source(), default = []),
-  } | _TOOLCHAIN_ATTRS | _PROFILE_ATTRS,
+  } | _TOOLCHAIN_ATTRS | _PROFILE_ATTRS | PACKAGE_LABELS_ATTR,
 )
 
 # --- cxx_adapter: one precompiled object, mirroring tools/cpp_graph.py's
@@ -243,9 +249,24 @@ def _cxx_binary_impl(ctx: AnalysisContext) -> list[Provider]:
   # directly (not through a declared-output-producing action), so any
   # runtime counter writes here would go nowhere declared - only cxx_test's
   # coverage collection action below actually feeds the report.
+  #
+  # Packaging: stages the RAW (non-loader-wrapped) binary under
+  # libexec/<pkg_name> - rules/package.bzl's "loader-bin" kind handler
+  # generates its own bin/<pkg_name> launcher from this entry, so this is
+  # deliberately NOT `launcher` (this rule's own loader-wrapped RunInfo
+  # script, whose paths are relative to THIS target's buck-out location, not
+  # a packaged layout's lib/<loader>).
+  pkg_name = ctx.attrs.pkg_name or ctx.attrs.name
+  info = package_info(
+    ctx,
+    entries = [PackageEntry(dest = "libexec/" + pkg_name, artifact = binary, kind = "loader-bin", owner = str(ctx.label.raw_target()))],
+    needs = ["musl-loader"],
+    deps = ctx.attrs.deps,
+  )
   return [
     DefaultInfo(default_output = binary, other_outputs = [launcher] + written),
     RunInfo(args = cmd_args(launcher, hidden = [binary, tools.dir] + written)),
+    info,
   ]
 
 _cxx_binary_rule = rule(
@@ -254,8 +275,9 @@ _cxx_binary_rule = rule(
     "deps": attrs.list(attrs.dep(providers = [CxxInfo]), default = []),
     "hdrs": attrs.list(attrs.source(), default = []),
     "include_dirs": attrs.list(attrs.string(), default = []),
+    "pkg_name": attrs.option(attrs.string(), default = None),
     "srcs": attrs.list(attrs.source(), default = []),
-  } | _TOOLCHAIN_ATTRS | _PROFILE_ATTRS,
+  } | _TOOLCHAIN_ATTRS | _PROFILE_ATTRS | PACKAGE_LABELS_ATTR,
 )
 
 # --- cxx_test: like cxx_binary, but links the shared per-profile doctest

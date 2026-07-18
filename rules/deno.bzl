@@ -49,6 +49,7 @@ repo-relative paths (e.g. "ts/lib/greeting/greeting.ts") underneath it.
 
 load("//config:flags.bzl", "coverage_enabled_flag")
 load("//rules:coverage.bzl", "CoverageInfo")
+load("//rules:pkg.bzl", "PACKAGE_LABELS_ATTR", "PackageEntry", "package_info")
 
 def _entries_to_layout(deno_json, deno_lock, srcs):
   # `srcs` maps the path the staged layout needs (e.g. "ts/app/hello/main.ts",
@@ -318,7 +319,11 @@ def _vite_build_impl(ctx: AnalysisContext) -> list[Provider]:
     "vite_build",
     out_dir_name = ctx.attrs.out_dir,
   )
-  return [DefaultInfo(default_output = out_dir)]
+  # Packaging: the whole built site directory stages as one tree entry under
+  # app/web, mirroring the old polyglot_package rule's `cp -R $WEB
+  # $OUT/app/web/`.
+  info = package_info(ctx, entries = [PackageEntry(dest = "app/web", artifact = out_dir, kind = "tree", owner = str(ctx.label.raw_target()))])
+  return [DefaultInfo(default_output = out_dir), info]
 
 vite_build = rule(
   impl = _vite_build_impl,
@@ -326,7 +331,7 @@ vite_build = rule(
     "config": attrs.string(),
     "out_dir": attrs.string(),
     "vite_version": attrs.string(),
-  },
+  } | PACKAGE_LABELS_ATTR,
 )
 
 # --- tsconfig_emit / tsconfig_drift_test: deno.json stays authoritative (it

@@ -53,6 +53,7 @@ therefore also include `roots` directly, alongside gcc_dir/py_dir.
 load("//config:defs.bzl", "fail_if_cross_arch", "target_arch_attr")
 load("//config:flags.bzl", "COVERAGE_FLAG", "FORBIDDEN_FLAGS", "STANDARD", "coverage_enabled_flag", "profile_compile_flags", "profile_link_flags")
 load("//rules:coverage.bzl", "CoverageInfo")
+load("//rules:pkg.bzl", "PACKAGE_LABELS_ATTR", "PackageEntry", "package_info")
 load("//toolchains:lock.bzl", "TOOLCHAINS")
 
 def _native_target() -> str:
@@ -172,9 +173,21 @@ def _py_library_impl(ctx: AnalysisContext) -> list[Provider]:
   dep_srcs, dep_roots = _merge_pyinfo(ctx.attrs.deps)
   srcs = list(ctx.attrs.srcs) + dep_srcs
   roots = [ctx.attrs.root] + [r for r in dep_roots if str(r) != ctx.attrs.root]
+  # Packaging: one tree entry per OWN source file (not dep_srcs - deps'
+  # entries are already folded in transitively via package_info(deps=...)
+  # below), staged under app/python/lib/<src's own package-relative path> -
+  # e.g. a src of "example/example.py" (this rule's own short_path) becomes
+  # app/python/lib/example/example.py, mirroring the old polyglot_package
+  # rule's hand-written layout for python/lib/example.
+  info = package_info(
+    ctx,
+    entries = [PackageEntry(dest = "app/python/lib/" + src.short_path, artifact = src, kind = "tree", owner = str(ctx.label.raw_target())) for src in ctx.attrs.srcs],
+    deps = ctx.attrs.deps,
+  )
   return [
     DefaultInfo(default_outputs = list(ctx.attrs.srcs)),
     PyInfo(srcs = srcs, roots = roots),
+    info,
   ]
 
 _py_library_rule = rule(
@@ -183,7 +196,7 @@ _py_library_rule = rule(
     "deps": attrs.list(attrs.dep(providers = [PyInfo]), default = []),
     "root": attrs.string(),
     "srcs": attrs.list(attrs.source()),
-  },
+  } | PACKAGE_LABELS_ATTR,
 )
 
 # --- py_extension: compiles python/lib/fastbytes/*.cc against the
@@ -256,9 +269,22 @@ def _py_extension_impl(ctx: AnalysisContext) -> list[Provider]:
     identifier = ctx.attrs.name,
   )
 
+  # Packaging: pkg_dir's OWN top level already contains a "<package>/"
+  # subdirectory (this rule's own stage_script above: `mkdir -p
+  # "$1/%s"`), so the entry's dest is the PARENT app/python/lib, not
+  # app/python/lib/<package> - staging copies pkg_dir's contents (the
+  # "<package>/" folder itself) straight into it, mirroring the old
+  # polyglot_package rule's `cp -R $PYFB/. $OUT/app/python/lib/`. A
+  # py_extension always needs the pinned interpreter present at runtime.
+  info = package_info(
+    ctx,
+    entries = [PackageEntry(dest = "app/python/lib", artifact = pkg_dir, kind = "tree", owner = str(ctx.label.raw_target()))],
+    needs = ["python-runtime"],
+  )
   return [
     DefaultInfo(default_outputs = [pkg_dir]),
     PyInfo(srcs = list(ctx.attrs.srcs) + [ctx.attrs.init_src], roots = [pkg_dir]),
+    info,
   ]
 
 _py_extension_rule = rule(
@@ -268,7 +294,7 @@ _py_extension_rule = rule(
     "init_src": attrs.source(),
     "package": attrs.string(),
     "srcs": attrs.list(attrs.source()),
-  } | _TOOLCHAIN_ATTRS | _PROFILE_ATTRS,
+  } | _TOOLCHAIN_ATTRS | _PROFILE_ATTRS | PACKAGE_LABELS_ATTR,
 )
 
 # --- py_binary: loader-wrapped launcher script running the pinned
@@ -283,10 +309,33 @@ def _py_binary_impl(ctx: AnalysisContext) -> list[Provider]:
   ]
   launcher, written = ctx.actions.write(ctx.attrs.name + ".sh", lines, is_executable = True, allow_args = True)
   command = cmd_args(launcher, hidden = srcs + written + roots + [gcc.gcc_dir, py.py_dir])
+  # Packaging: this rule's own source (`main`) stages under
+  # app/python/app/<main's package-relative path> (e.g. "hello/main.py" ->
+  # app/python/app/hello/main.py, mirroring the old polyglot_package rule's
+  # hand-written layout), plus a "py-app-launcher" marker entry (no artifact
+  # of its own) at bin/<pkg_name> - rules/package.bzl's kind handler
+  # generates bin/<pkg_name> + bin/python + bin/python3 from it, with
+  # PYTHONPATH assembled from every folded app/python/* tree entry (this
+  # target's own deps' py_library/py_extension entries, folded in
+  # transitively below).
+  pkg_name = ctx.attrs.pkg_name or ctx.attrs.name
+  info = package_info(
+    ctx,
+    entries = [
+      PackageEntry(dest = "app/python/app/" + ctx.attrs.main.short_path, artifact = ctx.attrs.main, kind = "tree", owner = str(ctx.label.raw_target())),
+      PackageEntry(dest = "bin/" + pkg_name, artifact = None, kind = "py-app-launcher", owner = str(ctx.label.raw_target())),
+    ],
+    # bin/python + bin/python3 (the loader-wrapped interpreter launchers
+    # rules/package.bzl's "py-app-launcher" kind handler also writes) need
+    # the musl loader present too, not just the python runtime tree.
+    needs = ["python-runtime", "musl-loader"],
+    deps = ctx.attrs.deps,
+  )
   return [
     DefaultInfo(default_output = launcher, other_outputs = written),
     RunInfo(args = command),
     PyInfo(srcs = srcs + [ctx.attrs.main], roots = []),
+    info,
   ]
 
 _py_binary_rule = rule(
@@ -294,7 +343,8 @@ _py_binary_rule = rule(
   attrs = {
     "deps": attrs.list(attrs.dep(providers = [PyInfo]), default = []),
     "main": attrs.source(),
-  } | _TOOLCHAIN_ATTRS,
+    "pkg_name": attrs.option(attrs.string(), default = None),
+  } | _TOOLCHAIN_ATTRS | PACKAGE_LABELS_ATTR,
 )
 
 # --- py_test: unittest discovery over `start` (python/test by default),

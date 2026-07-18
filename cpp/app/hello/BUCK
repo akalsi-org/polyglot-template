@@ -7,5 +7,6 @@ cxx_binary(
   srcs = ["main.cc"],
   include_dirs = ["cpp/lib"],
   deps = ["//cpp/adapters:example-vendor"],
+  pkg_name = "cpp-hello",
   visibility = ["PUBLIC"],
 )

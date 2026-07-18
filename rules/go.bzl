@@ -56,6 +56,7 @@ what actually makes buck2 track and materialize it per-configuration.
 load("//config:defs.bzl", "fail_if_cross_arch", "target_arch_attr")
 load("//config:flags.bzl", "coverage_enabled_flag")
 load("//rules:coverage.bzl", "CoverageInfo")
+load("//rules:pkg.bzl", "PACKAGE_LABELS_ATTR", "PackageEntry", "package_info")
 load("//toolchains:lock.bzl", "TOOLCHAINS")
 
 def _native_target() -> str:
@@ -166,9 +167,12 @@ def _write_go_script(ctx, name, tools, tail_lines):
 
 def _go_library_impl(ctx: AnalysisContext) -> list[Provider]:
   srcs = list(ctx.attrs.srcs) + _merge_dep_srcs(ctx.attrs.deps)
+  # No emission of its own (mirrors rules/cxx.bzl's cxx_library) - still
+  # folds deps' PackageInfo transitively for uniformity.
   return [
     DefaultInfo(default_outputs = list(ctx.attrs.srcs)),
     GoInfo(srcs = srcs),
+    package_info(ctx, deps = ctx.attrs.deps),
   ]
 
 go_library = rule(
@@ -176,7 +180,7 @@ go_library = rule(
   attrs = {
     "deps": attrs.list(attrs.dep(providers = [GoInfo]), default = []),
     "srcs": attrs.list(attrs.source()),
-  },
+  } | PACKAGE_LABELS_ATTR,
 )
 
 # --- go_binary: `go build -trimpath` of one package, mirroring repo.sh's
@@ -196,9 +200,19 @@ def _go_binary_impl(ctx: AnalysisContext) -> list[Provider]:
     category = "go_build",
     identifier = ctx.attrs.name,
   )
+  # Packaging: go build with CGO_ENABLED=0 is static, so unlike cxx_binary
+  # this stages straight to bin/<pkg_name> with no loader-wrapping needed -
+  # "static-bin" is plain staging in rules/package.bzl's kind dispatch.
+  pkg_name = ctx.attrs.pkg_name or ctx.attrs.name
+  info = package_info(
+    ctx,
+    entries = [PackageEntry(dest = "bin/" + pkg_name, artifact = binary, kind = "static-bin", owner = str(ctx.label.raw_target()))],
+    deps = ctx.attrs.deps,
+  )
   return [
     DefaultInfo(default_output = binary),
     RunInfo(args = cmd_args(binary)),
+    info,
   ]
 
 _go_binary_rule = rule(
@@ -206,8 +220,9 @@ _go_binary_rule = rule(
   attrs = {
     "deps": attrs.list(attrs.dep(providers = [GoInfo]), default = []),
     "package": attrs.string(),
+    "pkg_name": attrs.option(attrs.string(), default = None),
     "srcs": attrs.list(attrs.source(), default = []),
-  } | _TOOLCHAIN_ATTRS,
+  } | _TOOLCHAIN_ATTRS | PACKAGE_LABELS_ATTR,
 )
 
 # --- go_test: `go test -trimpath` over a package set, mirroring repo.sh's

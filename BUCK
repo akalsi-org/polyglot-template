@@ -5,9 +5,9 @@ load("//rules:group.bzl", "group")
 # Uniform build/test/lint entry points across all five lanes.
 #
 # //:build is a real, buildable group(): `buck2 build //:build` builds every
-# lane's primary build output (mirroring moon.yml's own top-level `build`
-# task, which depends on cpp-build/python-build/ts-build/go-build/
-# tsweb-build) plus the packaged polyglot-demo application.
+# lane's primary build output. Packaging is deliberately NOT part of it —
+# archives are release work (`buck2 build //packages/...` or
+# `./repo.sh package <name>`), not the dev loop.
 #
 # There is deliberately no //:test or //:lint group target. Buck2 has no
 # prelude here to supply test_suite()/alias(), and a first-party rule can
@@ -95,7 +95,6 @@ group(
     "//python/app:hello",
     "//ts:check",
     "//tsweb:site",
-    "//packages:polyglot-demo",
   ],
   visibility = ["PUBLIC"],
 )
