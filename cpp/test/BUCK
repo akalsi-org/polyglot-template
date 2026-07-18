@@ -1,0 +1,43 @@
+# Establishes cpp/test/ as a buck2 package so rules/toolchain.bzl's
+# gcc_musl_toolchain can depend on reflection.cc for the C++26 reflection
+# capability probe. Also hand-declares the buck2 mirror of the moon-owned
+# cpp/test/build.toml [[tests]] fragment: same three test executables,
+# built against the pinned gcc-musl toolchain, sharing one doctest_runner
+# object per configuration (see rules/cxx.bzl's cxx_test).
+
+load("//rules:cxx.bzl", "cxx_adapter", "cxx_test")
+load("//rules:file.bzl", "export_file")
+
+export_file(
+  name = "reflection.cc",
+  src = "reflection.cc",
+  visibility = ["//toolchains:"],
+)
+
+cxx_adapter(
+  name = "doctest_runner_obj",
+  src = "doctest_runner.cc",
+  doctest = True,
+  visibility = ["//cpp/..."],
+)
+
+cxx_test(
+  name = "example_test",
+  srcs = ["example_test.cc"],
+  include_dirs = ["cpp/lib"],
+  deps = ["//cpp/adapters:example-vendor"],
+)
+
+cxx_test(
+  name = "example_edge_test",
+  srcs = ["example_edge_test.cc"],
+  include_dirs = ["cpp/lib"],
+  deps = ["//cpp/adapters:example-vendor"],
+)
+
+cxx_test(
+  name = "pgt_core_test",
+  srcs = ["core_test.cc"],
+  include_dirs = ["cpp/lib"],
+  deps = ["//cpp/lib/pgt/core:pgt_core"],
+)

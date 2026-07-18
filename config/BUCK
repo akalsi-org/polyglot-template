@@ -1,0 +1,3 @@
+load(":defs.bzl", "define_config")
+
+define_config()

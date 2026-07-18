@@ -1,0 +1,16 @@
+# Hand-declared mirror of cpp/adapters/example-vendor.json (adapter
+# "example-vendor", schema_version 1): one action compiling
+# cpp/lib/example/example.cc with the extra arg "-Ilib" (rewritten here to
+# the repo-relative "cpp/lib", matching cpp_graph.py's load_adapter()
+# rewrite of "-I" fragment arguments). See cpp/adapter-fragment.schema.json
+# for the fragment schema this mirrors.
+
+load("//rules:cxx.bzl", "cxx_adapter")
+
+cxx_adapter(
+  name = "example-vendor",
+  src = "//cpp/lib/example:example.cc",
+  hdrs = ["//cpp/lib/example:example.hh"],
+  extra_args = ["-Icpp/lib"],
+  visibility = ["//cpp/..."],
+)
