@@ -5,6 +5,11 @@ load("//rules:python.bzl", "py_library")
 py_library(
   name = "example",
   root = "python/lib",
-  srcs = ["example.py"],
+  # py.typed (PEP 561) marks this package's inline annotations as its
+  # typed contract for editors/type checkers; staged like any other src.
+  srcs = [
+    "example.py",
+    "py.typed",
+  ],
   visibility = ["PUBLIC"],
 )

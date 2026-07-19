@@ -8,5 +8,9 @@ py_extension(
   package = "fastbytes",
   srcs = ["fastbytes.cc"],
   init_src = "__init__.py",
+  stubs = [
+    "_native.pyi",
+    "py.typed",
+  ],
   visibility = ["PUBLIC"],
 )

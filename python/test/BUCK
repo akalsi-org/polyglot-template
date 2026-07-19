@@ -11,6 +11,7 @@ py_test(
   srcs = [
     "test_example.py",
     "test_fastbytes.py",
+    "test_stubs.py",
   ],
   deps = [
     "//python/lib/fastbytes:fastbytes",
@@ -28,6 +29,7 @@ py_compileall_check(
   srcs = [
     "test_example.py",
     "test_fastbytes.py",
+    "test_stubs.py",
   ],
   deps = [
     "//python/lib/example:example",

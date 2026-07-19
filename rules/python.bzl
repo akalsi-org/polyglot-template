@@ -261,19 +261,29 @@ def _py_extension_impl(ctx: AnalysisContext) -> list[Provider]:
   ctx.actions.run(cmd_args(link_args), category = "cxx_link", identifier = ctx.attrs.name)
 
   pkg_dir = ctx.actions.declare_output(ctx.attrs.name + "-pkg", dir = True)
+  # stubs (.pyi files, the PEP 561 py.typed marker) stage beside
+  # __init__.py under their own basenames, so editors and type checkers
+  # resolving the staged package (or the source tree, where the same files
+  # live) see the extension module's typed surface without importing it.
+  stage_lines = [
+    "#!/bin/sh",
+    "set -eu",
+    "mkdir -p \"$1/%s\"" % ctx.attrs.package,
+    "cp \"$2\" \"$1/%s/__init__.py\"" % ctx.attrs.package,
+    "cp \"$3\" \"$1/%s/%s\"" % (ctx.attrs.package, native_name),
+  ]
+  stage_args = ["/bin/sh", None, pkg_dir.as_output(), ctx.attrs.init_src, shared_obj]
+  for i, stub in enumerate(ctx.attrs.stubs):
+    stage_lines.append("cp \"$%d\" \"$1/%s/%s\"" % (4 + i, ctx.attrs.package, stub.basename))
+    stage_args.append(stub)
   stage_script = ctx.actions.write(
     ctx.attrs.name + "-stage.sh",
-    [
-      "#!/bin/sh",
-      "set -eu",
-      "mkdir -p \"$1/%s\"" % ctx.attrs.package,
-      "cp \"$2\" \"$1/%s/__init__.py\"" % ctx.attrs.package,
-      "cp \"$3\" \"$1/%s/%s\"" % (ctx.attrs.package, native_name),
-    ],
+    stage_lines,
     is_executable = True,
   )
+  stage_args[1] = stage_script
   ctx.actions.run(
-    cmd_args(["/bin/sh", stage_script, pkg_dir.as_output(), ctx.attrs.init_src, shared_obj]),
+    cmd_args(stage_args),
     category = "py_extension_stage",
     identifier = ctx.attrs.name,
   )
@@ -291,7 +301,7 @@ def _py_extension_impl(ctx: AnalysisContext) -> list[Provider]:
   )
   return [
     DefaultInfo(default_outputs = [pkg_dir]),
-    PyInfo(srcs = list(ctx.attrs.srcs) + [ctx.attrs.init_src], roots = [pkg_dir]),
+    PyInfo(srcs = list(ctx.attrs.srcs) + [ctx.attrs.init_src] + list(ctx.attrs.stubs), roots = [pkg_dir]),
     info,
   ]
 
@@ -302,6 +312,7 @@ _py_extension_rule = rule(
     "init_src": attrs.source(),
     "package": attrs.string(),
     "srcs": attrs.list(attrs.source()),
+    "stubs": attrs.list(attrs.source(), default = []),
   } | _TOOLCHAIN_ATTRS | _PROFILE_ATTRS | PACKAGE_LABELS_ATTR,
 )
 
