@@ -35,6 +35,12 @@ _GCC_BIN_DIR = _GCC["expected"].rsplit("/", 1)[0]
 _LOADER_DIR = _GCC["loader"].rsplit("/", 1)[0]
 _DOCTEST_INCLUDE_DIR = _DOCTEST["expected"].rsplit("/", 2)[0]
 
+# Keep every dependency closure as a tset.  C++ originally carried flattened
+# Python lists here, which repeated a shared library's headers/objects at
+# every parent in a diamond.  Consumers merge once and flatten only while
+# constructing their own action.
+CxxArtifactSet = transitive_set()
+CxxStringSet = transitive_set()
 CxxInfo = provider(fields = ["include_dirs", "hdrs", "objects", "gcnos", "include_trees"])
 
 # --- include-tree staging: gives cxx_library a one-BUCK-file UX (hdrs/srcs/
@@ -155,6 +161,14 @@ def _include_args(ctx: AnalysisContext, tsets: list, include_dirs: list) -> list
     [cmd_args(tree, format = "-I{}") for tree in _flatten_include_trees(ctx, tsets)]
   )
 
+def cxx_include_tree_args(ctx: AnalysisContext, deps: list) -> list:
+  """Expose collision-checked logical header trees to non-C++ consumers."""
+  return _include_args(
+    ctx,
+    [dep[CxxInfo].include_trees for dep in deps if dep[CxxInfo].include_trees != None],
+    [],
+  )
+
 def _check_flags(flags):
   for flag in flags:
     if flag in FORBIDDEN_FLAGS:
@@ -184,18 +198,25 @@ def _doctest_include(ctx):
   doctest_dir = ctx.attrs._doctest[DefaultInfo].default_outputs[0]
   return doctest_dir.project(_DOCTEST_INCLUDE_DIR)
 
-def _merge_deps(deps):
-  include_dirs = []
-  hdrs = []
-  objects = []
-  gcnos = []
+def _flatten_tset(tset):
+  seen = {}
+  out = []
+  for value in tset.traverse():
+    for item in value:
+      key = str(item)
+      if key not in seen:
+        seen[key] = True
+        out.append(item)
+  return out
+
+def _merge_deps(ctx, deps):
+  include_dirs = ctx.actions.tset(CxxStringSet, children = [dep[CxxInfo].include_dirs for dep in deps])
+  hdrs = ctx.actions.tset(CxxArtifactSet, children = [dep[CxxInfo].hdrs for dep in deps])
+  objects = ctx.actions.tset(CxxArtifactSet, children = [dep[CxxInfo].objects for dep in deps])
+  gcnos = ctx.actions.tset(CxxArtifactSet, children = [dep[CxxInfo].gcnos for dep in deps])
   tree_children = []
   for dep in deps:
     info = dep[CxxInfo]
-    include_dirs += info.include_dirs
-    hdrs += info.hdrs
-    objects += info.objects
-    gcnos += info.gcnos
     if info.include_trees != None:
       tree_children.append(info.include_trees)
   return include_dirs, hdrs, objects, gcnos, tree_children
@@ -288,25 +309,25 @@ _PROFILE_ATTRS = {
 
 def _cxx_library_impl(ctx: AnalysisContext) -> list[Provider]:
   tools = _toolchain_tools(ctx)
-  dep_include_dirs, dep_hdrs, dep_objects, dep_gcnos, tree_children = _merge_deps(ctx.attrs.deps)
-  include_dirs = list(ctx.attrs.include_dirs) + dep_include_dirs
-  hdrs = list(ctx.attrs.hdrs) + dep_hdrs
+  dep_include_dirs, dep_hdrs, dep_objects, dep_gcnos, tree_children = _merge_deps(ctx, ctx.attrs.deps)
+  include_dirs = ctx.actions.tset(CxxStringSet, value = list(ctx.attrs.include_dirs), children = [dep_include_dirs])
+  hdrs = ctx.actions.tset(CxxArtifactSet, value = list(ctx.attrs.hdrs), children = [dep_hdrs])
   # Own hdrs are staged into this library's own include-tree node (logical
   # path rooted at cpp/lib - see IncludeTreeSet's doc comment above); the
   # resulting tset already folds in every dep's own tree, so compiling this
   # library's own srcs (including a self-include of its own header at its
   # logical path) needs only ONE flatten of this single node.
   own_tree_tset = _own_include_tree_tset(ctx, ctx.attrs.hdrs, tree_children)
-  include_args = _include_args(ctx, [own_tree_tset], include_dirs)
+  include_args = _include_args(ctx, [own_tree_tset], _flatten_tset(include_dirs))
   compiled = [
-    _compile_one(ctx, tools, src, include_args, hdrs, ctx.attrs.compile_flags, [], False, src.short_path)
+    _compile_one(ctx, tools, src, include_args, _flatten_tset(hdrs), ctx.attrs.compile_flags, [], False, src.short_path)
     for src in ctx.attrs.srcs
   ]
   own_objects = [obj for obj, _gcno in compiled]
   own_gcnos = [gcno for _obj, gcno in compiled if gcno != None]
-  objects = own_objects + dep_objects
-  gcnos = own_gcnos + dep_gcnos
-  outputs = own_objects if own_objects else hdrs
+  objects = ctx.actions.tset(CxxArtifactSet, value = own_objects, children = [dep_objects])
+  gcnos = ctx.actions.tset(CxxArtifactSet, value = own_gcnos, children = [dep_gcnos])
+  outputs = own_objects if own_objects else list(ctx.attrs.hdrs)
   # cxx_library stages nothing of its own (a compiled .o is not something the
   # package layout wants directly), but still calls package_info() with empty
   # entries/needs so PackageInfo flows through a library-only dependency
@@ -334,16 +355,16 @@ _cxx_library_rule = rule(
 
 def _cxx_object_impl(ctx: AnalysisContext) -> list[Provider]:
   tools = _toolchain_tools(ctx)
-  include_dirs, hdrs, _objects, _gcnos, tree_children = _merge_deps(ctx.attrs.deps)
-  hdrs = list(ctx.attrs.hdrs) + hdrs
+  include_dirs, hdrs, _objects, _gcnos, tree_children = _merge_deps(ctx, ctx.attrs.deps)
+  hdrs = ctx.actions.tset(CxxArtifactSet, value = list(ctx.attrs.hdrs), children = [hdrs])
   # Deps' include trees still fold forward so a cxx_object with cxx_library
   # deps compiles against and re-exports them correctly.
-  include_args = _include_args(ctx, tree_children, include_dirs)
-  obj, gcno = _compile_one(ctx, tools, ctx.attrs.src, include_args, hdrs, ctx.attrs.compile_flags, [], ctx.attrs.doctest, ctx.attrs.name)
+  include_args = _include_args(ctx, tree_children, _flatten_tset(include_dirs))
+  obj, gcno = _compile_one(ctx, tools, ctx.attrs.src, include_args, _flatten_tset(hdrs), ctx.attrs.compile_flags, [], ctx.attrs.doctest, ctx.attrs.name)
   tree_tset = ctx.actions.tset(IncludeTreeSet, children = tree_children) if tree_children else None
   return [
     DefaultInfo(default_outputs = [obj]),
-    CxxInfo(include_dirs = [], hdrs = hdrs, objects = [obj], gcnos = [gcno] if gcno != None else [], include_trees = tree_tset),
+    CxxInfo(include_dirs = include_dirs, hdrs = hdrs, objects = ctx.actions.tset(CxxArtifactSet, value = [obj]), gcnos = ctx.actions.tset(CxxArtifactSet, value = [gcno] if gcno != None else []), include_trees = tree_tset),
   ]
 
 _cxx_object_rule = rule(
@@ -360,16 +381,16 @@ _cxx_object_rule = rule(
 
 def _cxx_binary_impl(ctx: AnalysisContext) -> list[Provider]:
   tools = _toolchain_tools(ctx)
-  dep_include_dirs, dep_hdrs, dep_objects, _dep_gcnos, tree_children = _merge_deps(ctx.attrs.deps)
-  include_dirs = list(ctx.attrs.include_dirs) + dep_include_dirs
-  hdrs = list(ctx.attrs.hdrs) + dep_hdrs
-  include_args = _include_args(ctx, tree_children, include_dirs)
+  dep_include_dirs, dep_hdrs, dep_objects, _dep_gcnos, tree_children = _merge_deps(ctx, ctx.attrs.deps)
+  include_dirs = ctx.actions.tset(CxxStringSet, value = list(ctx.attrs.include_dirs), children = [dep_include_dirs])
+  hdrs = ctx.actions.tset(CxxArtifactSet, value = list(ctx.attrs.hdrs), children = [dep_hdrs])
+  include_args = _include_args(ctx, tree_children, _flatten_tset(include_dirs))
   compiled = [
-    _compile_one(ctx, tools, src, include_args, hdrs, ctx.attrs.compile_flags, [], False, src.short_path)
+    _compile_one(ctx, tools, src, include_args, _flatten_tset(hdrs), ctx.attrs.compile_flags, [], False, src.short_path)
     for src in ctx.attrs.srcs
   ]
   own_objects = [obj for obj, _gcno in compiled]
-  objects = _dedupe_artifacts(own_objects + dep_objects)
+  objects = _flatten_tset(ctx.actions.tset(CxxArtifactSet, value = own_objects, children = [dep_objects]))
   binary = _link(ctx, tools, objects, ctx.attrs.link_flags, ctx.attrs.name)
   launcher, written = _loader_launcher(ctx, tools, binary)
   # cxx_binary is deliberately left uninstrumented-output-free even under
@@ -461,19 +482,19 @@ def _coverage_collect_action(ctx, tools, binary, gcnos):
 
 def _cxx_test_impl(ctx: AnalysisContext) -> list[Provider]:
   tools = _toolchain_tools(ctx)
-  dep_include_dirs, dep_hdrs, dep_objects, dep_gcnos, tree_children = _merge_deps(ctx.attrs.deps)
+  dep_include_dirs, dep_hdrs, dep_objects, dep_gcnos, tree_children = _merge_deps(ctx, ctx.attrs.deps)
   runner_objects = ctx.attrs._runner[CxxInfo].objects
   runner_gcnos = ctx.attrs._runner[CxxInfo].gcnos
-  include_dirs = list(ctx.attrs.include_dirs) + dep_include_dirs
-  hdrs = list(ctx.attrs.hdrs) + dep_hdrs
-  include_args = _include_args(ctx, tree_children, include_dirs)
+  include_dirs = ctx.actions.tset(CxxStringSet, value = list(ctx.attrs.include_dirs), children = [dep_include_dirs])
+  hdrs = ctx.actions.tset(CxxArtifactSet, value = list(ctx.attrs.hdrs), children = [dep_hdrs])
+  include_args = _include_args(ctx, tree_children, _flatten_tset(include_dirs))
   compiled = [
-    _compile_one(ctx, tools, src, include_args, hdrs, ctx.attrs.compile_flags, [], True, src.short_path)
+    _compile_one(ctx, tools, src, include_args, _flatten_tset(hdrs), ctx.attrs.compile_flags, [], True, src.short_path)
     for src in ctx.attrs.srcs
   ]
   own_objects = [obj for obj, _gcno in compiled]
   own_gcnos = [gcno for _obj, gcno in compiled if gcno != None]
-  objects = _dedupe_artifacts(runner_objects + own_objects + dep_objects)
+  objects = _flatten_tset(ctx.actions.tset(CxxArtifactSet, value = own_objects, children = [runner_objects, dep_objects]))
   binary = _link(ctx, tools, objects, ctx.attrs.link_flags, ctx.attrs.name)
   launcher, written = _loader_launcher(ctx, tools, binary)
   command = cmd_args(launcher, hidden = [binary, tools.dir] + written)
@@ -487,7 +508,7 @@ def _cxx_test_impl(ctx: AnalysisContext) -> list[Provider]:
     ),
   ]
   if COVERAGE_FLAG in ctx.attrs.compile_flags:
-    gcnos = _dedupe_artifacts(runner_gcnos + own_gcnos + dep_gcnos)
+    gcnos = _flatten_tset(ctx.actions.tset(CxxArtifactSet, value = own_gcnos, children = [runner_gcnos, dep_gcnos]))
     gcov_dir = _coverage_collect_action(ctx, tools, binary, gcnos)
     providers.append(CoverageInfo(
       kind = "cxx_gcov",

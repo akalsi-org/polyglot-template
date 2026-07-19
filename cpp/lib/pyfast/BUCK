@@ -4,9 +4,28 @@
 # fixture (not yet wired: py_extension needs C-mode + cxx_library header
 # deps first - see AGENTS.md in this directory).
 load("//rules:cxx.bzl", "cxx_library")
+load("//rules:python.bzl", "py_extension", "py_test")
 
 cxx_library(
   name = "pyfast",
   hdrs = ["pyfast.h"],
   visibility = ["PUBLIC"],
+)
+
+py_extension(
+  name = "demo",
+  language = "c",
+  cxx_deps = [":pyfast"],
+  package = "vcall_demo",
+  init_src = "__init__.py",
+  srcs = ["demo.c"],
+  extra_link_flags = ["-lm"],
+)
+
+py_test(
+  name = "demo_test",
+  start = "cpp/lib/pyfast",
+  pattern = "test_pyfast_unittest.py",
+  srcs = ["test_pyfast.py", "test_pyfast_unittest.py"],
+  deps = [":demo"],
 )

@@ -13,6 +13,7 @@ go_lint(
   mode = "fmt",
   deps = [
     "//go/app/hello:hello",
+    "//go/app/hello:main_test",
     "//go/lib/greeting:greeting",
     "//go/test:greeting_test",
   ],
@@ -24,6 +25,7 @@ go_lint(
   packages = ["./go/..."],
   deps = [
     "//go/app/hello:hello",
+    "//go/app/hello:main_test",
     "//go/lib/greeting:greeting",
     "//go/test:greeting_test",
   ],

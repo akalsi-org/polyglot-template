@@ -52,6 +52,7 @@ sliced at the wrong segment.
 
 load("//config:flags.bzl", "coverage_enabled_flag")
 load("//rules:coverage.bzl", "CoverageInfo")
+load("//rules:deno_sources.bzl", "DenoAppInfo", "DenoSourcesInfo", "DenoSourceSet", "deno_sources_children", "flatten_deno_sources", "merge_direct_deno_sources", "own_deno_sources", "staged_path")
 load("//rules:pkg.bzl", "PACKAGE_LABELS_ATTR", "PackageEntry", "check_pkg_name", "package_info")
 
 def _native_target() -> str:
@@ -80,28 +81,10 @@ _DENO_TOOLCHAIN = "//toolchains:deno-" + _NATIVE_TARGET
 # convention _entries_to_layout's callers used to hand-maintain).
 #
 # Diamond-safe by construction, mirroring rules/pkg.bzl's
-# flatten_merged_package_entries() doc comment: _flatten_deno_sources below
+# flatten_merged_package_entries() doc comment: flatten_deno_sources() below
 # builds ONE new tset node with every dep's `sources` tset as a child and
 # traverses THAT once, so a source shared by two deps (e.g. two apps both
 # depending on the same deno_library) surfaces exactly once.
-DenoSourceSet = transitive_set()
-DenoSourcesInfo = provider(fields = ["sources"])
-
-# deno_app additionally carries its own entrypoint's staged path, so
-# consumers (deno_cache's entries, deno_graph_check's entries) can derive the
-# CLI-facing entry path from a deno_app dep instead of repeating it as a
-# string.
-DenoAppInfo = provider(fields = ["entry"])
-
-def _staged_path(ctx: AnalysisContext, src: Artifact) -> str:
-  return ctx.label.package + "/" + src.short_path
-
-def _own_deno_sources(ctx: AnalysisContext, srcs: list) -> list:
-  return [(_staged_path(ctx, src), src) for src in srcs]
-
-def _deno_sources_children(deps: list) -> list:
-  return [d[DenoSourcesInfo].sources for d in deps if DenoSourcesInfo in d]
-
 # Makes DenoAppInfo load-bearing: every consumer below resolves its effective
 # `deno` CLI entry-arg list as explicit `entries` (still needed for
 # directory-scoped cases like deno_test's "ts/test/" or deno_lint's "ts/")
@@ -118,20 +101,6 @@ def _resolve_entries(ctx: AnalysisContext) -> list:
       out.append(entry)
   return out
 
-def _flatten_deno_sources(ctx: AnalysisContext, deps: list) -> dict:
-  """Folds every `deps` DenoSourcesInfo target's transitive sources into one
-  staged_path -> Artifact layout dict, diamond-safe (single traverse() over
-  one merged tset node - see DenoSourceSet's doc comment above)."""
-  children = _deno_sources_children(deps)
-  if not children:
-    return {}
-  merged = ctx.actions.tset(DenoSourceSet, children = children)
-  layout = {}
-  for value in merged.traverse():
-    for staged_path, artifact in value:
-      layout[staged_path] = artifact
-  return layout
-
 # --- deno_library: a source-set-only target (mirrors go_library/py_library's
 # shape) usable for both lib/ and app/ directories - deno_app (below) is the
 # app-flavored sibling that additionally records an entrypoint. Deliberately
@@ -140,8 +109,8 @@ def _flatten_deno_sources(ctx: AnalysisContext, deps: list) -> dict:
 # DenoSourcesInfo provider and visibility alone governs who may depend on
 # whom.
 def _deno_library_impl(ctx: AnalysisContext) -> list[Provider]:
-  own = _own_deno_sources(ctx, ctx.attrs.srcs)
-  tset = ctx.actions.tset(DenoSourceSet, value = own, children = _deno_sources_children(ctx.attrs.deps))
+  own = own_deno_sources(ctx, ctx.attrs.srcs)
+  tset = ctx.actions.tset(DenoSourceSet, value = own, children = deno_sources_children(ctx.attrs.deps))
   return [
     DefaultInfo(default_outputs = list(ctx.attrs.srcs)),
     DenoSourcesInfo(sources = tset),
@@ -165,12 +134,12 @@ def deno_library(**kwargs):
 def _deno_app_impl(ctx: AnalysisContext) -> list[Provider]:
   if ctx.attrs.main not in ctx.attrs.srcs:
     fail("{}: `main` ({}) must also be listed in `srcs`".format(ctx.label.raw_target(), ctx.attrs.main))
-  own = _own_deno_sources(ctx, ctx.attrs.srcs)
-  tset = ctx.actions.tset(DenoSourceSet, value = own, children = _deno_sources_children(ctx.attrs.deps))
+  own = own_deno_sources(ctx, ctx.attrs.srcs)
+  tset = ctx.actions.tset(DenoSourceSet, value = own, children = deno_sources_children(ctx.attrs.deps))
 
   # Packaging: stage this app's own transitive DenoSourcesInfo closure - own
   # `srcs` plus every deno_library/deno_app dep's sources, diamond-safe via
-  # the same shared-tset-merge _flatten_deno_sources already uses for every
+  # the same shared-tset-merge flatten_deno_sources() already uses for every
   # other consumer in this file - one "tree" PackageEntry per source file, at
   # its own staged_path directly (e.g. ts/app/server/main.ts,
   # ts/lib/greeting/greeting.ts) - the package root mirrors the repo's own
@@ -182,11 +151,10 @@ def _deno_app_impl(ctx: AnalysisContext) -> list[Provider]:
   # the right file even though several of this app's own staged entries
   # share the same owner. needs "deno-runtime" so package() also stages the
   # pinned deno binary.
-  closure = dict(own)
-  closure.update(_flatten_deno_sources(ctx, ctx.attrs.deps))
+  closure = merge_direct_deno_sources(ctx, flatten_deno_sources(ctx, ctx.attrs.deps), {path: artifact for path, artifact, _owner in own})
   pkg_name = check_pkg_name(ctx, ctx.attrs.pkg_name or ctx.attrs.name)
   owner = str(ctx.label.raw_target())
-  main_dest = _staged_path(ctx, ctx.attrs.main)
+  main_dest = staged_path(ctx, ctx.attrs.main)
   pkg_entries = [
     PackageEntry(dest = staged_path, artifact = artifact, kind = "tree", owner = owner)
     for staged_path, artifact in closure.items()
@@ -197,7 +165,7 @@ def _deno_app_impl(ctx: AnalysisContext) -> list[Provider]:
   return [
     DefaultInfo(default_outputs = list(ctx.attrs.srcs)),
     DenoSourcesInfo(sources = tset),
-    DenoAppInfo(entry = _staged_path(ctx, ctx.attrs.main)),
+    DenoAppInfo(entry = staged_path(ctx, ctx.attrs.main)),
     info,
   ]
 
@@ -244,8 +212,7 @@ def _deno_bin(ctx: AnalysisContext) -> Artifact:
 # rather than a copy of the seeded working dir, so an over-full seed can
 # only speed the action up, never change its declared outputs.
 def _deno_cache_impl(ctx: AnalysisContext) -> list[Provider]:
-  srcs = _flatten_deno_sources(ctx, ctx.attrs.deps)
-  srcs.update(ctx.attrs.srcs)
+  srcs = merge_direct_deno_sources(ctx, flatten_deno_sources(ctx, ctx.attrs.deps), ctx.attrs.srcs)
   layout = _entries_to_layout(ctx.attrs.deno_json, ctx.attrs.deno_lock, srcs)
   staged = ctx.actions.symlinked_dir(ctx.label.name + "-staged", layout)
 
@@ -375,8 +342,7 @@ def _stage_and_run(
   # _stage_and_run more than once (e.g. deno_test's plain run plus its
   # coverage-collection run - see _deno_test_impl) - every declared output
   # below is otherwise keyed only on ctx.label.name, which would collide.
-  srcs = _flatten_deno_sources(ctx, ctx.attrs.deps)
-  srcs.update(ctx.attrs.srcs)
+  srcs = merge_direct_deno_sources(ctx, flatten_deno_sources(ctx, ctx.attrs.deps), ctx.attrs.srcs)
   layout = _entries_to_layout(ctx.attrs.deno_json, ctx.attrs.deno_lock, srcs)
   layout.update(extra_layout)
   staged = ctx.actions.symlinked_dir(ctx.label.name + name_suffix + "-staged", layout)
@@ -438,7 +404,7 @@ _CONSUMER_ATTRS = {
   "deno_json": attrs.source(default = "//:deno.json"),
   "deno_lock": attrs.source(default = "//:deno.lock"),
   # deps of DenoSourcesInfo targets (deno_library/deno_app) - see
-  # _flatten_deno_sources - fold transitive sources into the staged tree;
+  # flatten_deno_sources() - fold transitive sources into the staged tree;
   # `srcs` stays available for the rare direct addition/override.
   "deps": attrs.list(attrs.dep(providers = [DenoSourcesInfo]), default = []),
   "node_modules": attrs.dep(default = "//:deno-cache[node-modules]"),
@@ -635,62 +601,62 @@ _TSCONFIG_GEN_PY = [
   "import json, sys",
   "deno_json_path, out_dir, mode = sys.argv[1], sys.argv[2], sys.argv[3]",
   "with open(deno_json_path) as f:",
-  "    dj = json.load(f)",
+  "  dj = json.load(f)",
   "co = dj.get('compilerOptions', {})",
   "fmt = dj.get('fmt', {})",
   "base = {",
-  "    'compilerOptions': {",
-  "        'strict': co.get('strict', True),",
-  "        'noUncheckedIndexedAccess': co.get('noUncheckedIndexedAccess', True),",
-  "        'target': 'ESNext',",
-  "        'module': 'ESNext',",
-  "        'moduleResolution': 'Bundler',",
-  "        'lib': [{'dom': 'DOM', 'dom.iterable': 'DOM.Iterable', 'esnext': 'ESNext'}.get(x, x) for x in co.get('lib', []) if x != 'deno.ns'],",
-  "        'skipLibCheck': True,",
-  "    },",
+  "  'compilerOptions': {",
+  "    'strict': co.get('strict', True),",
+  "    'noUncheckedIndexedAccess': co.get('noUncheckedIndexedAccess', True),",
+  "    'target': 'ESNext',",
+  "    'module': 'ESNext',",
+  "    'moduleResolution': 'Bundler',",
+  "    'lib': [{'dom': 'DOM', 'dom.iterable': 'DOM.Iterable', 'esnext': 'ESNext'}.get(x, x) for x in co.get('lib', []) if x != 'deno.ns'],",
+  "    'skipLibCheck': True,",
+  "  },",
   "}",
   "ts_cfg = {'extends': '../tsconfig.base.json', 'include': ['**/*.ts']}",
   "tsweb_cfg = {",
-  "    'extends': '../tsconfig.base.json',",
-  "    'compilerOptions': {",
-  "        'jsx': co.get('jsx', 'react-jsx'),",
-  "        'jsxImportSource': co.get('jsxImportSource', 'react'),",
-  "    },",
-  "    'include': ['**/*.ts', '**/*.tsx'],",
+  "  'extends': '../tsconfig.base.json',",
+  "  'compilerOptions': {",
+  "    'jsx': co.get('jsx', 'react-jsx'),",
+  "    'jsxImportSource': co.get('jsxImportSource', 'react'),",
+  "  },",
+  "  'include': ['**/*.ts', '**/*.tsx'],",
   "}",
   "prettier = {",
-  "    'tabWidth': fmt.get('indentWidth', 2),",
-  "    'useTabs': fmt.get('useTabs', False),",
-  "    'semi': True,",
-  "    'singleQuote': False,",
+  "  'tabWidth': fmt.get('indentWidth', 2),",
+  "  'useTabs': fmt.get('useTabs', False),",
+  "  'semi': True,",
+  "  'singleQuote': False,",
   "}",
   "if mode == 'emit':",
-  "    import os",
-  "    os.makedirs(os.path.join(out_dir, 'ts'), exist_ok=True)",
-  "    os.makedirs(os.path.join(out_dir, 'tsweb'), exist_ok=True)",
-  "    with open(os.path.join(out_dir, 'tsconfig.base.json'), 'w') as f:",
-  "        json.dump(base, f, indent=2)",
-  "        f.write('\\n')",
-  "    with open(os.path.join(out_dir, 'ts', 'tsconfig.json'), 'w') as f:",
-  "        json.dump(ts_cfg, f, indent=2)",
-  "        f.write('\\n')",
-  "    with open(os.path.join(out_dir, 'tsweb', 'tsconfig.json'), 'w') as f:",
-  "        json.dump(tsweb_cfg, f, indent=2)",
-  "        f.write('\\n')",
-  "    with open(os.path.join(out_dir, '.prettierrc.yml'), 'w') as f:",
-  "        for k, v in prettier.items():",
-  "            f.write('%s: %s\\n' % (k, json.dumps(v)))",
+  "  import os",
+  "  os.makedirs(os.path.join(out_dir, 'ts'), exist_ok=True)",
+  "  os.makedirs(os.path.join(out_dir, 'tsweb'), exist_ok=True)",
+  "  with open(os.path.join(out_dir, 'tsconfig.base.json'), 'w') as f:",
+  "    json.dump(base, f, indent=2)",
+  "    f.write('\\n')",
+  "  with open(os.path.join(out_dir, 'ts', 'tsconfig.json'), 'w') as f:",
+  "    json.dump(ts_cfg, f, indent=2)",
+  "    f.write('\\n')",
+  "  with open(os.path.join(out_dir, 'tsweb', 'tsconfig.json'), 'w') as f:",
+  "    json.dump(tsweb_cfg, f, indent=2)",
+  "    f.write('\\n')",
+  "  with open(os.path.join(out_dir, '.prettierrc.yml'), 'w') as f:",
+  "    for k, v in prettier.items():",
+  "      f.write('%s: %s\\n' % (k, json.dumps(v)))",
   "elif mode == 'check':",
-  "    assert base['compilerOptions']['strict'] == co.get('strict', True), 'strict drifted from deno.json'",
-  "    assert base['compilerOptions']['noUncheckedIndexedAccess'] == co.get('noUncheckedIndexedAccess', True), 'noUncheckedIndexedAccess drifted'",
-  "    assert tsweb_cfg['compilerOptions']['jsx'] == co.get('jsx', 'react-jsx'), 'jsx drifted from deno.json'",
-  "    assert tsweb_cfg['compilerOptions']['jsxImportSource'] == co.get('jsxImportSource', 'react'), 'jsxImportSource drifted'",
-  "    assert prettier['tabWidth'] == fmt.get('indentWidth', 2), 'prettier tabWidth drifted from deno.json fmt.indentWidth'",
-  "    assert prettier['useTabs'] == fmt.get('useTabs', False), 'prettier useTabs drifted from deno.json fmt.useTabs'",
-  "    with open(out_dir, 'w') as f:",
-  "        f.write('ok\\n')",
+  "  assert base['compilerOptions']['strict'] == co.get('strict', True), 'strict drifted from deno.json'",
+  "  assert base['compilerOptions']['noUncheckedIndexedAccess'] == co.get('noUncheckedIndexedAccess', True), 'noUncheckedIndexedAccess drifted'",
+  "  assert tsweb_cfg['compilerOptions']['jsx'] == co.get('jsx', 'react-jsx'), 'jsx drifted from deno.json'",
+  "  assert tsweb_cfg['compilerOptions']['jsxImportSource'] == co.get('jsxImportSource', 'react'), 'jsxImportSource drifted'",
+  "  assert prettier['tabWidth'] == fmt.get('indentWidth', 2), 'prettier tabWidth drifted from deno.json fmt.indentWidth'",
+  "  assert prettier['useTabs'] == fmt.get('useTabs', False), 'prettier useTabs drifted from deno.json fmt.useTabs'",
+  "  with open(out_dir, 'w') as f:",
+  "    f.write('ok\\n')",
   "else:",
-  "    sys.exit('unknown mode: %s' % mode)",
+  "  sys.exit('unknown mode: %s' % mode)",
 ]
 
 def _tsconfig_emit_impl(ctx: AnalysisContext) -> list[Provider]:
@@ -757,24 +723,24 @@ _GRAPH_CHECK_PY = [
   "",
   "infos_dir, declared_path = sys.argv[1], sys.argv[2]",
   "with open(declared_path) as f:",
-  "    declared = set(json.load(f))",
+  "  declared = set(json.load(f))",
   "",
   "marker = os.sep + 'proj' + os.sep",
   "",
   "def to_rel(path):",
-  "    idx = path.find(marker)",
-  "    return path[idx + len(marker):] if idx != -1 else path",
+  "  idx = path.find(marker)",
+  "  return path[idx + len(marker):] if idx != -1 else path",
   "",
   "missing = []",
   "seen_modules = 0",
   "for name in sorted(os.listdir(infos_dir)):",
-  "    with open(os.path.join(infos_dir, name)) as f:",
-  "        info = json.load(f)",
-  "    for m in info.get('modules', []):",
-  "        specifier = m.get('specifier', '')",
-  "        if not specifier.startswith('file://'):",
-  "            continue",
-  "        local = m.get('local')",
+  "  with open(os.path.join(infos_dir, name)) as f:",
+  "    info = json.load(f)",
+  "  for m in info.get('modules', []):",
+  "    specifier = m.get('specifier', '')",
+  "    if not specifier.startswith('file://'):",
+  "      continue",
+  "    local = m.get('local')",
   # `deno info --json` exits 0 even for a local import it cannot resolve as
   # a JS/TS module (e.g. a vite-only CSS/asset import, which staged
   # correctly but deno's own module graph refuses to classify) - it records
@@ -784,23 +750,22 @@ _GRAPH_CHECK_PY = [
   # from `local` when present, or from the specifier URL otherwise, and
   # check declared membership either way - only a path that is in neither
   # state is drift.
-  "        seen_modules += 1",
-  "        rel = to_rel(local) if local else to_rel(unquote(urlsplit(specifier).path))",
-  "        if rel not in declared and rel not in ('deno.json', 'deno.lock'):",
-  "            missing.append(rel)",
+  "    seen_modules += 1",
+  "    rel = to_rel(local) if local else to_rel(unquote(urlsplit(specifier).path))",
+  "    if rel not in declared and rel not in ('deno.json', 'deno.lock'):",
+  "      missing.append(rel)",
   "",
   "if missing:",
-  "    print('deno_graph_check: resolved local files missing from the declared srcs/deps graph:', file=sys.stderr)",
-  "    for m in sorted(set(missing)):",
-  "        print('  ' + m, file=sys.stderr)",
-  "    print('add the missing file(s) to a deno_library/deno_app srcs= (and wire it into deps=) so the staged tree covers them.', file=sys.stderr)",
-  "    sys.exit(1)",
+  "  print('deno_graph_check: resolved local files missing from the declared srcs/deps graph:', file=sys.stderr)",
+  "  for m in sorted(set(missing)):",
+  "    print('  ' + m, file=sys.stderr)",
+  "  print('add the missing file(s) to a deno_library/deno_app srcs= (and wire it into deps=) so the staged tree covers them.', file=sys.stderr)",
+  "  sys.exit(1)",
   "print('deno_graph_check: ok (%d resolved local modules, %d declared)' % (seen_modules, len(declared)))",
 ]
 
 def _deno_graph_check_impl(ctx: AnalysisContext) -> list[Provider]:
-  srcs = _flatten_deno_sources(ctx, ctx.attrs.deps)
-  srcs.update(ctx.attrs.srcs)
+  srcs = merge_direct_deno_sources(ctx, flatten_deno_sources(ctx, ctx.attrs.deps), ctx.attrs.srcs)
   layout = _entries_to_layout(ctx.attrs.deno_json, ctx.attrs.deno_lock, srcs)
   staged = ctx.actions.symlinked_dir(ctx.label.name + "-staged", layout)
 

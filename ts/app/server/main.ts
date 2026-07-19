@@ -11,11 +11,15 @@ export function handleRequest(request: Request): Response {
   return new Response("not found", { status: 404 });
 }
 
-if (import.meta.main) {
-  if (Deno.args.includes("--smoke")) {
+export async function main(args = Deno.args): Promise<void> {
+  if (args.includes("--smoke")) {
     const response = handleRequest(new Request("http://localhost/"));
     console.log(await response.text());
-    Deno.exit(0);
+    return;
   }
   Deno.serve(handleRequest);
+}
+
+if (import.meta.main) {
+  await main();
 }

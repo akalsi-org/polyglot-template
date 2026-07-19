@@ -1,4 +1,4 @@
-import { handleRequest } from "../app/server/main.ts";
+import { handleRequest, main } from "../app/server/main.ts";
 
 Deno.test("GET / returns greeting", async () => {
   const req = new Request("http://localhost/");
@@ -30,4 +30,8 @@ Deno.test("other routes return 404", () => {
   if (res.status !== 404) {
     throw new Error(`expected status 404, got ${res.status}`);
   }
+});
+
+Deno.test("server main handles the smoke invocation", async () => {
+  await main(["--smoke"]);
 });

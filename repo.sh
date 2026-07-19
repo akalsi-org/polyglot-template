@@ -100,6 +100,7 @@ Commands:
   doctor [--deep]              Validate target and installed tools.
   buck2 [args...]              Run the pinned Buck2 binary directly.
   infra-lint                   Check shell/Python infra scripts outside the buck2 graph.
+  format [--check]             Apply, or check, repository formatting for every lane.
   lint                         Run buck2's lint-as-test targets plus infra-lint.
   build [dbg|opt]              Build every lane's primary outputs (discovered by rule kind).
   coverage                     Build the merged dbg coverage report (bxl/coverage.bxl).
@@ -159,9 +160,33 @@ case "$command" in
     bash -n "$ROOT/repo.sh" "$ROOT"/.vscode/go "$ROOT"/toolchain/*.sh "$ROOT"/test/*.sh
     python3 "$ROOT/tools/lint.py"
     ;;
+  format)
+    (($# <= 1)) || { printf 'usage: ./repo.sh format [--check]\n' >&2; exit 2; }
+    format_check=0
+    case ${1:-} in
+      '') ;;
+      --check) format_check=1 ;;
+      *) printf 'usage: ./repo.sh format [--check]\n' >&2; exit 2 ;;
+    esac
+    if ((format_check)); then
+      python3 "$ROOT/tools/format.py" --check
+    else
+      python3 "$ROOT/tools/format.py"
+    fi
+    setup_environment
+    if ((format_check)); then
+      "$POLYGLOT_DENO" fmt --check ts tsweb deno.json
+      mapfile -t format_go < <(find "$ROOT/go" -name '*.go' -type f -print0 | xargs -0 "$GOROOT/bin/gofmt" -l)
+      ((${#format_go[@]} == 0)) || { printf 'gofmt: files not canonically formatted:\n%s\nrun: ./repo.sh format\n' "${format_go[*]}" >&2; exit 1; }
+    else
+      "$POLYGLOT_DENO" fmt ts tsweb deno.json
+      find "$ROOT/go" -name '*.go' -type f -print0 | xargs -0 "$GOROOT/bin/gofmt" -w
+    fi
+    ;;
   lint)
     (($# == 0)) || { printf 'usage: ./repo.sh lint\n' >&2; exit 2; }
     "$ROOT/repo.sh" infra-lint
+    "$ROOT/repo.sh" format --check
     setup_environment
     "$POLYGLOT_BUCK2" test //... --labels lint
     # deno-cache-coverage: //:deno-cache's deps list is hand-declared (a

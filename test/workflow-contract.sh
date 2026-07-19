@@ -47,7 +47,7 @@ for command in \
 done
 
 help=$($root/repo.sh help)
-for command in shell exec buck2 lint build test cpp-build cpp-run cpp-test python-build python-test \
+for command in shell exec buck2 format lint build test cpp-build cpp-run cpp-test python-build python-test \
   ts-build ts-test tsweb-build tsweb-test go-build go-test package package-smoke; do
   grep -Eq "^  ${command}( |$)" <<<"$help"
 done

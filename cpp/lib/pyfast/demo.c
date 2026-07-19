@@ -332,7 +332,7 @@ VMOD_BEGIN
   VMOD_FUNC("range",           vcall_range,          "range(stop) -> list"),
 VMOD_OBJ(vcall_demo, "vcall.h demo: METH_FASTCALL + vectorcall + METHOD_DESCRIPTOR.")
 
-PyMODINIT_FUNC PyInit_vcall_demo(void) {
+PyMODINIT_FUNC PyInit__native(void) {
   PyObject *m = PyModule_Create(&_vmd);
   if (!m) return NULL;
   VTYPE_READY(Point, m);

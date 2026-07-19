@@ -48,6 +48,7 @@ every toolchain directory a resolved-need artifact was `.project()`ed from.
 
 load("//config:defs.bzl", "fail_if_cross_arch", "target_arch_attr")
 load("//rules:pkg.bzl", "PackageEntry", "PackageInfo", "flatten_merged_package_entries", "flatten_merged_package_needs")
+load("//rules:package_smoke.bzl", "check_smoke_program", "shell_quote")
 load("//toolchains:lock.bzl", "TOOLCHAINS")
 
 def _native_target() -> str:
@@ -648,6 +649,13 @@ def package(**kwargs):
 def _package_smoke_impl(ctx: AnalysisContext) -> list[Provider]:
   archive = ctx.attrs.package[DefaultInfo].default_outputs[0]
   smoke_script = ctx.attrs.smoke_script
+  if ctx.attrs.checks and ctx.attrs.commands:
+    fail("package_smoke({}): use either legacy checks= or structured commands=, not both".format(ctx.label.raw_target()))
+
+  command_lines = list(ctx.attrs.checks)
+  for program, args in ctx.attrs.commands.items():
+    check_smoke_program(ctx, program)
+    command_lines.append("\"$WORK/{}\"{}".format(program, "".join([" " + shell_quote(arg) for arg in args])))
 
   lines = [
     "#!/bin/sh",
@@ -668,7 +676,7 @@ def _package_smoke_impl(ctx: AnalysisContext) -> list[Provider]:
     "WORK=$(mktemp -d \"$SCRATCH_BASE/tmp.XXXXXX\")",
     "trap 'rm -rf \"$WORK\"' EXIT",
     "tar -xzf \"$ARCHIVE\" -C \"$WORK\"",
-  ] + list(ctx.attrs.checks)
+  ] + command_lines
   if smoke_script != None:
     # One smoke run per staged site: vite_build stages each site at its
     # own web/<site>/ subdirectory, so iterate rather than assuming a
@@ -694,6 +702,7 @@ _package_smoke_rule = rule(
   impl = _package_smoke_impl,
   attrs = {
     "checks": attrs.list(attrs.string(), default = []),
+    "commands": attrs.dict(attrs.string(), attrs.list(attrs.string()), default = {}),
     "package": attrs.dep(providers = [DefaultInfo]),
     "smoke_script": attrs.option(attrs.source(), default = None),
   },
@@ -744,4 +753,3 @@ _package_manifest_test_rule = rule(
 def package_manifest_test(**kwargs):
   kwargs.setdefault("default_target_platform", _DEFAULT_PLATFORM)
   _package_manifest_test_rule(**kwargs)
-

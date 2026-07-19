@@ -33,13 +33,13 @@ package(
 package_smoke(
   name = "polyglot-demo-smoke",
   package = ":polyglot-demo",
-  checks = [
-    "\"$WORK/bin/cpp-hello\"",
-    "\"$WORK/bin/go-hello\"",
-    "\"$WORK/bin/python-hello\"",
-    "\"$WORK/bin/python\" --version >/dev/null",
-    "\"$WORK/bin/python3\" --version >/dev/null",
-  ],
+  commands = {
+    "bin/cpp-hello": [],
+    "bin/go-hello": [],
+    "bin/python-hello": [],
+    "bin/python": ["--version"],
+    "bin/python3": ["--version"],
+  },
   smoke_script = "//:tsweb_smoke.py",
   visibility = ["PUBLIC"],
 )
@@ -60,9 +60,7 @@ package(
 package_smoke(
   name = "polyglot-server-smoke",
   package = ":polyglot-server",
-  checks = [
-    "\"$WORK/bin/server\" --smoke",
-  ],
+  commands = {"bin/server": ["--smoke"]},
   visibility = ["PUBLIC"],
 )
 

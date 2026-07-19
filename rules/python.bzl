@@ -53,6 +53,7 @@ therefore also include `roots` directly, alongside gcc_dir/py_dir.
 load("//config:defs.bzl", "fail_if_cross_arch", "target_arch_attr")
 load("//config:flags.bzl", "COVERAGE_FLAG", "FORBIDDEN_FLAGS", "STANDARD", "coverage_enabled_flag", "profile_compile_flags", "profile_link_flags")
 load("//rules:coverage.bzl", "CoverageInfo")
+load("//rules:cxx.bzl", "CxxInfo", "cxx_include_tree_args")
 load("//rules:pkg.bzl", "PACKAGE_LABELS_ATTR", "PackageEntry", "check_pkg_name", "package_info")
 load("//toolchains:lock.bzl", "TOOLCHAINS")
 
@@ -70,6 +71,7 @@ _NATIVE_TARGET = _native_target()
 _GCC = TOOLCHAINS["gcc-musl"][_NATIVE_TARGET]
 _PYTHON = TOOLCHAINS["python"][_NATIVE_TARGET]
 _GCC_BIN_DIR = _GCC["expected"].rsplit("/", 1)[0]
+_GCC_CC = _GCC["expected"][:-3] + "gcc"
 _LOADER_DIR = _GCC["loader"].rsplit("/", 1)[0]
 
 # _PYTHON["expected"] is "python/bin/python3"; the interpreter's own install
@@ -106,6 +108,7 @@ def _gcc_tools(ctx):
   # working fine).
   return struct(
     gcc_dir = gcc_dir,
+    gcc = gcc_dir.project(_GCC_CC),
     gxx = gcc_dir.project(_GCC["expected"]),
     bin_dir = gcc_dir.project(_GCC_BIN_DIR),
     loader = gcc_dir.project(_GCC["loader"]),
@@ -236,15 +239,21 @@ def _py_extension_impl(ctx: AnalysisContext) -> list[Provider]:
   _check_flags(compile_flags)
   _check_flags(link_flags)
 
+  if ctx.attrs.language not in ("c", "cxx"):
+    fail("{}: language must be 'c' or 'cxx', got {!r}".format(ctx.label.raw_target(), ctx.attrs.language))
+  compiler = gcc.gcc if ctx.attrs.language == "c" else gcc.gxx
+  standard = "gnu2x" if ctx.attrs.language == "c" else STANDARD
+  cxx_include_args = cxx_include_tree_args(ctx, ctx.attrs.cxx_deps)
+
   objects = []
   for src in ctx.attrs.srcs:
     obj = ctx.actions.declare_output("__objects__/{}/{}.o".format(ctx.attrs.name, src.short_path))
     args = [
-      gcc.gxx,
-      "-std={}".format(STANDARD),
+      compiler,
+      "-std={}".format(standard),
       cmd_args(gcc.bin_dir, format = "-B{}"),
       cmd_args(py.include_dir, format = "-I{}"),
-    ] + [cmd_args(d, format = "-I{}") for d in ctx.attrs.include_dirs]
+    ] + cxx_include_args + [cmd_args(d, format = "-I{}") for d in ctx.attrs.include_dirs]
     args += ["-fPIC"] + compile_flags
     args += ["-c", src, "-o", obj.as_output()]
     ctx.actions.run(
@@ -254,9 +263,9 @@ def _py_extension_impl(ctx: AnalysisContext) -> list[Provider]:
     )
     objects.append(obj)
 
-  native_name = "_native" + _EXT_SUFFIX
+  native_name = ctx.attrs.extension_name + _EXT_SUFFIX
   shared_obj = ctx.actions.declare_output(ctx.attrs.name + "-" + native_name)
-  link_args = [gcc.gxx] + objects + [cmd_args(gcc.bin_dir, format = "-B{}"), "-shared"] + link_flags
+  link_args = [compiler] + objects + [cmd_args(gcc.bin_dir, format = "-B{}"), "-shared"] + link_flags + ctx.attrs.extra_link_flags
   link_args += ["-o", shared_obj.as_output()]
   ctx.actions.run(cmd_args(link_args), category = "cxx_link", identifier = ctx.attrs.name)
 
@@ -308,8 +317,12 @@ def _py_extension_impl(ctx: AnalysisContext) -> list[Provider]:
 _py_extension_rule = rule(
   impl = _py_extension_impl,
   attrs = {
+    "cxx_deps": attrs.list(attrs.dep(providers = [CxxInfo]), default = []),
+    "extension_name": attrs.string(default = "_native"),
+    "extra_link_flags": attrs.list(attrs.string(), default = []),
     "include_dirs": attrs.list(attrs.string(), default = []),
     "init_src": attrs.source(),
+    "language": attrs.string(default = "cxx"),
     "package": attrs.string(),
     "srcs": attrs.list(attrs.source()),
     "stubs": attrs.list(attrs.source(), default = []),

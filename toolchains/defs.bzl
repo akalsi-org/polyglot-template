@@ -21,66 +21,47 @@ def _native_target() -> str:
 def define_toolchains():
   native_target = _native_target()
 
-  for target, fields in TOOLCHAINS["gcc-musl"].items():
-    gcc_musl_toolchain(
-      name = "gcc-musl-" + target,
-      url = fields["url"],
-      sha256 = fields["sha256"],
-      archive = fields["archive"],
-      expected = fields["expected"],
-      mold = fields["mold"],
-      loader = fields["loader"],
-      target_triple = target,
-      reflection_src = "//cpp/test:reflection.cc",
-      probe = target == native_target,
-      visibility = ["PUBLIC"],
-    )
+  # The lock records artifacts for both supported host architectures, but a
+  # checkout instantiates only the current host's five toolchain targets.
+  # This makes `buck2 build //...` a valid native build instead of asking an
+  # x86_64 checkout to stage aarch64-hosted archives (or vice versa).
+  gcc = TOOLCHAINS["gcc-musl"][native_target]
+  gcc_musl_toolchain(
+    name = "gcc-musl-" + native_target,
+    url = gcc["url"], sha256 = gcc["sha256"], archive = gcc["archive"],
+    expected = gcc["expected"], mold = gcc["mold"], loader = gcc["loader"],
+    target_triple = native_target, reflection_src = "//cpp/test:reflection.cc",
+    probe = True, visibility = ["PUBLIC"],
+  )
 
-  for target, fields in TOOLCHAINS["python"].items():
-    python_toolchain(
-      name = "python-" + target,
-      url = fields["url"],
-      sha256 = fields["sha256"],
-      archive = fields["archive"],
-      expected = fields["expected"],
-      loader = TOOLCHAINS["gcc-musl"][target]["loader"],
-      gcc = ":gcc-musl-" + target,
-      probe = target == native_target,
-      visibility = ["PUBLIC"],
-    )
+  python = TOOLCHAINS["python"][native_target]
+  python_toolchain(
+    name = "python-" + native_target,
+    url = python["url"], sha256 = python["sha256"], archive = python["archive"],
+    expected = python["expected"], loader = gcc["loader"],
+    gcc = ":gcc-musl-" + native_target,
+    probe = True, visibility = ["PUBLIC"],
+  )
 
   for tool, probe_arg in (("go", "version"), ("deno", "--version")):
-    for target, fields in TOOLCHAINS[tool].items():
-      version_probe_toolchain(
-        name = tool + "-" + target,
-        url = fields["url"],
-        sha256 = fields["sha256"],
-        archive = fields["archive"],
-        expected = fields["expected"],
-        probe_arg = probe_arg,
-        probe = target == native_target,
-        visibility = ["PUBLIC"],
-      )
-
-  for target, fields in TOOLCHAINS["doctest"].items():
-    header_probe_toolchain(
-      name = "doctest-" + target,
-      url = fields["url"],
-      sha256 = fields["sha256"],
-      archive = fields["archive"],
-      expected = fields["expected"],
-      probe_pattern = "^#define DOCTEST_VERSION_MAJOR 2$",
-      visibility = ["PUBLIC"],
+    fields = TOOLCHAINS[tool][native_target]
+    version_probe_toolchain(
+      name = tool + "-" + native_target,
+      url = fields["url"], sha256 = fields["sha256"], archive = fields["archive"],
+      expected = fields["expected"], probe_arg = probe_arg,
+      probe = True, visibility = ["PUBLIC"],
     )
 
-  # //toolchains:native: only the host-native triple's toolchain targets
-  # (5 of the 10 defined above - every one of //toolchains:'s tool kinds,
-  # once, for native_target only). Each CI matrix leg only ever needs its
-  # own triple (see .github/workflows/ci-release.yml), so building this
-  # group instead of //toolchains/... halves the cache payload materialized
-  # per leg without dropping the other triple's toolchains from the graph
-  # entirely - they stay buildable individually, just not swept in by
-  # default.
+  doctest = TOOLCHAINS["doctest"][native_target]
+  header_probe_toolchain(
+    name = "doctest-" + native_target,
+    url = doctest["url"], sha256 = doctest["sha256"], archive = doctest["archive"],
+    expected = doctest["expected"], probe_pattern = "^#define DOCTEST_VERSION_MAJOR 2$",
+    visibility = ["PUBLIC"],
+  )
+
+  # The only instantiated toolchains are already native, so this group is a
+  # stable public spelling for CI and targeted toolchain validation.
   group(
     name = "native",
     deps = [
