@@ -231,9 +231,10 @@ if ((dry_run == 0)); then
   if [[ -n $deno_version && -x $deno_install/$deno_expected ]]; then
     if ((offline == 0)); then
       # Entry list mirrors //:deno-cache's (root BUCK) - this seed is what
-      # the in-graph deno_cache action later resolves from with
-      # --cached-only, so an entry missing here surfaces as that action's
-      # fail-closed "run ./repo.sh bootstrap" error, never a network fetch.
+      # the in-graph deno_cache action later resolves from inside its
+      # no-network namespace, so an entry missing here surfaces as that
+      # action's fail-closed "run ./repo.sh bootstrap" error, never a
+      # network fetch.
       DENO_DIR="$LOCAL/cache/deno" "$deno_install/$deno_expected" cache --frozen \
         "$ROOT/ts/app/hello/main.ts" \
         "$ROOT/ts/app/server/main.ts" \

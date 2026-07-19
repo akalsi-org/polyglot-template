@@ -83,9 +83,10 @@ load("//rules:file.bzl", "export_file")
 # tsweb/ lanes (deno cache resolves the whole graph in one pass, so it
 # belongs to neither lane; it lives here at the root as cross-lane
 # infrastructure, next to the deno.json/deno.lock it consumes). It
-# resolves STRICTLY OFFLINE from bootstrap's .local/cache/deno seed
-# (--frozen --cached-only, fail-closed) - graph actions never fetch; see
-# rules/deno.bzl's deno_cache doc comment. deps fold
+# resolves STRICTLY OFFLINE from bootstrap's .local/cache/deno seed,
+# enforced by running deno inside a no-network user namespace (fail-closed
+# when namespaces are unavailable, absent an explicit env opt-out) - graph
+# actions never fetch; see rules/deno.bzl's deno_cache doc comment. deps fold
 # every deno component's DenoSourcesInfo into the staged tree (see
 # rules/deno.bzl's DenoSourcesInfo doc comment); `entries` stays a small
 # explicit list of representative entrypoints (deno cache only needs to walk
