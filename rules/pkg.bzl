@@ -57,6 +57,16 @@ PackageEntry = record(
   # "py-app-launcher" marker entry back to its own app/python/app/* source
   # entry (see rules/package.bzl's kind-handler dispatch).
   owner = field(str),
+  # Free-form small string a kind handler may stash on an artifact-less
+  # marker entry to carry data that doesn't fit `dest`/`owner` - e.g.
+  # "deno-app-launcher"'s own bin/<name> marker uses this to record its
+  # app's staged entrypoint path (the "app/..." dest deno_app's own tree
+  # entries already staged), since pairing that marker back to the right
+  # entrypoint file by dest-prefix convention alone (the way
+  # "py-app-launcher" pairs itself to its app/python/app/* source entry)
+  # isn't reliable when several of a deno_app's own transitive dep sources
+  # share the same "app/" prefix. None for every other kind.
+  meta = field([str, None], None),
 )
 
 # Two independent transitive_sets (rather than one combined one) since

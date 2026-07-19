@@ -12,5 +12,10 @@ export function handleRequest(request: Request): Response {
 }
 
 if (import.meta.main) {
+  if (Deno.args.includes("--smoke")) {
+    const response = handleRequest(new Request("http://localhost/"));
+    console.log(await response.text());
+    Deno.exit(0);
+  }
   Deno.serve(handleRequest);
 }

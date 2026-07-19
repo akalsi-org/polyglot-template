@@ -25,6 +25,13 @@ executables = ["schema-cli"]
 supported_targets = ["x86_64-linux-musl", "aarch64-linux-musl"]
 
 [[package]]
+name = "polyglot-server"
+version = "0.1.0"
+kind = "application"
+executables = ["server"]
+supported_targets = ["x86_64-linux-musl", "aarch64-linux-musl"]
+
+[[package]]
 name = "runtime-python"
 version = "3.14.6"
 kind = "runtime"

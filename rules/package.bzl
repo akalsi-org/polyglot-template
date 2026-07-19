@@ -20,7 +20,8 @@ transitively underneath one) - and:
      identical resolved artifact; this is asserted, not just assumed (see
      _resolve_needs).
   3. Runs one "kind handler" per entry kind ("loader-bin", "static-bin",
-     "loader-lib", "tree", "py-app-launcher" - see _stage_lines below) to
+     "loader-lib", "tree", "py-app-launcher", "deno-app-launcher" - see
+     _stage_lines below) to
      stage the layout, the same shape tools/package_release.py's
      assemble_polyglot_demo() + write_launcher() + write_python_runtime_launcher()
      built by hand for the one polyglot-demo package (same relative launcher
@@ -67,6 +68,8 @@ _LOADER_NAME = "ld-musl-x86_64.so.1" if _NATIVE_TARGET.startswith("x86_64") else
 
 _PYTHON = TOOLCHAINS["python"][_NATIVE_TARGET]
 _PY_ROOT_REL = _PYTHON["expected"].rsplit("/", 2)[0]  # "python", matches rules/python.bzl's _PY_ROOT_REL
+
+_DENO = TOOLCHAINS["deno"][_NATIVE_TARGET]
 
 _DEFAULT_PLATFORM = "//config:{}-dbg".format(_NATIVE_TARGET)
 
@@ -116,7 +119,18 @@ def _resolve_python_runtime(ctx):
   owner = "//toolchains:python-" + _NATIVE_TARGET
   return [PackageEntry(dest = "runtime/python", artifact = python_runtime_dir, kind = "tree", owner = owner)]
 
+def _resolve_deno_runtime(ctx):
+  # The pinned deno is a fully static single binary (zero dynamic deps, no
+  # musl-loader wiring needed - see toolchains/BUCK) - "static-bin" (not a
+  # new kind) already gets package()'s generic single-file staging at 0755
+  # (see _EXECUTABLE_KINDS below), the same as go-hello's own binary.
+  deno_dir = ctx.attrs._deno[DefaultInfo].default_outputs[0]
+  deno_bin = deno_dir.project(_DENO["expected"])
+  owner = "//toolchains:deno-" + _NATIVE_TARGET
+  return [PackageEntry(dest = "runtime/deno/deno", artifact = deno_bin, kind = "static-bin", owner = owner)]
+
 _NEED_RESOLVERS = {
+  "deno-runtime": _resolve_deno_runtime,
   "musl-loader": _resolve_musl_loader,
   "python-runtime": _resolve_python_runtime,
 }
@@ -150,7 +164,7 @@ def _resolve_needs(ctx, needs):
 # _py_extension_impl docstrings), and a plain "tree" entry's own artifact
 # may itself be either a file or a directory (only known at stage-script RUN
 # time, per _stage_lines' `-d` branch below).
-_LEAF_KINDS = ("loader-bin", "static-bin", "loader-lib", "py-app-launcher", "synthetic-marker")
+_LEAF_KINDS = ("loader-bin", "static-bin", "loader-lib", "py-app-launcher", "deno-app-launcher", "synthetic-marker")
 
 # Kinds whose staged artifact is a real executable that must land 0755 - a
 # strict subset of _LEAF_KINDS (py-app-launcher/synthetic-marker entries
@@ -346,6 +360,65 @@ def _stage_lines(ctx, entries, needs):
           "PKGEOF",
           "chmod 0755 \"$OUT/bin/{py}\"".format(py = py),
         ]
+
+  # "deno-app-launcher": a small generated per-package deno.json (staged at
+  # app/ts/deno.json - written ONCE, before any launcher below references
+  # it) that maps this project's "@/" import scope onto the staged
+  # "ts/lib/" root, mirroring the repo's own root deno.json scope
+  # (`"./ts/": {"@/": "./ts/lib/"}`) but rooted at app/ts/ itself since
+  # that's where deno_app's own staged closure lands. Deliberately NOT the
+  # repo's real deno.json: that file declares npm: imports (react/vite/...)
+  # this packaging path refuses to ship - see the npm-closure guard below -
+  # and has no reason to carry deno.lock/fmt/lint/test config into a
+  # packaged app at all.
+  #
+  # npm-closure guard: package() only supports zero-npm-dep deno apps today
+  # - rather than silently shipping the whole npm store (deno vendors real
+  # package copies, not symlinks - see rules/deno.bzl's module docstring),
+  # this fails the BUILD loudly the moment any deno-app-launcher entry's
+  # own staged app/ts/ closure contains an "npm:" specifier anywhere, before
+  # any launcher is ever run.
+  has_deno_app = False
+  for entry in entries:
+    if entry.kind == "deno-app-launcher":
+      has_deno_app = True
+      break
+  if has_deno_app:
+    lines += [
+      "if grep -rl 'npm:' \"$OUT/app/ts\" >/dev/null 2>&1; then",
+      "  echo \"package({}): npm-dependent deno apps not yet supported by packaging (found npm: specifier under app/ts)\" >&2".format(ctx.attrs.name),
+      "  exit 1",
+      "fi",
+      "cat > \"$OUT/app/ts/deno.json\" <<'PKGEOF'",
+      "{",
+      "  \"scopes\": {",
+      "    \"./\": { \"@/\": \"./lib/\" }",
+      "  }",
+      "}",
+      "PKGEOF",
+    ]
+
+  for entry in entries:
+    if entry.kind != "deno-app-launcher":
+      continue
+    name = entry.dest.rsplit("/", 1)[-1]
+    main_dest = entry.meta
+    if main_dest == None or not main_dest.startswith("app/ts/"):
+      fail("package({}): deno-app-launcher entry for dest {!r} (target {}) has an invalid entry path {!r} - packaging only supports ts/ deno apps today".format(ctx.attrs.name, entry.dest, entry.owner, main_dest))
+    lines += [
+      "cat > \"$OUT/bin/{name}\" <<'PKGEOF'".format(name = name),
+      "#!/bin/sh",
+      "set -eu",
+      "ROOT=$(CDPATH= cd -- \"$(dirname -- \"$0\")/..\" && pwd -P)",
+      # --no-remote: fail-closed on any non-local import (the key offline
+      # guarantee - deno never even attempts a network fetch, cached or
+      # not). --allow-net: this app calls Deno.serve(). --config: the
+      # generated app/ts/deno.json above, so "@/" resolves inside the
+      # staged layout exactly like it does in the repo's own deno.json.
+      "exec \"$ROOT/runtime/deno/deno\" run --no-remote --allow-net --config \"$ROOT/app/ts/deno.json\" \"$ROOT/{main_dest}\" \"$@\"".format(main_dest = main_dest),
+      "PKGEOF",
+      "chmod 0755 \"$OUT/bin/{name}\"".format(name = name),
+    ]
 
   # __pycache__/*.pyc exclusion (mirrors tools/package_release.py's
   # copy_tree(..., ignore=(...))): run ONCE at the end over the two roots
@@ -543,6 +616,7 @@ _package_rule = rule(
     "profile": attrs.string(default = select({"//config:opt": "opt", "DEFAULT": "dbg"})),
     "tools_lock": attrs.source(default = "//:tools.lock.toml"),
     "version": attrs.string(),
+    "_deno": attrs.dep(default = "//toolchains:deno-" + _NATIVE_TARGET, providers = [DefaultInfo]),
     "_gcc": attrs.dep(default = "//toolchains:gcc-musl-" + _NATIVE_TARGET, providers = [DefaultInfo]),
     "_package_model": attrs.source(default = "//:package_model.py"),
     "_python_runtime": attrs.dep(default = "//toolchains:python-" + _NATIVE_TARGET, providers = [DefaultInfo]),
@@ -555,12 +629,21 @@ def package(**kwargs):
   _package_rule(**kwargs)
 
 # --- package_smoke: extract the already-built archive and exercise every
-# bin/ executable plus the packaged web assets. No toolchain deps at all -
-# every binary in the archive is either static (go-hello) or already
-# loader-wrapped (cpp-hello, python, python3, python-hello), exactly like
-# tools/package_release.py's smoke()'s --execute path, but without needing
-# host toolchain state to run it. Unchanged from before this rewrite.
-
+# bin/ executable plus (optionally) the packaged web assets. No toolchain
+# deps at all - every binary in the archive is either static (go-hello,
+# deno) or already loader-wrapped (cpp-hello, python, python3,
+# python-hello), exactly like tools/package_release.py's smoke()'s
+# --execute path, but without needing host toolchain state to run it.
+#
+# `checks` is a list of raw shell command lines run against the extracted
+# archive at $WORK (e.g. "\"$WORK/bin/go-hello\"", "\"$WORK/bin/server\"
+# --smoke") - the caller (packages/BUCK) owns the exact set of binaries/
+# flags for its own package, since that shape differs per package (compare
+# polyglot-demo's five-binary smoke below to polyglot-server's single
+# `bin/server --smoke`). `smoke_script` stays a separate optional attr
+# (rather than folded into `checks`, which are raw shell) since it is a real
+# tracked source input (see the ARTIFACT-TRACKING LAW in this file's module
+# docstring) invoked against the packaged web assets specifically.
 def _package_smoke_impl(ctx: AnalysisContext) -> list[Provider]:
   archive = ctx.attrs.package[DefaultInfo].default_outputs[0]
   smoke_script = ctx.attrs.smoke_script
@@ -569,7 +652,12 @@ def _package_smoke_impl(ctx: AnalysisContext) -> list[Provider]:
     "#!/bin/sh",
     "set -eu",
     cmd_args("ARCHIVE=\"$(pwd)/", archive, "\"", delimiter = ""),
-    cmd_args("SMOKE_SCRIPT=\"$(pwd)/", smoke_script, "\"", delimiter = ""),
+  ]
+  hidden = [archive]
+  if smoke_script != None:
+    lines.append(cmd_args("SMOKE_SCRIPT=\"$(pwd)/", smoke_script, "\"", delimiter = ""))
+    hidden.append(smoke_script)
+  lines += [
     # Anchored under buck-out, not bare mktemp -d (which defaults to /tmp) -
     # host /tmp is a small tmpfs shared by every concurrent build/test on
     # this machine (see rules/go.bzl's _write_go_script for the identical
@@ -579,15 +667,12 @@ def _package_smoke_impl(ctx: AnalysisContext) -> list[Provider]:
     "WORK=$(mktemp -d \"$SCRATCH_BASE/tmp.XXXXXX\")",
     "trap 'rm -rf \"$WORK\"' EXIT",
     "tar -xzf \"$ARCHIVE\" -C \"$WORK\"",
-    "\"$WORK/bin/cpp-hello\"",
-    "\"$WORK/bin/go-hello\"",
-    "\"$WORK/bin/python-hello\"",
-    "\"$WORK/bin/python\" --version >/dev/null",
-    "\"$WORK/bin/python3\" --version >/dev/null",
-    "python3 \"$SMOKE_SCRIPT\" --root \"$WORK/app/web\"",
-  ]
+  ] + list(ctx.attrs.checks)
+  if smoke_script != None:
+    lines.append("python3 \"$SMOKE_SCRIPT\" --root \"$WORK/app/web\"")
+
   script, written = ctx.actions.write(ctx.attrs.name + ".sh", lines, is_executable = True, allow_args = True)
-  command = cmd_args(script, hidden = [archive, smoke_script] + written)
+  command = cmd_args(script, hidden = hidden + written)
   return [
     DefaultInfo(default_output = script, other_outputs = written),
     RunInfo(args = command),
@@ -601,8 +686,9 @@ def _package_smoke_impl(ctx: AnalysisContext) -> list[Provider]:
 _package_smoke_rule = rule(
   impl = _package_smoke_impl,
   attrs = {
+    "checks": attrs.list(attrs.string(), default = []),
     "package": attrs.dep(providers = [DefaultInfo]),
-    "smoke_script": attrs.source(),
+    "smoke_script": attrs.option(attrs.source(), default = None),
   },
 )
 

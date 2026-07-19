@@ -31,7 +31,35 @@ package(
 package_smoke(
   name = "polyglot-demo-smoke",
   package = ":polyglot-demo",
+  checks = [
+    "\"$WORK/bin/cpp-hello\"",
+    "\"$WORK/bin/go-hello\"",
+    "\"$WORK/bin/python-hello\"",
+    "\"$WORK/bin/python\" --version >/dev/null",
+    "\"$WORK/bin/python3\" --version >/dev/null",
+  ],
   smoke_script = "//:tsweb_smoke.py",
+  visibility = ["PUBLIC"],
+)
+
+# Deno server-app packaging lane: ts/app/server:server's own transitive
+# DenoSourcesInfo closure (main.ts + //ts/lib/greeting:greeting) staged
+# under app/ts/, plus the pinned deno binary and a generated launcher - see
+# rules/deno.bzl's deno_app and rules/package.bzl's "deno-app-launcher" kind
+# handler for the full design (zero-npm-dep apps only, for now).
+package(
+  name = "polyglot-server",
+  version = "0.1.0",
+  deps = ["//ts/app/server:server"],
+  visibility = ["PUBLIC"],
+)
+
+package_smoke(
+  name = "polyglot-server-smoke",
+  package = ":polyglot-server",
+  checks = [
+    "\"$WORK/bin/server\" --smoke",
+  ],
   visibility = ["PUBLIC"],
 )
 

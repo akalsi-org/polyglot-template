@@ -49,7 +49,7 @@ repo-relative paths (e.g. "ts/lib/greeting/greeting.ts") underneath it.
 
 load("//config:flags.bzl", "coverage_enabled_flag")
 load("//rules:coverage.bzl", "CoverageInfo")
-load("//rules:pkg.bzl", "PACKAGE_LABELS_ATTR", "PackageEntry", "package_info")
+load("//rules:pkg.bzl", "PACKAGE_LABELS_ATTR", "PackageEntry", "check_pkg_name", "package_info")
 
 def _native_target() -> str:
   # Mirrors rules/{cxx,go,python}.bzl's own _native_target(): this repo only
@@ -164,10 +164,35 @@ def _deno_app_impl(ctx: AnalysisContext) -> list[Provider]:
     fail("{}: `main` ({}) must also be listed in `srcs`".format(ctx.label.raw_target(), ctx.attrs.main))
   own = _own_deno_sources(ctx, ctx.attrs.srcs)
   tset = ctx.actions.tset(DenoSourceSet, value = own, children = _deno_sources_children(ctx.attrs.deps))
+
+  # Packaging: stage this app's own transitive DenoSourcesInfo closure - own
+  # `srcs` plus every deno_library/deno_app dep's sources, diamond-safe via
+  # the same shared-tset-merge _flatten_deno_sources already uses for every
+  # other consumer in this file - one "tree" PackageEntry per source file,
+  # under "app/" + its own staged_path (e.g. app/ts/app/server/main.ts,
+  # app/ts/lib/greeting/greeting.ts), plus a "deno-app-launcher" marker entry
+  # (no artifact of its own) at bin/<pkg_name> whose `meta` records this
+  # app's own entrypoint dest so rules/package.bzl's kind handler can pair
+  # the launcher back to the right file even though several of this app's
+  # own staged "app/" entries share the same owner. needs "deno-runtime" so
+  # package() also stages the pinned deno binary.
+  closure = dict(own)
+  closure.update(_flatten_deno_sources(ctx, ctx.attrs.deps))
+  pkg_name = check_pkg_name(ctx, ctx.attrs.pkg_name or ctx.attrs.name)
+  owner = str(ctx.label.raw_target())
+  main_dest = "app/" + _staged_path(ctx, ctx.attrs.main)
+  pkg_entries = [
+    PackageEntry(dest = "app/" + staged_path, artifact = artifact, kind = "tree", owner = owner)
+    for staged_path, artifact in closure.items()
+  ]
+  pkg_entries.append(PackageEntry(dest = "bin/" + pkg_name, artifact = None, kind = "deno-app-launcher", owner = owner, meta = main_dest))
+  info = package_info(ctx, entries = pkg_entries, needs = ["deno-runtime"], deps = ctx.attrs.deps)
+
   return [
     DefaultInfo(default_outputs = list(ctx.attrs.srcs)),
     DenoSourcesInfo(sources = tset),
     DenoAppInfo(entry = _staged_path(ctx, ctx.attrs.main)),
+    info,
   ]
 
 _deno_app_rule = rule(
@@ -175,8 +200,9 @@ _deno_app_rule = rule(
   attrs = {
     "deps": attrs.list(attrs.dep(providers = [DenoSourcesInfo]), default = []),
     "main": attrs.source(),
+    "pkg_name": attrs.option(attrs.string(), default = None),
     "srcs": attrs.list(attrs.source()),
-  },
+  } | PACKAGE_LABELS_ATTR,
 )
 
 def deno_app(**kwargs):
