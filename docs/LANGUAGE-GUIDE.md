@@ -97,7 +97,7 @@ and `go vet` through the pinned setup.
 ## Cross-Lane Work
 
 Use `./repo.sh build` or `./repo.sh test` for changes that span multiple
-languages. Those commands run `buck2 build //:build` / `buck2 test //...`,
+languages. Those commands run a rule-kind-discovered `buck2 build` / `buck2 test //...`,
 which build and test every lane's targets in one graph. Use `./repo.sh ci`
 before a release-oriented handoff; it adds package validation to lint, build,
 and test.

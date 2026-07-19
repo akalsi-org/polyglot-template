@@ -314,7 +314,7 @@ _go_binary_rule = rule(
 # pointed at a declared output, as its own ctx.actions.run() build action -
 # separate from the ExternalRunnerTestInfo/RunInfo path `buck2 test` uses
 # for pass/fail reporting - so the profile is a real cacheable build
-# artifact //:coverage can depend on (mirrors rules/cxx.bzl's
+# artifact the coverage bxl can depend on (mirrors rules/cxx.bzl's
 # _coverage_collect_action; see rules/coverage.bzl's module docstring for
 # why every lane does it this way). -coverpkg is set to the same package
 # set under test so coverage of an imported-but-not-directly-tested package
@@ -398,7 +398,7 @@ def go_binary(**kwargs):
 
 def go_test(**kwargs):
   kwargs.setdefault("default_target_platform", _DEFAULT_PLATFORM)
-  # See rules/cxx.bzl's cxx_test macro for why: //:coverage now depends on
+  # See rules/cxx.bzl's cxx_test macro for why: the coverage bxl now depends on
   # go_test targets directly, which need to be reachable from the root
   # package without editing every existing go/BUCK call site.
   kwargs.setdefault("visibility", ["PUBLIC"])

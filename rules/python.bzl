@@ -584,7 +584,7 @@ def py_binary(**kwargs):
 
 def py_test(**kwargs):
   kwargs.setdefault("default_target_platform", _DEFAULT_PLATFORM)
-  # See rules/cxx.bzl's cxx_test macro for why: //:coverage now depends on
+  # See rules/cxx.bzl's cxx_test macro for why: the coverage bxl now depends on
   # py_test targets directly, which need to be reachable from the root
   # package without editing every existing python/test/BUCK call site.
   kwargs.setdefault("visibility", ["PUBLIC"])

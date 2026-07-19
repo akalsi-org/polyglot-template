@@ -670,7 +670,13 @@ def _package_smoke_impl(ctx: AnalysisContext) -> list[Provider]:
     "tar -xzf \"$ARCHIVE\" -C \"$WORK\"",
   ] + list(ctx.attrs.checks)
   if smoke_script != None:
-    lines.append("python3 \"$SMOKE_SCRIPT\" --root \"$WORK/web\"")
+    # One smoke run per staged site: vite_build stages each site at its
+    # own web/<site>/ subdirectory, so iterate rather than assuming a
+    # single site owns the web root outright.
+    lines.append("for _site in \"$WORK\"/web/*/; do")
+    lines.append("  [ -d \"$_site\" ] || continue")
+    lines.append("  python3 \"$SMOKE_SCRIPT\" --root \"$_site\"")
+    lines.append("done")
 
   script, written = ctx.actions.write(ctx.attrs.name + ".sh", lines, is_executable = True, allow_args = True)
   command = cmd_args(script, hidden = hidden + written)

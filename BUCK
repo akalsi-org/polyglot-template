@@ -1,13 +1,18 @@
-load("//rules:coverage.bzl", "coverage_report")
 load("//rules:file.bzl", "export_file")
-load("//rules:group.bzl", "group")
 
 # Uniform build/test/lint entry points across all five lanes.
 #
-# //:build is a real, buildable group(): `buck2 build //:build` builds every
-# lane's primary build output. Packaging is deliberately NOT part of it —
-# archives are release work (`buck2 build //packages/...` or
-# `./repo.sh package <name>`), not the dev loop.
+# There is deliberately NO hand-listed //:build or //:coverage target:
+# hand-maintained dep lists rot the moment a lane gains a target, which
+# defeats "works out of the box". Instead the graph itself is the list -
+# `./repo.sh build` discovers every lane's primary build output by rule
+# kind (uquery over _cxx_binary/_go_binary/_py_binary/_deno_check/
+# _vite_build rules) and `./repo.sh coverage` discovers every
+# CoverageInfo-bearing test the same way via bxl/coverage.bxl. A new
+# app/site/test participates automatically by existing. Packaging is
+# deliberately NOT part of the build set - archives are release work
+# (`buck2 build //packages/...` or `./repo.sh package <name>`), not the
+# dev loop.
 #
 # There is deliberately no //:test or //:lint group target. Buck2 has no
 # prelude here to supply test_suite()/alias(), and a first-party rule can
@@ -50,18 +55,16 @@ load("//rules:group.bzl", "group")
 # ts:fmt_check, ts:lint, ts/test:graph_check, tsweb:fmt_check, tsweb:lint,
 # tsweb:tsconfig_drift, tsweb/test:graph_check, python/test:compileall,
 # python/test:lock_consistency - and nothing else).
-# //:coverage: DEFAULT-ON-FOR-dbg coverage merge target (see
-# rules/coverage.bzl's module docstring for the full design). deps is just
-# "every test target" across the four instrumented lanes (cpp/test's three
-# doctest targets, go's greeting_test, python/test's unittest, ts/tsweb's
-# deno_test targets) - coverage_report silently skips any dep without a
-# CoverageInfo provider, so lint-as-test targets don't need to be excluded
-# by hand.
+# Coverage: DEFAULT-ON-FOR-dbg (see rules/coverage.bzl's module docstring
+# for the full design). `./repo.sh coverage` runs bxl/coverage.bxl, which
+# queries every instrumented-lane test by rule kind, skips any without a
+# CoverageInfo provider (lint-as-test targets; everything under opt), and
+# merges the rest into one lcov + summary.
 #
-# `-m //config:opt` caveat (found while verifying this target, applies
-# repo-wide, not just to //:coverage): every first-party rule() here that
+# `-m //config:opt` caveat (found while verifying coverage, applies
+# repo-wide): every first-party rule() here that
 # has its own `default_target_platform` macro (cxx_test/cxx_binary/
-# go_test/py_test/deno_test/group/coverage_report) keeps that default even
+# go_test/py_test/deno_test/group) keeps that default even
 # when `-m //config:opt` is passed on the command line for that exact
 # top-level target - verified empirically (`buck2 cquery -m //config:opt
 # //cpp/test:example_test` still resolves to the "...-dbg" configuration,
@@ -69,40 +72,12 @@ load("//rules:group.bzl", "group")
 # `--target-platforms //config:x86_64-linux-musl-opt` reliably selects opt
 # for these targets; `-m` only takes effect for targets that do NOT declare
 # their own default_target_platform. So to actually exercise opt (e.g. to
-# confirm //:coverage merges zero entries there, which it does - verified),
+# confirm coverage merges zero entries there, which it does - verified),
 # use:
-#   buck2 build --target-platforms //config:x86_64-linux-musl-opt //:coverage
 #   buck2 test --target-platforms //config:x86_64-linux-musl-opt //...
 # `config/defs.bzl`'s own docstring claims `-m` works for `//cpp/...`
 # - that claim was not re-verified here for non-test/non-binary targets, but
 # does not hold for this repo's test/binary rules specifically.
-coverage_report(
-  name = "coverage",
-  deps = [
-    "//cpp/test:example_test",
-    "//cpp/test:example_edge_test",
-    "//cpp/test:pgt_core_test",
-    "//go/test:greeting_test",
-    "//python/test:unittest",
-    "//ts/test:test",
-    "//tsweb/test:test",
-  ],
-  visibility = ["PUBLIC"],
-)
-
-group(
-  name = "build",
-  deps = [
-    "//cpp/app/hello:hello",
-    "//go/app/hello:hello",
-    "//python/app/hello:hello",
-    "//ts/app/hello:check",
-    "//ts/app/server:check",
-    "//tsweb:site",
-  ],
-  visibility = ["PUBLIC"],
-)
-
 export_file(
   name = "deno.json",
   src = "deno.json",
@@ -161,7 +136,7 @@ export_file(
 # overall design). tools/ has no BUCK file of its own - every file under it
 # is a member of this root package - so these two new scripts are exported
 # the same way tsweb_smoke.py/package_model.py above already are, purely so
-# rules/python.bzl's py_test (py_cover.py) and coverage_report below
+# rules/python.bzl's py_test (py_cover.py) and bxl/coverage.bxl
 # (coverage_merge.py) can depend on them across the package boundary.
 export_file(
   name = "coverage_merge.py",

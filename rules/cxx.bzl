@@ -417,7 +417,7 @@ def _coverage_collect_action(ctx, tools, binary, gcnos):
   # Runs the test binary a second time (separately from the
   # ExternalRunnerTestInfo/RunInfo path `buck2 test` uses for pass/fail
   # reporting) as a normal ctx.actions.run() build action, so its coverage
-  # counters land in a real declared output buck2 can cache and //:coverage
+  # counters land in a real declared output buck2 can cache and the coverage bxl
   # can depend on - see rules/coverage.bzl's module docstring for why this
   # is a second, separate run rather than reusing the `buck2 test` one.
   #
@@ -533,7 +533,7 @@ def cxx_binary(**kwargs):
 def cxx_test(**kwargs):
   kwargs.setdefault("default_target_platform", _DEFAULT_PLATFORM)
   # Every test target this rule produces is now also a coverage source (see
-  # rules/coverage.bzl's module docstring): //:coverage depends on cpp/test's
+  # rules/coverage.bzl's module docstring): the coverage bxl depends on cpp/test's
   # cxx_test targets directly, which - absent a repo-wide PACKAGE file
   # setting a default - would otherwise stay package-private (buck2's
   # unstated default) and be unreachable from the root package. Default to

@@ -25,7 +25,7 @@ Run `./repo.sh help` for the canonical command list. Start with:
 ./repo.sh test
 ```
 
-Lane commands are thin wrappers over Buck2 targets: `build [dbg|opt]` runs `buck2 build //:build`, `test` runs `buck2 test //...`, `lint` runs `buck2 test //... --labels lint` plus shell/Python infra checks (`infra-lint`). `cpp-build`/`cpp-run`/`cpp-test`, `python-build`/`python-test`, `ts-build`/`ts-test`, `tsweb-build`/`tsweb-test`, and `go-build`/`go-test` each drive their lane's Buck2 targets and only ever use the pinned toolchain, never host compilers or runtimes. `./repo.sh buck2 [args...]` runs the pinned Buck2 binary directly for anything not covered by a named lane command. CI performs real cached bootstrap, offline replay, deep doctor, and language-lane verification on x64 and ARM64.
+Lane commands are thin wrappers over Buck2: `build [dbg|opt]` builds every lane's primary outputs discovered by rule kind (no hand-listed //:build group), `coverage` merges dbg coverage via bxl/coverage.bxl's same rule-kind discovery, `test` runs `buck2 test //...`, `lint` runs `buck2 test //... --labels lint` plus shell/Python infra checks (`infra-lint`). `cpp-build`/`cpp-run`/`cpp-test`, `python-build`/`python-test`, `ts-build`/`ts-test`, `tsweb-build`/`tsweb-test`, and `go-build`/`go-test` each drive their lane's Buck2 targets and only ever use the pinned toolchain, never host compilers or runtimes. `./repo.sh buck2 [args...]` runs the pinned Buck2 binary directly for anything not covered by a named lane command. CI performs real cached bootstrap, offline replay, deep doctor, and language-lane verification on x64 and ARM64.
 
 ## Packaging
 

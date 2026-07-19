@@ -101,7 +101,8 @@ Commands:
   buck2 [args...]              Run the pinned Buck2 binary directly.
   infra-lint                   Check shell/Python infra scripts outside the buck2 graph.
   lint                         Run buck2's lint-as-test targets plus infra-lint.
-  build [dbg|opt]              Build every language target (buck2 build //:build).
+  build [dbg|opt]              Build every lane's primary outputs (discovered by rule kind).
+  coverage                     Build the merged dbg coverage report (bxl/coverage.bxl).
   test                         Test every language target (buck2 test //...).
   compile-commands [dbg|opt]   Materialize compile_commands.json via the BXL compdb.
   cpp-build [dbg|opt]          Build the C++ hello binary via buck2.
@@ -170,7 +171,18 @@ case "$command" in
     [[ $profile == dbg || $profile == opt ]] || { printf 'error: profile must be dbg or opt\n' >&2; exit 2; }
     setup_environment
     mapfile -t plat < <(target_platform_args "$profile")
-    "$POLYGLOT_BUCK2" build "${plat[@]}" //:build
+    # No hand-listed //:build group: the graph is the list. Discover every
+    # lane's primary build output by rule kind, so a new app/site target
+    # participates by existing (see the root BUCK file's header comment).
+    mapfile -t buildables < <("$POLYGLOT_BUCK2" uquery \
+      "kind('^_(cxx_binary|go_binary|py_binary|deno_check|vite_build)_rule$', '//...')" 2>/dev/null | grep '^root//')
+    ((${#buildables[@]} > 0)) || { printf 'error: no buildable targets discovered\n' >&2; exit 1; }
+    "$POLYGLOT_BUCK2" build "${plat[@]}" "${buildables[@]}"
+    ;;
+  coverage)
+    (($# == 0)) || { printf 'usage: ./repo.sh coverage\n' >&2; exit 2; }
+    setup_environment
+    "$POLYGLOT_BUCK2" bxl //bxl:coverage.bxl:coverage
     ;;
   test)
     (($# == 0)) || { printf 'usage: ./repo.sh test\n' >&2; exit 2; }

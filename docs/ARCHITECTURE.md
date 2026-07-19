@@ -93,7 +93,9 @@ corresponding Buck2 target. There is one scheduler: Buck2 owns caching,
 incrementality, and cross-lane concurrency directly, rather than a coarse
 task runner layered over a separate jobserver.
 
-- `build [dbg|opt]` runs `buck2 build //:build` (opt via
+- `build [dbg|opt]` discovers every lane's primary build output by rule
+  kind (`buck2 uquery` over the binary/check/site rule kinds - no
+  hand-listed //:build group exists) and builds the result (opt via
   `--target-platforms //config:<target>-opt`; `-m`/`--modifier` does not
   override a rule's own default target platform on the pinned buck2 - see
   `config/defs.bzl`).
@@ -103,10 +105,11 @@ task runner layered over a separate jobserver.
   formatting/static-policy targets, selected by label) plus infra checks
   (`bash -n` over the shell scripts, `tools/lint.py`) that have no buck2
   target because they check files outside the buck2 graph.
-- `//:coverage` is a default-on-for-`dbg` merge target: every instrumented
-  lane's test collects coverage as a normal build output under `dbg`, and
-  `buck2 build //:coverage` merges it into one repo-relative lcov report plus
-  a per-file summary. `opt` builds stay uninstrumented.
+- `coverage` is default-on-for-`dbg`: every instrumented lane's test
+  collects coverage as a normal build output under `dbg`, and
+  `./repo.sh coverage` (bxl/coverage.bxl) discovers every test by rule
+  kind and merges the collected data into one repo-relative lcov report
+  plus a per-file summary. `opt` builds stay uninstrumented.
 
 Every first-party Buck2 rule (there is no prelude in this repository) lives
 under `rules/`: `rules/cxx.bzl`, `rules/go.bzl`, `rules/python.bzl`,

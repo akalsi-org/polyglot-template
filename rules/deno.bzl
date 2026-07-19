@@ -508,7 +508,7 @@ _DEFAULT_PLATFORM = "//config:{}-dbg".format(_NATIVE_TARGET)
 def deno_test(**kwargs):
   kwargs = _consumer_defaults(kwargs)
   kwargs.setdefault("default_target_platform", _DEFAULT_PLATFORM)
-  # See rules/cxx.bzl's cxx_test macro for why: //:coverage now depends on
+  # See rules/cxx.bzl's cxx_test macro for why: the coverage bxl now depends on
   # deno_test targets directly, which need to be reachable from the root
   # package without editing ts/BUCK or tsweb/BUCK's existing call sites.
   kwargs.setdefault("visibility", ["PUBLIC"])
@@ -546,9 +546,12 @@ def _vite_build_impl(ctx: AnalysisContext) -> list[Provider]:
     out_dir_name = ctx.attrs.out_dir,
   )
   # Packaging: the whole built site directory stages as one tree entry at
-  # "web", a root-level sibling of bin/lib/libexec/runtime/share (the
-  # package root mirrors the repo's own top-level layout).
-  info = package_info(ctx, entries = [PackageEntry(dest = "web", artifact = out_dir, kind = "tree", owner = str(ctx.label.raw_target()))])
+  # web/<site> under the root-level "web" sibling of bin/lib/libexec/
+  # runtime/share. The per-site subdirectory (site_name, defaulting to the
+  # target name) is what lets one package carry several vite_build sites
+  # without their trees colliding at a shared "web" root.
+  site = ctx.attrs.site_name or ctx.attrs.name
+  info = package_info(ctx, entries = [PackageEntry(dest = "web/" + site, artifact = out_dir, kind = "tree", owner = str(ctx.label.raw_target()))])
   return [DefaultInfo(default_output = out_dir), info]
 
 _vite_build_rule = rule(
@@ -556,6 +559,7 @@ _vite_build_rule = rule(
   attrs = _CONSUMER_ATTRS | {
     "config": attrs.string(),
     "out_dir": attrs.string(),
+    "site_name": attrs.option(attrs.string(), default = None),
     "vite_version": attrs.string(),
   } | PACKAGE_LABELS_ATTR,
 )

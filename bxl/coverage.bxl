@@ -1,0 +1,49 @@
+"""Discovery-driven coverage merge for the whole graph.
+
+Queries every instrumented-lane test by rule kind (cxx_test, go_test,
+py_test, deno_test - the four CoverageInfo producers, see
+rules/coverage.bzl's module docstring), analyzes each under its own
+default target platform (dbg, where coverage is default-on), skips any
+without a CoverageInfo provider (lint-as-test targets never carry one;
+nothing does under opt), and merges the rest into ONE repo-relative lcov
+file plus a per-file % summary via rules/coverage.bzl's
+coverage_merge_actions. There is deliberately no static //:coverage
+target with a hand-listed deps array: the graph is the list, so a new
+test target participates by existing. Invoke with:
+
+  ./repo.sh coverage        (buck2 bxl //bxl:coverage.bxl:coverage)
+
+Prints the ensured merged.lcov and summary.txt paths under buck-out.
+"""
+
+load("//rules:coverage.bzl", "CoverageInfo", "coverage_merge_actions")
+
+def _first_default_output(ctx: bxl.Context, pattern: str):
+  for node in ctx.cquery().eval(pattern):
+    return ctx.analysis(node).providers()[DefaultInfo].default_outputs[0]
+  fail("no target matched {}".format(pattern))
+
+def _impl(ctx: bxl.Context):
+  # cquery (not uquery): analysis() needs configured nodes, and cquery
+  # configures each test under its own default target platform (dbg, where
+  # coverage collection is on).
+  tests = ctx.cquery().eval(
+    "kind('^_(cxx_test|go_test|py_test|deno_test)_rule$', '//...')",
+  )
+  infos = []
+  for node in tests:
+    providers = ctx.analysis(node).providers()
+    info = providers.get(CoverageInfo)
+    if info == None:
+      continue
+    infos.append((node.label.name, info))
+  merge_tool = _first_default_output(ctx, "//:coverage_merge.py")
+  gomod = _first_default_output(ctx, "//:go.mod")
+  merged, summary = coverage_merge_actions(ctx.bxl_actions().actions, merge_tool, gomod, infos)
+  ctx.output.print(ctx.output.ensure(merged))
+  ctx.output.print(ctx.output.ensure(summary))
+
+coverage = bxl_main(
+  impl = _impl,
+  cli_args = {},
+)

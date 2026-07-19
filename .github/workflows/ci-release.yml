@@ -155,7 +155,7 @@ jobs:
           # tsweb:lint, python/test:compileall) alongside the real tests, plus
           # //packages:manifest-validate and //tsweb:tsconfig_drift - there is no
           # separate "lint" verb in this buck2 graph (see the root BUCK file's
-          # //:build comment for why), so this one command is buck2's equivalent
+          # header comment for why), so this one command is buck2's equivalent
           # of "test //... and lint //...". It does not touch the non-native
           # toolchain triple, since nothing else in the graph depends on it.
           ./repo.sh exec buck2 test //...

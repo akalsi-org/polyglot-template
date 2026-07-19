@@ -10,11 +10,11 @@ from the ExternalRunnerTestInfo/RunInfo path `buck2 test` uses for pass/fail
 reporting) and return a CoverageInfo provider describing it. Under
 -m //config:opt none of that happens and no CoverageInfo is returned.
 
-coverage_report (wired up at //:coverage in the root BUCK) walks its `deps`'
-optional CoverageInfo providers (deps without one - e.g. lint-as-test
-targets, or any target under -m //config:opt - are silently skipped, so
-//:coverage's deps list can just be "every test target" without needing a
-separate coverage-only allowlist), builds a manifest describing every
+bxl/coverage.bxl (the `./repo.sh coverage` entry point) discovers every
+test by rule kind and walks their
+optional CoverageInfo providers (targets without one - e.g. lint-as-test
+targets, or anything under -m //config:opt - are silently skipped, so
+no separate coverage-only allowlist exists anywhere), builds a manifest describing every
 present entry, and hands it to tools/coverage_merge.py, which normalizes
 everything - gcov's JSON intermediate format (cxx), a go coverage profile
 (go), deno's own `deno coverage --lcov` output (ts/tsweb), and an
@@ -81,72 +81,34 @@ def _hidden_for(info):
     hidden.append(info.toolchain_dir)
   return hidden
 
-def _coverage_report_impl(ctx: AnalysisContext) -> list[Provider]:
+# Shared by bxl/coverage.bxl (the discovery-driven entry point - there is
+# no static coverage_report target anymore; tests are found by rule kind at
+# invocation time so a new test participates by existing). `actions` is
+# either an AnalysisContext.actions or a bxl_actions().actions - both
+# expose the same write_json/declare_output/run surface used here.
+def coverage_merge_actions(actions, merge_tool, gomod, infos):
+  """infos: list of (name, CoverageInfo); returns (merged_lcov, summary)."""
   entries = []
   hidden = []
-  for dep in ctx.attrs.deps:
-    info = dep.get(CoverageInfo)
-    if info == None:
-      # Not every test target carries coverage (lint-as-test targets never
-      # do; nothing does under -m //config:opt) - skip rather than fail, so
-      # //:coverage's deps list can just be "every dbg test target".
-      continue
-    entries.append(_entry_for(dep.label.name, info))
+  for name, info in infos:
+    entries.append(_entry_for(name, info))
     hidden += _hidden_for(info)
 
-  manifest = ctx.actions.write_json(ctx.label.name + "-manifest.json", entries, with_inputs = True)
+  manifest = actions.write_json("coverage-manifest.json", entries, with_inputs = True)
 
-  merged = ctx.actions.declare_output("merged.lcov")
-  summary = ctx.actions.declare_output("summary.txt")
-  ctx.actions.run(
+  merged = actions.declare_output("merged.lcov")
+  summary = actions.declare_output("summary.txt")
+  actions.run(
     cmd_args(
-      ["python3", ctx.attrs._merge_tool, manifest, merged.as_output(), summary.as_output()],
+      ["python3", merge_tool, manifest, merged.as_output(), summary.as_output()],
       # go.mod is read by tools/coverage_merge.py at run time (to strip the
       # Go module import prefix off go_profile entries' file paths) via a
       # plain relative "go.mod" open() - not passed as an argv path, so it
       # would otherwise be invisible to buck2's own dependency tracking;
       # listed here per this file's own CRITICAL RULE-WRITING LAW comment.
-      hidden = hidden + [manifest, ctx.attrs._gomod],
+      hidden = hidden + [manifest, gomod, merge_tool],
     ),
     category = "coverage_merge",
-    identifier = ctx.label.name,
+    identifier = "coverage",
   )
-  return [
-    DefaultInfo(
-      default_outputs = [merged, summary],
-      sub_targets = {
-        "lcov": [DefaultInfo(default_output = merged)],
-        "summary": [DefaultInfo(default_output = summary)],
-      },
-    ),
-  ]
-
-_coverage_report_rule = rule(
-  impl = _coverage_report_impl,
-  attrs = {
-    "deps": attrs.list(attrs.dep()),
-    "_gomod": attrs.source(default = "//:go.mod"),
-    "_merge_tool": attrs.source(default = "//:coverage_merge.py"),
-  },
-)
-
-def _native_target() -> str:
-  # Mirrors rules/group.bzl's/rules/cxx.bzl's own _native_target(): this
-  # repo only ever builds the host's own musl output triplet.
-  arch = host_info().arch
-  if arch.is_x86_64:
-    return "x86_64-linux-musl"
-  if arch.is_aarch64:
-    return "aarch64-linux-musl"
-  fail("unsupported native CPU architecture")
-
-# coverage_report's deps cross into //config:opt-or-dbg-selecting lane test
-# rules (go_test, deno_test, py_test, cxx_test); a dependency edge has no
-# configuration unless one is supplied, so without a default target
-# platform here `buck2 build //:coverage` fails resolving those deps'
-# select()s under the <unspecified> platform - see rules/group.bzl's
-# identical default_target_platform macro (used by //:build) for the same
-# reason.
-def coverage_report(**kwargs):
-  kwargs.setdefault("default_target_platform", "//config:{}-dbg".format(_native_target()))
-  _coverage_report_rule(**kwargs)
+  return merged, summary
