@@ -1,0 +1,10 @@
+# go/lib/greeting: shared package imported by both the hello app and its
+# test, mirroring the module's go/lib/greeting import path.
+
+load("//rules:go.bzl", "go_library")
+
+go_library(
+  name = "greeting",
+  srcs = ["greeting.go"],
+  visibility = ["PUBLIC"],
+)

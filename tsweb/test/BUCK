@@ -1,0 +1,39 @@
+load("//rules:deno.bzl", "deno_graph_check", "deno_library", "deno_test")
+
+deno_library(
+  name = "test_srcs",
+  srcs = [
+    "app_test.tsx",
+    "title_test.ts",
+  ],
+  visibility = ["//tsweb/..."],
+)
+
+# tsweb-test parity: `deno test --frozen --allow-env=NODE_ENV tsweb/test/`.
+deno_test(
+  name = "test",
+  entries = ["tsweb/test/"],
+  extra_flags = ["--allow-env=NODE_ENV"],
+  deps = [
+    ":test_srcs",
+    "//tsweb/lib/app:app",
+    "//tsweb/lib/title:title",
+  ],
+)
+
+# Drift check: every LOCAL file `deno info` resolves from each entrypoint
+# below must already be part of the declared srcs/deps graph above.
+deno_graph_check(
+  name = "graph_check",
+  entries = [
+    "tsweb/app/site/main.tsx",
+    "tsweb/test/app_test.tsx",
+    "tsweb/test/title_test.ts",
+  ],
+  deps = [
+    ":test_srcs",
+    "//tsweb/app/site:site",
+    "//tsweb/lib/app:app",
+    "//tsweb/lib/title:title",
+  ],
+)

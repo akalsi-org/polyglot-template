@@ -6,10 +6,10 @@ load("//rules:python.bzl", "py_binary")
 
 py_binary(
   name = "hello",
-  main = "hello/main.py",
+  main = "main.py",
   deps = [
-    "//python/lib:fastbytes",
-    "//python/lib:example",
+    "//python/lib/fastbytes:fastbytes",
+    "//python/lib/example:example",
   ],
   pkg_name = "python-hello",
   visibility = ["PUBLIC"],

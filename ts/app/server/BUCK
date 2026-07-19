@@ -1,0 +1,17 @@
+load("//rules:deno.bzl", "deno_app", "deno_check")
+
+deno_app(
+  name = "server",
+  main = "main.ts",
+  srcs = ["main.ts"],
+  deps = ["//ts/lib/greeting:greeting"],
+  visibility = ["PUBLIC"],
+)
+
+# ts-build parity, this app's slice: `deno check --frozen ts/app/server/main.ts`.
+deno_check(
+  name = "check",
+  entries = ["ts/app/server/main.ts"],
+  deps = [":server"],
+  visibility = ["PUBLIC"],
+)

@@ -65,7 +65,7 @@ Toolchain artifact tracking (fixed bug): every script below needs the path
 to the extracted go toolchain (tools.goroot), embedded as literal text so
 the emitted shell reads naturally. That text-only reference is not enough
 on its own for buck2 to treat the toolchain directory as a real input:
-standalone `buck2 build //go:hello` worked, but reached transitively
+standalone `buck2 build //go/app/hello:hello` worked, but reached transitively
 through another target with a different configuration (e.g.
 //packages:polyglot-demo, which builds go:hello under a target platform
 instead of go:hello's own default), the toolchain extraction for that
@@ -223,7 +223,8 @@ go_library = rule(
 
 def _go_binary_impl(ctx: AnalysisContext) -> list[Provider]:
   tools = _toolchain_tools(ctx)
-  all_srcs = list(ctx.attrs.srcs) + _merge_dep_srcs(ctx.attrs.deps) + [ctx.attrs._gomod]
+  own_srcs = list(ctx.attrs.srcs) + _merge_dep_srcs(ctx.attrs.deps)
+  all_srcs = own_srcs + [ctx.attrs._gomod]
   binary = ctx.actions.declare_output(ctx.attrs.name)
   tail = [
     "PKG=" + ctx.attrs.package,
@@ -247,6 +248,14 @@ def _go_binary_impl(ctx: AnalysisContext) -> list[Provider]:
   return [
     DefaultInfo(default_output = binary),
     RunInfo(args = cmd_args(binary)),
+    # GoInfo, same shape go_library emits: lets a lane-wide lint target (e.g.
+    # go/BUCK's gofmt_check/go_vet) reach this binary's own sources plus its
+    # transitive deps' sources via `deps=` alone, now that the per-component
+    # split means glob(["**/*.go"]) from go/BUCK's own package can no longer
+    # see files that moved into go/app/*/BUCK's own package boundary.
+    # Deliberately excludes ctx.attrs._gomod (go.mod is not a .go file;
+    # go_lint's fmt mode would otherwise hand it to `gofmt -l`).
+    GoInfo(srcs = own_srcs),
     info,
   ]
 
@@ -293,7 +302,8 @@ def _go_test_coverage_action(ctx, tools, all_srcs):
 
 def _go_test_impl(ctx: AnalysisContext) -> list[Provider]:
   tools = _toolchain_tools(ctx)
-  all_srcs = list(ctx.attrs.srcs) + _merge_dep_srcs(ctx.attrs.deps) + [ctx.attrs._gomod]
+  own_srcs = list(ctx.attrs.srcs) + _merge_dep_srcs(ctx.attrs.deps)
+  all_srcs = own_srcs + [ctx.attrs._gomod]
   tail = [
     "exec \"$GOROOT/bin/go\" test -trimpath " + " ".join(ctx.attrs.packages),
   ]
@@ -307,6 +317,8 @@ def _go_test_impl(ctx: AnalysisContext) -> list[Provider]:
       command = [command],
       run_from_project_root = True,
     ),
+    # See go_binary's identical GoInfo addition above for why.
+    GoInfo(srcs = own_srcs),
   ]
   if ctx.attrs._coverage_enabled:
     cov_file = _go_test_coverage_action(ctx, tools, all_srcs)
@@ -362,9 +374,16 @@ def _go_lint_impl(ctx: AnalysisContext) -> list[Provider]:
   tools = _toolchain_tools(ctx)
   # gofmt itself doesn't read go.mod, but go vet does, and keeping the
   # hidden-input set uniform across both modes is simpler than splitting it.
-  all_srcs = list(ctx.attrs.srcs) + _merge_dep_srcs(ctx.attrs.deps) + [ctx.attrs._gomod]
+  own_srcs = list(ctx.attrs.srcs) + _merge_dep_srcs(ctx.attrs.deps)
+  all_srcs = own_srcs + [ctx.attrs._gomod]
   if ctx.attrs.mode == "fmt":
-    fmt_check = cmd_args(["OUT=$(", "\"$GOROOT/bin/gofmt\"", "-l"] + list(ctx.attrs.srcs) + [")"], delimiter = " ")
+    # own_srcs (not ctx.attrs.srcs alone): after the per-component split,
+    # go/BUCK's own package has no .go files directly in it any more - every
+    # file gofmt needs to see arrives via `deps=`' GoInfo (go_library's own
+    # shape, now also emitted by go_binary/go_test - see their own doc
+    # comments above) instead of a whole-tree glob() that package boundaries
+    # would otherwise silently truncate.
+    fmt_check = cmd_args(["OUT=$(", "\"$GOROOT/bin/gofmt\"", "-l"] + own_srcs + [")"], delimiter = " ")
     tail = [
       fmt_check,
       "if [ -n \"$OUT\" ]; then printf '%s\\n' \"$OUT\" >&2; " +

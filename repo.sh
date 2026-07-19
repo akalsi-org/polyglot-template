@@ -228,16 +228,17 @@ case "$command" in
   python-build)
     setup_environment
     target=$("$ROOT/toolchain/target.sh")
-    "$POLYGLOT_BUCK2" build //python/app:hello
-    # //python/app:hello's own DefaultInfo output is a loader-wrapped launcher
-    # script, not the built fastbytes package - stage that separately (a
-    # cache hit; //python/app:hello already built it transitively) at
-    # build/python/<target>/lib so repo.sh's direct `python` passthrough
-    # (whose PYTHONPATH is build/python/<target>/lib:python/lib:python/app,
-    # in that precedence order) and the editor's python.env resolve the
-    # compiled extension rather than its uncompiled source, matching the
-    # layout tools/python_build.py used to stage by hand.
-    fastbytes_out=$("$POLYGLOT_BUCK2" build --show-output //python/lib:fastbytes 2>/dev/null | awk '{ print $2 }')
+    "$POLYGLOT_BUCK2" build //python/app/hello:hello
+    # //python/app/hello:hello's own DefaultInfo output is a loader-wrapped
+    # launcher script, not the built fastbytes package - stage that
+    # separately (a cache hit; //python/app/hello:hello already built it
+    # transitively) at build/python/<target>/lib so repo.sh's direct
+    # `python` passthrough (whose PYTHONPATH is
+    # build/python/<target>/lib:python/lib:python/app, in that precedence
+    # order) and the editor's python.env resolve the compiled extension
+    # rather than its uncompiled source, matching the layout
+    # tools/python_build.py used to stage by hand.
+    fastbytes_out=$("$POLYGLOT_BUCK2" build --show-output //python/lib/fastbytes:fastbytes 2>/dev/null | awk '{ print $2 }')
     stage="$ROOT/build/python/$target/lib"
     mkdir -p "$stage"
     rm -rf "$stage/fastbytes"
@@ -256,7 +257,7 @@ case "$command" in
     ;;
   ts-build)
     setup_environment
-    "$POLYGLOT_BUCK2" build //ts:check
+    "$POLYGLOT_BUCK2" build //ts/app/hello:check //ts/app/server:check
     ;;
   ts-test)
     setup_environment
@@ -291,7 +292,7 @@ case "$command" in
     ;;
   go-build)
     setup_environment
-    "$POLYGLOT_BUCK2" build //go:hello
+    "$POLYGLOT_BUCK2" build //go/app/hello:hello
     ;;
   go-test)
     setup_environment

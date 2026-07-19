@@ -1,38 +1,42 @@
-# Buck2 mirror of the moon-owned tsweb-build/tsweb-test/tsweb-lint fragments
-# (see moon.yml and repo.sh's tsweb-build/tsweb-test cases), plus the one
-# deno_cache population action shared with the ts/ lane (see ts/BUCK) and
-# the tsconfig/prettier emission deliverable (deno.json stays authoritative;
-# see rules/deno.bzl's tsconfig_emit/tsconfig_drift_test doc comment).
+# tsweb/BUCK keeps the shared/lane-wide targets: deno_cache (the one
+# network-permitted population action shared by both the ts/ and tsweb/
+# lanes - deno cache resolves the whole graph in one pass, so it deliberately
+# stays out of any single per-component BUCK file), vite_build's "site"
+# target (kept here rather than moved into tsweb/app/site/BUCK: it is a
+# lane-level build product name - //tsweb:site - that //packages:polyglot-demo
+# and repo.sh's tsweb-build both already reference, and vite.config.ts itself
+# lives at this package's own top level, not under app/site/), the tsweb-test
+# smoke check, lane-wide fmt/lint, and tsconfig/prettier emission. The
+# buildable/testable component targets moved to per-component BUCK files -
+# tsweb/lib/app/BUCK, tsweb/lib/title/BUCK, tsweb/app/site/BUCK,
+# tsweb/test/BUCK - mirroring the cpp lane's existing per-component shape.
 
-load("//rules:deno.bzl", "deno_cache", "deno_lint", "deno_test", "smoke_test", "tsconfig_drift_test", "tsconfig_emit", "vite_build")
-load("//rules:file.bzl", "export_file")
+load("//rules:deno.bzl", "deno_cache", "deno_lint", "smoke_test", "tsconfig_drift_test", "tsconfig_emit", "vite_build")
 
-export_file(name = "index.html", src = "app/site/index.html")
-export_file(name = "main.tsx", src = "app/site/main.tsx")
-export_file(name = "style.css", src = "app/site/style.css")
-export_file(name = "app.tsx", src = "lib/app/app.tsx")
-export_file(name = "title.ts", src = "lib/title/title.ts")
-export_file(name = "app_test.tsx", src = "test/app_test.tsx")
-export_file(name = "title_test.ts", src = "test/title_test.ts")
-export_file(name = "vite_config.ts", src = "vite.config.ts")
+# vite.config.ts lives directly in this package, so it needs no export_file()
+# wrapper the way a cross-package reference would - it's referenced straight
+# via `srcs` below, same as any other same-package attrs.source().
+_VITE_CONFIG_SRCS = {"tsweb/vite.config.ts": "vite.config.ts"}
 
-_TSWEB_SRCS = {
-  "tsweb/app/site/index.html": ":index.html",
-  "tsweb/app/site/main.tsx": ":main.tsx",
-  "tsweb/app/site/style.css": ":style.css",
-  "tsweb/lib/app/app.tsx": ":app.tsx",
-  "tsweb/lib/title/title.ts": ":title.ts",
-  "tsweb/test/app_test.tsx": ":app_test.tsx",
-  "tsweb/test/title_test.ts": ":title_test.ts",
-  "tsweb/vite.config.ts": ":vite_config.ts",
-}
+_ALL_DEPS = [
+  "//ts/app/hello:hello",
+  "//ts/app/server:server",
+  "//ts/lib/greeting:greeting",
+  "//ts/test:test_srcs",
+  "//tsweb/app/site:site",
+  "//tsweb/lib/app:app",
+  "//tsweb/lib/title:title",
+  "//tsweb/test:test_srcs",
+]
 
-# The one network-permitted action for both the ts/ and tsweb/ lanes.
+# The one network-permitted action for both the ts/ and tsweb/ lanes. deps
+# fold every component's DenoSourcesInfo into the staged tree (see
+# rules/deno.bzl's DenoSourcesInfo doc comment) - `entries` stays a small
+# explicit list of representative entrypoints (deno cache only needs to walk
+# far enough to resolve every REMOTE/npm dependency; local file imports never
+# require pre-caching - see rules/deno.bzl's module docstring).
 deno_cache(
   name = "cache",
-  deno = "//toolchains:deno-x86_64-linux-musl",
-  deno_json = "//:deno.json",
-  deno_lock = "//:deno.lock",
   entries = [
     "ts/app/hello/main.ts",
     "ts/test/greeting_test.ts",
@@ -41,25 +45,8 @@ deno_cache(
     "tsweb/test/title_test.ts",
     "tsweb/vite.config.ts",
   ],
-  srcs = _TSWEB_SRCS | {
-    "ts/app/hello/main.ts": "//ts:main.ts",
-    "ts/lib/greeting/greeting.ts": "//ts:greeting.ts",
-    "ts/test/greeting_test.ts": "//ts:greeting_test.ts",
-  },
-  visibility = ["PUBLIC"],
-)
-
-# tsweb-test parity: `deno test --frozen --allow-env=NODE_ENV tsweb/test/`.
-deno_test(
-  name = "test",
-  deno = "//toolchains:deno-x86_64-linux-musl",
-  deno_dir = ":cache[deno-dir]",
-  deno_json = "//:deno.json",
-  deno_lock = "//:deno.lock",
-  entries = ["tsweb/test/"],
-  extra_flags = ["--allow-env=NODE_ENV"],
-  node_modules = ":cache[node-modules]",
-  srcs = _TSWEB_SRCS,
+  deps = _ALL_DEPS,
+  srcs = _VITE_CONFIG_SRCS,
   visibility = ["PUBLIC"],
 )
 
@@ -69,14 +56,14 @@ deno_test(
 vite_build(
   name = "site",
   config = "tsweb/vite.config.ts",
-  deno = "//toolchains:deno-x86_64-linux-musl",
-  deno_dir = ":cache[deno-dir]",
-  deno_json = "//:deno.json",
-  deno_lock = "//:deno.lock",
-  node_modules = ":cache[node-modules]",
   out_dir = "build/tsweb/site",
-  srcs = _TSWEB_SRCS,
   vite_version = "8.1.4",
+  deps = [
+    "//tsweb/app/site:site",
+    "//tsweb/lib/app:app",
+    "//tsweb/lib/title:title",
+  ],
+  srcs = _VITE_CONFIG_SRCS,
   visibility = ["PUBLIC"],
 )
 
@@ -92,26 +79,28 @@ smoke_test(
 deno_lint(
   name = "fmt_check",
   args = ["fmt", "--check"],
-  deno = "//toolchains:deno-x86_64-linux-musl",
-  deno_dir = ":cache[deno-dir]",
-  deno_json = "//:deno.json",
-  deno_lock = "//:deno.lock",
   entries = ["tsweb/"],
-  node_modules = ":cache[node-modules]",
-  srcs = _TSWEB_SRCS,
+  deps = [
+    "//tsweb/app/site:site",
+    "//tsweb/lib/app:app",
+    "//tsweb/lib/title:title",
+    "//tsweb/test:test_srcs",
+  ],
+  srcs = _VITE_CONFIG_SRCS,
   visibility = ["PUBLIC"],
 )
 
 deno_lint(
   name = "lint",
   args = ["lint"],
-  deno = "//toolchains:deno-x86_64-linux-musl",
-  deno_dir = ":cache[deno-dir]",
-  deno_json = "//:deno.json",
-  deno_lock = "//:deno.lock",
   entries = ["tsweb/"],
-  node_modules = ":cache[node-modules]",
-  srcs = _TSWEB_SRCS,
+  deps = [
+    "//tsweb/app/site:site",
+    "//tsweb/lib/app:app",
+    "//tsweb/lib/title:title",
+    "//tsweb/test:test_srcs",
+  ],
+  srcs = _VITE_CONFIG_SRCS,
   visibility = ["PUBLIC"],
 )
 

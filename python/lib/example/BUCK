@@ -1,0 +1,10 @@
+# Pure-python python/lib/example package.
+
+load("//rules:python.bzl", "py_library")
+
+py_library(
+  name = "example",
+  root = "python/lib",
+  srcs = ["example.py"],
+  visibility = ["PUBLIC"],
+)

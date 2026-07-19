@@ -1,0 +1,12 @@
+# The pinned-ABI C++ extension built by tools/python_build.py under the moon
+# lane; see rules/python.bzl for the py_extension rule semantics.
+
+load("//rules:python.bzl", "py_extension")
+
+py_extension(
+  name = "fastbytes",
+  package = "fastbytes",
+  srcs = ["fastbytes.cc"],
+  init_src = "__init__.py",
+  visibility = ["PUBLIC"],
+)

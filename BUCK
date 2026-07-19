@@ -17,13 +17,15 @@ load("//rules:group.bzl", "group")
 # ExternalRunnerTestInfo of its own, such as a group() of test deps, reports
 # "NO TESTS RAN" rather than running its deps' tests or erroring).
 #
-# Use `buck2 test //...` to run all 20 tests, including every lane's
+# Use `buck2 test //...` to run all 22 tests, including every lane's
 # lint-as-test targets (go:gofmt_check, go:go_vet, ts:fmt_check, ts:lint,
-# tsweb:fmt_check, tsweb:lint, python/test:compileall, plus the doctest and
-# drift/manifest tests) - there is no separate "lint" verb in this buck2
-# graph, matching repo.sh's own lint lane being per-language rather than a
-# single command. To run one lane's tests (including its lint-as-test
-# targets) only, use that lane's own package pattern, e.g.:
+# tsweb:fmt_check, tsweb:lint, python/test:compileall, the two
+# deno_graph_check drift checks - ts/test:graph_check, tsweb/test:graph_check
+# - plus the doctest and drift/manifest tests) - there is no separate "lint"
+# verb in this buck2 graph, matching repo.sh's own lint lane being
+# per-language rather than a single command. To run one lane's tests
+# (including its lint-as-test targets) only, use that lane's own package
+# pattern, e.g.:
 #   buck2 test //cpp/...
 #   buck2 test //go/...
 #   buck2 test //python/...
@@ -31,7 +33,7 @@ load("//rules:group.bzl", "group")
 #   buck2 test //tsweb/...
 #   buck2 test //packages/...
 # Per-lane lint-only invocation: DONE. Every lane's lint-as-test rules
-# (rules/go.bzl's go_lint, rules/deno.bzl's deno_lint and
+# (rules/go.bzl's go_lint, rules/deno.bzl's deno_lint, deno_graph_check, and
 # tsconfig_drift_test, rules/python.bzl's py_compileall_check and
 # py_lock_consistency_test) now set `labels = ["lint"]` on their
 # ExternalRunnerTestInfo. This buck2 version's ExternalRunnerTestInfo does
@@ -40,13 +42,14 @@ load("//rules:group.bzl", "group")
 # labels=[...] kwarg analyzed and built cleanly), and `buck2 test --labels
 # <label>` DOES filter to only matching-labeled targets on this pinned
 # buck2 (769ca62...) - verified against `buck2 test //go:gofmt_check
-# //go:go_vet //go:greeting_test --labels lint`, which ran only the two
+# //go:go_vet //go/test:greeting_test --labels lint`, which ran only the two
 # lint targets and skipped greeting_test. So per-lane lint-only invocation
 # now works as a single invocation across the whole graph:
 #   buck2 test //... --labels lint
-# (verified: 9 lint-as-test targets ran - go:gofmt_check, go:go_vet,
-# ts:fmt_check, ts:lint, tsweb:fmt_check, tsweb:lint, tsweb:tsconfig_drift,
-# python/test:compileall, python/test:lock_consistency - and nothing else).
+# (verified: 11 lint-as-test targets ran - go:gofmt_check, go:go_vet,
+# ts:fmt_check, ts:lint, ts/test:graph_check, tsweb:fmt_check, tsweb:lint,
+# tsweb:tsconfig_drift, tsweb/test:graph_check, python/test:compileall,
+# python/test:lock_consistency - and nothing else).
 # //:coverage: DEFAULT-ON-FOR-dbg coverage merge target (see
 # rules/coverage.bzl's module docstring for the full design). deps is just
 # "every test target" across the four instrumented lanes (cpp/test's three
@@ -79,10 +82,10 @@ coverage_report(
     "//cpp/test:example_test",
     "//cpp/test:example_edge_test",
     "//cpp/test:pgt_core_test",
-    "//go:greeting_test",
+    "//go/test:greeting_test",
     "//python/test:unittest",
-    "//ts:test",
-    "//tsweb:test",
+    "//ts/test:test",
+    "//tsweb/test:test",
   ],
   visibility = ["PUBLIC"],
 )
@@ -91,9 +94,10 @@ group(
   name = "build",
   deps = [
     "//cpp/app/hello:hello",
-    "//go:hello",
-    "//python/app:hello",
-    "//ts:check",
+    "//go/app/hello:hello",
+    "//python/app/hello:hello",
+    "//ts/app/hello:check",
+    "//ts/app/server:check",
     "//tsweb:site",
   ],
   visibility = ["PUBLIC"],

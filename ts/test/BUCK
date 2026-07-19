@@ -1,0 +1,49 @@
+load("//rules:deno.bzl", "deno_graph_check", "deno_library", "deno_run_check", "deno_test")
+
+deno_library(
+  name = "test_srcs",
+  srcs = [
+    "greeting_test.ts",
+    "server_test.ts",
+  ],
+  # //tsweb:cache (the shared deno_cache population action - see tsweb/BUCK)
+  # depends on this too, alongside //ts/... itself.
+  visibility = ["//ts/...", "//tsweb/..."],
+)
+
+# ts-test parity, part 1: `deno test --frozen ts/test/`.
+deno_test(
+  name = "test",
+  entries = ["ts/test/"],
+  deps = [
+    ":test_srcs",
+    "//ts/app/server:server",
+    "//ts/lib/greeting:greeting",
+  ],
+)
+
+# ts-test parity, part 2: `deno run --cached-only --frozen ts/app/hello/main.ts`.
+deno_run_check(
+  name = "run_check",
+  entries = ["ts/app/hello/main.ts"],
+  deps = ["//ts/app/hello:hello"],
+  visibility = ["PUBLIC"],
+)
+
+# Drift check: every LOCAL file `deno info` resolves from each entrypoint
+# below must already be part of the declared srcs/deps graph above.
+deno_graph_check(
+  name = "graph_check",
+  entries = [
+    "ts/app/hello/main.ts",
+    "ts/app/server/main.ts",
+    "ts/test/greeting_test.ts",
+    "ts/test/server_test.ts",
+  ],
+  deps = [
+    ":test_srcs",
+    "//ts/app/hello:hello",
+    "//ts/app/server:server",
+    "//ts/lib/greeting:greeting",
+  ],
+)

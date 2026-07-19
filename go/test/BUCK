@@ -1,0 +1,10 @@
+# repo.sh's go-test equivalent (`go test ./go/...`).
+
+load("//rules:go.bzl", "go_test")
+
+go_test(
+  name = "greeting_test",
+  srcs = ["greeting_test.go"],
+  deps = ["//go/lib/greeting:greeting"],
+  packages = ["./go/..."],
+)

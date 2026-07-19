@@ -13,8 +13,8 @@ py_test(
     "test_fastbytes.py",
   ],
   deps = [
-    "//python/lib:fastbytes",
-    "//python/lib:example",
+    "//python/lib/fastbytes:fastbytes",
+    "//python/lib/example:example",
   ],
 )
 
@@ -30,9 +30,9 @@ py_compileall_check(
     "test_fastbytes.py",
   ],
   deps = [
-    "//python/lib:example",
-    "//python/lib:fastbytes",
-    "//python/app:hello",
+    "//python/lib/example:example",
+    "//python/lib/fastbytes:fastbytes",
+    "//python/app/hello:hello",
   ],
 )
 

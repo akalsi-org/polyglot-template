@@ -1,91 +1,19 @@
-# Buck2 mirror of the moon-owned ts-build/ts-test/ts-lint fragments (see
-# moon.yml and repo.sh's ts-build/ts-test cases). deno_cache lives in
-# tsweb/BUCK since it is the one population action shared by both the ts/
-# and tsweb/ lanes (deno cache resolves the whole graph in one pass); these
-# export_file() targets expose ts/'s sources to that cross-package dep.
+# ts/BUCK now holds ONLY lane-wide fmt_check/lint targets; the buildable/
+# testable targets moved to per-component BUCK files - ts/lib/greeting/BUCK,
+# ts/app/hello/BUCK, ts/app/server/BUCK, ts/test/BUCK - mirroring the cpp
+# lane's existing per-component shape. `deps=` folds every component's
+# DenoSourcesInfo into the staged tree deno fmt/lint walk (see
+# rules/deno.bzl's DenoSourcesInfo doc comment) - no more hand-written
+# _SRCS path dict or cross-package export_file() re-exports.
 
-load("//rules:deno.bzl", "deno_check", "deno_lint", "deno_run_check", "deno_test")
-load("//rules:file.bzl", "export_file")
+load("//rules:deno.bzl", "deno_lint")
 
-export_file(
-  name = "main.ts",
-  src = "app/hello/main.ts",
-  visibility = ["//tsweb/..."],
-)
-
-export_file(
-  name = "server_main.ts",
-  src = "app/server/main.ts",
-  visibility = ["//tsweb/..."],
-)
-
-export_file(
-  name = "greeting.ts",
-  src = "lib/greeting/greeting.ts",
-  visibility = ["//tsweb/..."],
-)
-
-export_file(
-  name = "greeting_test.ts",
-  src = "test/greeting_test.ts",
-  visibility = ["//tsweb/..."],
-)
-
-export_file(
-  name = "server_test.ts",
-  src = "test/server_test.ts",
-  visibility = ["//tsweb/..."],
-)
-
-_SRCS = {
-  "ts/app/hello/main.ts": ":main.ts",
-  "ts/app/server/main.ts": ":server_main.ts",
-  "ts/lib/greeting/greeting.ts": ":greeting.ts",
-  "ts/test/greeting_test.ts": ":greeting_test.ts",
-  "ts/test/server_test.ts": ":server_test.ts",
-}
-
-# ts-build parity: `./repo.sh ts-build` == `deno check --frozen ts/app/hello/main.ts`.
-deno_check(
-  name = "check",
-  deno = "//toolchains:deno-x86_64-linux-musl",
-  deno_dir = "//tsweb:cache[deno-dir]",
-  deno_json = "//:deno.json",
-  deno_lock = "//:deno.lock",
-  entries = [
-    "ts/app/hello/main.ts",
-    "ts/app/server/main.ts",
-  ],
-  node_modules = "//tsweb:cache[node-modules]",
-  srcs = _SRCS,
-  visibility = ["PUBLIC"],
-)
-
-# ts-test parity, part 1: `deno test --frozen ts/test/`.
-deno_test(
-  name = "test",
-  deno = "//toolchains:deno-x86_64-linux-musl",
-  deno_dir = "//tsweb:cache[deno-dir]",
-  deno_json = "//:deno.json",
-  deno_lock = "//:deno.lock",
-  entries = ["ts/test/"],
-  node_modules = "//tsweb:cache[node-modules]",
-  srcs = _SRCS,
-  visibility = ["PUBLIC"],
-)
-
-# ts-test parity, part 2: `deno run --cached-only --frozen ts/app/hello/main.ts`.
-deno_run_check(
-  name = "run_check",
-  deno = "//toolchains:deno-x86_64-linux-musl",
-  deno_dir = "//tsweb:cache[deno-dir]",
-  deno_json = "//:deno.json",
-  deno_lock = "//:deno.lock",
-  entries = ["ts/app/hello/main.ts"],
-  node_modules = "//tsweb:cache[node-modules]",
-  srcs = _SRCS,
-  visibility = ["PUBLIC"],
-)
+_TS_DEPS = [
+  "//ts/app/hello:hello",
+  "//ts/app/server:server",
+  "//ts/lib/greeting:greeting",
+  "//ts/test:test_srcs",
+]
 
 # ts-lint parity: `deno fmt --check` and `deno lint`, scoped to ts/ (deno.json's
 # fmt/lint "include" already covers both ts/ and tsweb/, so each lane checks
@@ -93,25 +21,15 @@ deno_run_check(
 deno_lint(
   name = "fmt_check",
   args = ["fmt", "--check"],
-  deno = "//toolchains:deno-x86_64-linux-musl",
-  deno_dir = "//tsweb:cache[deno-dir]",
-  deno_json = "//:deno.json",
-  deno_lock = "//:deno.lock",
   entries = ["ts/"],
-  node_modules = "//tsweb:cache[node-modules]",
-  srcs = _SRCS,
+  deps = _TS_DEPS,
   visibility = ["PUBLIC"],
 )
 
 deno_lint(
   name = "lint",
   args = ["lint"],
-  deno = "//toolchains:deno-x86_64-linux-musl",
-  deno_dir = "//tsweb:cache[deno-dir]",
-  deno_json = "//:deno.json",
-  deno_lock = "//:deno.lock",
   entries = ["ts/"],
-  node_modules = "//tsweb:cache[node-modules]",
-  srcs = _SRCS,
+  deps = _TS_DEPS,
   visibility = ["PUBLIC"],
 )

@@ -9,9 +9,10 @@
 # staged entry (libexec/cpp-hello, bin/go-hello, bin/python-hello,
 # app/python/lib/*, app/web, ...) is folded in transitively off these four
 # app-level targets' own PackageInfo (see rules/pkg.bzl), including
-# //python/app:hello's own python/lib deps. bin/ names come from each
+# //python/app/hello:hello's own python/lib deps. bin/ names come from each
 # producing target's own `pkg_name` attr (cpp/app/hello:hello,
-# go:hello, python/app:hello all set one - see rules/{cxx,go,python}.bzl).
+# go/app/hello:hello, python/app/hello:hello all set one - see
+# rules/{cxx,go,python}.bzl).
 
 load("//rules:package.bzl", "package", "package_manifest_test", "package_smoke")
 
@@ -20,8 +21,8 @@ package(
   version = "0.1.0",
   deps = [
     "//cpp/app/hello:hello",
-    "//go:hello",
-    "//python/app:hello",
+    "//go/app/hello:hello",
+    "//python/app/hello:hello",
     "//tsweb:site",
   ],
   visibility = ["PUBLIC"],

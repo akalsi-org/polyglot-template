@@ -1,0 +1,20 @@
+# tsweb/app/site's own sources (vite's `root`): index.html, main.tsx (the
+# module entrypoint <script> tags to), style.css. Not a deno_app - main.tsx
+# is built and served by vite, never executed directly by the deno CLI - so
+# it is a deno_library like any other source-set target.
+
+load("//rules:deno.bzl", "deno_library")
+
+deno_library(
+  name = "site",
+  srcs = [
+    "index.html",
+    "main.tsx",
+    "style.css",
+  ],
+  deps = [
+    "//tsweb/lib/app:app",
+    "//tsweb/lib/title:title",
+  ],
+  visibility = ["PUBLIC"],
+)

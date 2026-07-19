@@ -1,0 +1,7 @@
+load("//rules:deno.bzl", "deno_library")
+
+deno_library(
+  name = "app",
+  srcs = ["app.tsx"],
+  visibility = ["PUBLIC"],
+)

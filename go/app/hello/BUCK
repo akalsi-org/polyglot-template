@@ -1,0 +1,13 @@
+# go/app/hello: repo.sh's go-build equivalent
+# (`go build -trimpath -o build/go/$target/hello ./go/app/hello`).
+
+load("//rules:go.bzl", "go_binary")
+
+go_binary(
+  name = "hello",
+  package = "./go/app/hello",
+  srcs = ["main.go"],
+  deps = ["//go/lib/greeting:greeting"],
+  pkg_name = "go-hello",
+  visibility = ["PUBLIC"],
+)

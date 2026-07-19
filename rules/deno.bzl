@@ -51,6 +51,121 @@ load("//config:flags.bzl", "coverage_enabled_flag")
 load("//rules:coverage.bzl", "CoverageInfo")
 load("//rules:pkg.bzl", "PACKAGE_LABELS_ATTR", "PackageEntry", "package_info")
 
+def _native_target() -> str:
+  # Mirrors rules/{cxx,go,python}.bzl's own _native_target(): this repo only
+  # ever builds+runs the host's own musl output triplet, so the deno
+  # toolchain dep's default can be derived the same way instead of every
+  # consumer target hand-writing "//toolchains:deno-x86_64-linux-musl".
+  arch = host_info().arch
+  if arch.is_x86_64:
+    return "x86_64-linux-musl"
+  if arch.is_aarch64:
+    return "aarch64-linux-musl"
+  fail("unsupported native CPU architecture")
+
+_NATIVE_TARGET = _native_target()
+_DENO_TOOLCHAIN = "//toolchains:deno-" + _NATIVE_TARGET
+
+# --- DenoSourcesInfo: a transitive set of (staged_path, artifact) pairs,
+# threaded through deno_library/deno_app deps so every consumer
+# (deno_check/deno_test/deno_run_check/deno_lint/vite_build/deno_graph_check)
+# can fold a target's own sources PLUS its whole transitive dep graph's
+# sources into one staged tree without any hand-written path dict (the old
+# _SRCS dicts in ts/BUCK and tsweb/BUCK - see this file's "artifact-tracking
+# law" doctrine in the module docstring, now generalized: staged_path is
+# derived from ctx.label.package + the source's own short_path, exactly the
+# convention _entries_to_layout's callers used to hand-maintain).
+#
+# Diamond-safe by construction, mirroring rules/pkg.bzl's
+# flatten_merged_package_entries() doc comment: _flatten_deno_sources below
+# builds ONE new tset node with every dep's `sources` tset as a child and
+# traverses THAT once, so a source shared by two deps (e.g. two apps both
+# depending on the same deno_library) surfaces exactly once.
+DenoSourceSet = transitive_set()
+DenoSourcesInfo = provider(fields = ["sources"])
+
+# deno_app additionally carries its own entrypoint's staged path, so
+# consumers (deno_cache's entries, deno_graph_check's entries) can derive the
+# CLI-facing entry path from a deno_app dep instead of repeating it as a
+# string.
+DenoAppInfo = provider(fields = ["entry"])
+
+def _staged_path(ctx: AnalysisContext, src: Artifact) -> str:
+  return ctx.label.package + "/" + src.short_path
+
+def _own_deno_sources(ctx: AnalysisContext, srcs: list) -> list:
+  return [(_staged_path(ctx, src), src) for src in srcs]
+
+def _deno_sources_children(deps: list) -> list:
+  return [d[DenoSourcesInfo].sources for d in deps if DenoSourcesInfo in d]
+
+def _flatten_deno_sources(ctx: AnalysisContext, deps: list) -> dict:
+  """Folds every `deps` DenoSourcesInfo target's transitive sources into one
+  staged_path -> Artifact layout dict, diamond-safe (single traverse() over
+  one merged tset node - see DenoSourceSet's doc comment above)."""
+  children = _deno_sources_children(deps)
+  if not children:
+    return {}
+  merged = ctx.actions.tset(DenoSourceSet, children = children)
+  layout = {}
+  for value in merged.traverse():
+    for staged_path, artifact in value:
+      layout[staged_path] = artifact
+  return layout
+
+# --- deno_library: a source-set-only target (mirrors go_library/py_library's
+# shape) usable for both lib/ and app/ directories - deno_app (below) is the
+# app-flavored sibling that additionally records an entrypoint. Deliberately
+# no layering restriction between the two: an app is a valid dep of a test
+# (this repo runs apps via deno_run_check/deno_test), so both emit the same
+# DenoSourcesInfo provider and visibility alone governs who may depend on
+# whom.
+def _deno_library_impl(ctx: AnalysisContext) -> list[Provider]:
+  own = _own_deno_sources(ctx, ctx.attrs.srcs)
+  tset = ctx.actions.tset(DenoSourceSet, value = own, children = _deno_sources_children(ctx.attrs.deps))
+  return [
+    DefaultInfo(default_outputs = list(ctx.attrs.srcs)),
+    DenoSourcesInfo(sources = tset),
+  ]
+
+_deno_library_rule = rule(
+  impl = _deno_library_impl,
+  attrs = {
+    "deps": attrs.list(attrs.dep(providers = [DenoSourcesInfo]), default = []),
+    "srcs": attrs.list(attrs.source()),
+  },
+)
+
+def deno_library(**kwargs):
+  _deno_library_rule(**kwargs)
+
+# --- deno_app: like deno_library, but `main` names this app's own entrypoint
+# (must also be listed in `srcs`) - recorded via DenoAppInfo for
+# check/run/deno_cache/deno_graph_check targets to reference without
+# repeating the path as a string.
+def _deno_app_impl(ctx: AnalysisContext) -> list[Provider]:
+  if ctx.attrs.main not in ctx.attrs.srcs:
+    fail("{}: `main` ({}) must also be listed in `srcs`".format(ctx.label.raw_target(), ctx.attrs.main))
+  own = _own_deno_sources(ctx, ctx.attrs.srcs)
+  tset = ctx.actions.tset(DenoSourceSet, value = own, children = _deno_sources_children(ctx.attrs.deps))
+  return [
+    DefaultInfo(default_outputs = list(ctx.attrs.srcs)),
+    DenoSourcesInfo(sources = tset),
+    DenoAppInfo(entry = _staged_path(ctx, ctx.attrs.main)),
+  ]
+
+_deno_app_rule = rule(
+  impl = _deno_app_impl,
+  attrs = {
+    "deps": attrs.list(attrs.dep(providers = [DenoSourcesInfo]), default = []),
+    "main": attrs.source(),
+    "srcs": attrs.list(attrs.source()),
+  },
+)
+
+def deno_app(**kwargs):
+  _deno_app_rule(**kwargs)
+
 def _entries_to_layout(deno_json, deno_lock, srcs):
   # `srcs` maps the path the staged layout needs (e.g. "ts/app/hello/main.ts",
   # matching how deno.json's scopes and the deno CLI entry args reference
@@ -68,7 +183,9 @@ def _deno_bin(ctx: AnalysisContext) -> Artifact:
 # --- deno_cache: the one population action, network-permitted, keyed on
 # deno.json + deno.lock (and every source file `deno cache` walks into).
 def _deno_cache_impl(ctx: AnalysisContext) -> list[Provider]:
-  layout = _entries_to_layout(ctx.attrs.deno_json, ctx.attrs.deno_lock, ctx.attrs.srcs)
+  srcs = _flatten_deno_sources(ctx, ctx.attrs.deps)
+  srcs.update(ctx.attrs.srcs)
+  layout = _entries_to_layout(ctx.attrs.deno_json, ctx.attrs.deno_lock, srcs)
   staged = ctx.actions.symlinked_dir(ctx.label.name + "-staged", layout)
 
   deno_dir_out = ctx.actions.declare_output(ctx.label.name + "-deno-dir", dir = True)
@@ -125,16 +242,26 @@ def _deno_cache_impl(ctx: AnalysisContext) -> list[Provider]:
     },
   )]
 
-deno_cache = rule(
+_deno_cache_rule = rule(
   impl = _deno_cache_impl,
   attrs = {
-    "deno": attrs.dep(),
-    "deno_json": attrs.source(),
-    "deno_lock": attrs.source(),
+    "deno": attrs.dep(default = _DENO_TOOLCHAIN),
+    "deno_json": attrs.source(default = "//:deno.json"),
+    "deno_lock": attrs.source(default = "//:deno.lock"),
+    # deps of DenoSourcesInfo targets (deno_library/deno_app) contribute the
+    # bulk of the staged tree without a hand-written path dict; `srcs` stays
+    # available for the rare direct addition/override.
+    "deps": attrs.list(attrs.dep(providers = [DenoSourcesInfo]), default = []),
     "entries": attrs.list(attrs.string()),
-    "srcs": attrs.dict(attrs.string(), attrs.source()),
+    "srcs": attrs.dict(attrs.string(), attrs.source(), default = {}),
   },
 )
+
+def deno_cache(**kwargs):
+  kwargs.setdefault("deno", _DENO_TOOLCHAIN)
+  kwargs.setdefault("deno_json", "//:deno.json")
+  kwargs.setdefault("deno_lock", "//:deno.lock")
+  _deno_cache_rule(**kwargs)
 
 # --- shared plumbing for every network-free consumer of the cache.
 def _stage_and_run(
@@ -148,7 +275,9 @@ def _stage_and_run(
   # _stage_and_run more than once (e.g. deno_test's plain run plus its
   # coverage-collection run - see _deno_test_impl) - every declared output
   # below is otherwise keyed only on ctx.label.name, which would collide.
-  layout = _entries_to_layout(ctx.attrs.deno_json, ctx.attrs.deno_lock, ctx.attrs.srcs)
+  srcs = _flatten_deno_sources(ctx, ctx.attrs.deps)
+  srcs.update(ctx.attrs.srcs)
+  layout = _entries_to_layout(ctx.attrs.deno_json, ctx.attrs.deno_lock, srcs)
   layout.update(extra_layout)
   staged = ctx.actions.symlinked_dir(ctx.label.name + name_suffix + "-staged", layout)
 
@@ -204,13 +333,32 @@ def _stage_and_run(
   return stamp, out_dir
 
 _CONSUMER_ATTRS = {
-  "deno": attrs.dep(),
-  "deno_dir": attrs.dep(),
-  "deno_json": attrs.source(),
-  "deno_lock": attrs.source(),
-  "node_modules": attrs.dep(),
-  "srcs": attrs.dict(attrs.string(), attrs.source()),
+  "deno": attrs.dep(default = _DENO_TOOLCHAIN),
+  "deno_dir": attrs.dep(default = "//tsweb:cache[deno-dir]"),
+  "deno_json": attrs.source(default = "//:deno.json"),
+  "deno_lock": attrs.source(default = "//:deno.lock"),
+  # deps of DenoSourcesInfo targets (deno_library/deno_app) - see
+  # _flatten_deno_sources - fold transitive sources into the staged tree;
+  # `srcs` stays available for the rare direct addition/override.
+  "deps": attrs.list(attrs.dep(providers = [DenoSourcesInfo]), default = []),
+  "node_modules": attrs.dep(default = "//tsweb:cache[node-modules]"),
+  "srcs": attrs.dict(attrs.string(), attrs.source(), default = {}),
 }
+
+# Lane plumbing every consumer macro below injects via kwargs.setdefault, so
+# BUCK declarations shrink to name/entries/srcs/deps - explicit overrides
+# (e.g. a future second deno_cache) still work since setdefault only fills in
+# what the caller omitted. Kept as attrs-level defaults too (see
+# _CONSUMER_ATTRS above) for consumers instantiated directly as rule() calls;
+# the macros exist for the visibility/default_target_platform ergonomics the
+# attrs layer can't express (see rules/cxx.bzl's identical macro doctrine).
+def _consumer_defaults(kwargs):
+  kwargs.setdefault("deno", _DENO_TOOLCHAIN)
+  kwargs.setdefault("deno_dir", "//tsweb:cache[deno-dir]")
+  kwargs.setdefault("deno_json", "//:deno.json")
+  kwargs.setdefault("deno_lock", "//:deno.lock")
+  kwargs.setdefault("node_modules", "//tsweb:cache[node-modules]")
+  return kwargs
 
 # --- deno_check: `deno check --frozen <entry>`, ts-build parity. Build-only
 # (no --cached-only: `deno check` has no such flag, but is network-free once
@@ -219,10 +367,13 @@ def _deno_check_impl(ctx: AnalysisContext) -> list[Provider]:
   stamp, _ = _stage_and_run(ctx, {}, ["check", "--frozen"] + ctx.attrs.entries, "deno_check")
   return [DefaultInfo(default_output = stamp)]
 
-deno_check = rule(
+_deno_check_rule = rule(
   impl = _deno_check_impl,
   attrs = _CONSUMER_ATTRS | {"entries": attrs.list(attrs.string())},
 )
+
+def deno_check(**kwargs):
+  _deno_check_rule(**_consumer_defaults(kwargs))
 
 # --- deno_run_check: `deno run --cached-only --frozen <entry>`, ts-test's
 # "run the app" parity, wired up as a buck2 test.
@@ -234,13 +385,16 @@ def _deno_run_check_impl(ctx: AnalysisContext) -> list[Provider]:
     ExternalRunnerTestInfo(type = "deno", command = [command], run_from_project_root = True),
   ]
 
-deno_run_check = rule(
+_deno_run_check_rule = rule(
   impl = _deno_run_check_impl,
   attrs = _CONSUMER_ATTRS | {
     "entries": attrs.list(attrs.string()),
     "extra_flags": attrs.list(attrs.string(), default = []),
   },
 )
+
+def deno_run_check(**kwargs):
+  _deno_run_check_rule(**_consumer_defaults(kwargs))
 
 # --- deno_test: `deno test --frozen [flags] <paths>`, one buck2 test target
 # per lane's test/ directory.
@@ -280,10 +434,15 @@ _deno_test_rule = rule(
 
 # deno_test is the only deno_* rule with a select()-driven attr default
 # (_coverage_enabled) - see rules/go.bzl's identical go_test macro for why
-# that requires default_target_platform to be set explicitly.
-_DEFAULT_PLATFORM = "//config:x86_64-linux-musl-dbg"
+# that requires default_target_platform to be set explicitly. Derived from
+# _NATIVE_TARGET (not hardcoded to x86_64-linux-musl) for the same reason
+# _DENO_TOOLCHAIN is - this repo also builds/runs natively on aarch64-linux-
+# musl hosts, and rules/{cxx,go,python}.bzl's own _DEFAULT_PLATFORM already
+# follow this pattern.
+_DEFAULT_PLATFORM = "//config:{}-dbg".format(_NATIVE_TARGET)
 
 def deno_test(**kwargs):
+  kwargs = _consumer_defaults(kwargs)
   kwargs.setdefault("default_target_platform", _DEFAULT_PLATFORM)
   # See rules/cxx.bzl's cxx_test macro for why: //:coverage now depends on
   # deno_test targets directly, which need to be reachable from the root
@@ -301,13 +460,16 @@ def _deno_lint_impl(ctx: AnalysisContext) -> list[Provider]:
     ExternalRunnerTestInfo(type = "deno", command = [command], run_from_project_root = True, labels = ["lint"]),
   ]
 
-deno_lint = rule(
+_deno_lint_rule = rule(
   impl = _deno_lint_impl,
   attrs = _CONSUMER_ATTRS | {
     "args": attrs.list(attrs.string()),
     "entries": attrs.list(attrs.string()),
   },
 )
+
+def deno_lint(**kwargs):
+  _deno_lint_rule(**_consumer_defaults(kwargs))
 
 # --- vite_build: `deno run --cached-only --frozen -A npm:vite@<v> build
 # --config <config>`, declaring the built site directory as the output.
@@ -325,7 +487,7 @@ def _vite_build_impl(ctx: AnalysisContext) -> list[Provider]:
   info = package_info(ctx, entries = [PackageEntry(dest = "app/web", artifact = out_dir, kind = "tree", owner = str(ctx.label.raw_target()))])
   return [DefaultInfo(default_output = out_dir), info]
 
-vite_build = rule(
+_vite_build_rule = rule(
   impl = _vite_build_impl,
   attrs = _CONSUMER_ATTRS | {
     "config": attrs.string(),
@@ -333,6 +495,9 @@ vite_build = rule(
     "vite_version": attrs.string(),
   } | PACKAGE_LABELS_ATTR,
 )
+
+def vite_build(**kwargs):
+  _vite_build_rule(**_consumer_defaults(kwargs))
 
 # --- tsconfig_emit / tsconfig_drift_test: deno.json stays authoritative (it
 # is what --frozen deno check/test/vite actually read); these targets derive
@@ -446,6 +611,146 @@ tsconfig_drift_test = rule(
     "deno_json": attrs.source(),
   },
 )
+
+# --- deno_graph_check: drift check between the DECLARED source set (this
+# target's own `srcs` plus its transitive `deps`' DenoSourcesInfo, exactly
+# what every other consumer above stages) and the RESOLVED set `deno info
+# --json --cached-only <entry>` actually walks into for each of `entries`.
+# Catches the failure mode DenoSourcesInfo's diamond-safe folding cannot:
+# a real import the graph author forgot to declare via `deps`/`srcs` at all,
+# which `deno check`/`deno test` would only ever surface as a runtime
+# "module not found" if the file happened to be missing from disk too - here
+# it fails loudly at analysis-adjacent test time instead, before the missing
+# dep ships. Runs cached-only/frozen/network-off like every other consumer
+# (see module docstring); labeled "lint" so `buck2 test //... --labels lint`
+# picks it up alongside deno_lint/tsconfig_drift_test.
+#
+# The checker script's marker-based path fixup ("/proj/" - see below) reuses
+# the exact convention this file's module docstring documents for
+# tools/coverage_merge.py's SF: path fixup: _stage_and_run (and this rule's
+# own staging, which mirrors it) always names the staging directory exactly
+# "proj", so slicing each resolved local path at its last "/proj/" segment
+# recovers the same repo-relative staged path this file declares everywhere
+# else.
+_GRAPH_CHECK_PY = [
+  "import json, sys, os",
+  "from urllib.parse import urlsplit, unquote",
+  "",
+  "infos_dir, declared_path = sys.argv[1], sys.argv[2]",
+  "with open(declared_path) as f:",
+  "    declared = set(json.load(f))",
+  "",
+  "marker = os.sep + 'proj' + os.sep",
+  "",
+  "def to_rel(path):",
+  "    idx = path.find(marker)",
+  "    return path[idx + len(marker):] if idx != -1 else path",
+  "",
+  "missing = []",
+  "seen_modules = 0",
+  "for name in sorted(os.listdir(infos_dir)):",
+  "    with open(os.path.join(infos_dir, name)) as f:",
+  "        info = json.load(f)",
+  "    for m in info.get('modules', []):",
+  "        specifier = m.get('specifier', '')",
+  "        if not specifier.startswith('file://'):",
+  "            continue",
+  "        local = m.get('local')",
+  # `deno info --json` exits 0 even for a local import it cannot resolve as
+  # a JS/TS module (e.g. a vite-only CSS/asset import, which staged
+  # correctly but deno's own module graph refuses to classify) - it records
+  # an "error" with local=null instead of failing outright, so `local`
+  # alone cannot distinguish a real missing file from a real,
+  # already-declared, non-JS asset. Derive the candidate repo-relative path
+  # from `local` when present, or from the specifier URL otherwise, and
+  # check declared membership either way - only a path that is in neither
+  # state is drift.
+  "        seen_modules += 1",
+  "        rel = to_rel(local) if local else to_rel(unquote(urlsplit(specifier).path))",
+  "        if rel not in declared and rel not in ('deno.json', 'deno.lock'):",
+  "            missing.append(rel)",
+  "",
+  "if missing:",
+  "    print('deno_graph_check: resolved local files missing from the declared srcs/deps graph:', file=sys.stderr)",
+  "    for m in sorted(set(missing)):",
+  "        print('  ' + m, file=sys.stderr)",
+  "    print('add the missing file(s) to a deno_library/deno_app srcs= (and wire it into deps=) so the staged tree covers them.', file=sys.stderr)",
+  "    sys.exit(1)",
+  "print('deno_graph_check: ok (%d resolved local modules, %d declared)' % (seen_modules, len(declared)))",
+]
+
+def _deno_graph_check_impl(ctx: AnalysisContext) -> list[Provider]:
+  srcs = _flatten_deno_sources(ctx, ctx.attrs.deps)
+  srcs.update(ctx.attrs.srcs)
+  layout = _entries_to_layout(ctx.attrs.deno_json, ctx.attrs.deno_lock, srcs)
+  staged = ctx.actions.symlinked_dir(ctx.label.name + "-staged", layout)
+
+  declared = ctx.actions.write_json(ctx.label.name + "-declared.json", sorted(layout.keys()))
+  checker = ctx.actions.write(ctx.label.name + "-check.py", _GRAPH_CHECK_PY)
+
+  deno_dir = ctx.attrs.deno_dir[DefaultInfo].default_outputs[0]
+  node_modules = ctx.attrs.node_modules[DefaultInfo].default_outputs[0]
+  deno = _deno_bin(ctx)
+  stamp = ctx.actions.declare_output(ctx.label.name + ".stamp")
+
+  script = ctx.actions.write(
+    ctx.label.name + "-graph.sh",
+    [
+      "#!/bin/sh",
+      "set -eu",
+      "ROOT=$(pwd)",
+      "STAGED=\"$ROOT/$1\"",
+      "DENO_DIR_SRC=\"$ROOT/$2\"",
+      "NODE_MODULES=\"$ROOT/$3\"",
+      "DENO=\"$ROOT/$4/deno\"",
+      "DECLARED=\"$ROOT/$5\"",
+      "CHECKER=\"$ROOT/$6\"",
+      "STAMP=\"$ROOT/$7\"",
+      "shift 7",
+      "chmod +x \"$DENO\"",
+      "WORK=$(mktemp -d)",
+      "trap 'rm -rf \"$WORK\"' EXIT",
+      "mkdir -p \"$WORK/proj\" \"$WORK/denodir\" \"$WORK/infos\"",
+      "cp -RL \"$STAGED\"/. \"$WORK/proj\"/",
+      "chmod -R u+w \"$WORK/proj\"",
+      "cp -R \"$DENO_DIR_SRC\"/. \"$WORK/denodir\"/",
+      "chmod -R u+w \"$WORK/denodir\"",
+      "ln -s \"$NODE_MODULES\" \"$WORK/proj/node_modules\"",
+      "export DENO_DIR=\"$WORK/denodir\"",
+      "export DENO_NO_UPDATE_CHECK=1",
+      "cd \"$WORK/proj\"",
+      "i=0",
+      "for entry in \"$@\"; do",
+      "  i=$((i + 1))",
+      # `deno info` has no --cached-only/--frozen flag (unlike check/test/run
+      # above) - it never touches the network on its own; DENO_NO_UPDATE_CHECK
+      # plus this action having no network access is what keeps it hermetic.
+      "  \"$DENO\" info --json \"$entry\" >\"$WORK/infos/$i.json\"",
+      "done",
+      "cd \"$ROOT\"",
+      "python3 \"$CHECKER\" \"$WORK/infos\" \"$DECLARED\"",
+      "echo ok >\"$STAMP\"",
+    ],
+    is_executable = True,
+  )
+  ctx.actions.run(
+    cmd_args(["/bin/sh", script, staged, deno_dir, node_modules, deno, declared, checker, stamp.as_output()] + ctx.attrs.entries),
+    category = "deno_graph_check",
+    identifier = ctx.label.name,
+  )
+  command = cmd_args(["/bin/sh", "-c", "exit 0"], hidden = [stamp])
+  return [
+    DefaultInfo(default_output = stamp),
+    ExternalRunnerTestInfo(type = "deno_graph_check", command = [command], run_from_project_root = True, labels = ["lint"]),
+  ]
+
+_deno_graph_check_rule = rule(
+  impl = _deno_graph_check_impl,
+  attrs = _CONSUMER_ATTRS | {"entries": attrs.list(attrs.string())},
+)
+
+def deno_graph_check(**kwargs):
+  _deno_graph_check_rule(**_consumer_defaults(kwargs))
 
 # --- smoke_test: reuses an existing, read-only python3 validation script
 # (e.g. tools/tsweb_smoke.py) against a built artifact directory.
