@@ -190,3 +190,9 @@ export_file(
   src = "tools/py_cover.py",
   visibility = ["PUBLIC"],
 )
+
+export_file(
+  name = "deno_store_prune.py",
+  src = "tools/deno_store_prune.py",
+  visibility = ["PUBLIC"],
+)

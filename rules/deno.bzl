@@ -259,7 +259,8 @@ def _deno_cache_impl(ctx: AnalysisContext) -> list[Provider]:
       "DENO=\"$ROOT/$2/deno\"",
       "OUT_DENO_DIR=\"$ROOT/$3\"",
       "OUT_NODE_MODULES=\"$ROOT/$4\"",
-      "shift 4",
+      "PRUNE=\"$ROOT/$5\"",
+      "shift 5",
       "chmod +x \"$DENO\"",
       "WORK=$(mktemp -d)",
       "trap 'rm -rf \"$WORK\"' EXIT",
@@ -280,21 +281,30 @@ def _deno_cache_impl(ctx: AnalysisContext) -> list[Provider]:
       "  chmod -R u+w \"$DENO_DIR\"",
       "fi",
       "cd \"$WORK\"",
-      "NET_SANDBOX=\"\"",
-      "if unshare -rn true 2>/dev/null; then NET_SANDBOX=\"unshare -rn\"; fi",
-      "if ! $NET_SANDBOX \"$DENO\" cache --frozen \"$@\"; then",
-      "  echo 'error: deno cache could not resolve offline from .local/cache/deno - run ./repo.sh bootstrap (graph actions never fetch)' >&2",
+      # run_offline: deno inside a fresh user+net namespace (loopback up,
+      # nothing else) where the host supports it - it physically cannot
+      # fetch. The fallback is LOUD, never silent: on a host without
+      # userns the seed still makes fetching unnecessary, but enforcement
+      # is reduced to that, and the log says so.
+      "if unshare -rn true 2>/dev/null; then",
+      "  run_offline() { unshare -rn sh -c 'ip link set lo up 2>/dev/null || true; exec \"$@\"' offline-sh \"$@\"; }",
+      "else",
+      "  echo 'warning: user+net namespaces unavailable on this host - deno offline enforcement is seed-only (unenforced) for this action' >&2",
+      "  run_offline() { \"$@\"; }",
+      "fi",
+      "if ! run_offline \"$DENO\" cache --frozen \"$@\"; then",
+      "  echo 'error: deno cache failed (deno output above). If it needed the network, the .local/cache/deno seed is stale or incomplete - run ./repo.sh bootstrap. Otherwise fix the reported source/lock problem; graph actions never fetch.' >&2",
       "  exit 1",
       "fi",
-      "rm -rf \"$DENO_DIR/check_cache_v2\" \"$DENO_DIR\"/check_cache_v2-* \\",
-      "  \"$DENO_DIR/dep_analysis_cache_v2\" \"$DENO_DIR\"/dep_analysis_cache_v2-* \\",
-      "  \"$DENO_DIR/node_analysis_cache_v2\" \"$DENO_DIR\"/node_analysis_cache_v2-* \\",
-      "  \"$DENO_DIR/v8_code_cache_v2\" \"$DENO_DIR\"/v8_code_cache_v2-* \\",
-      "  \"$DENO_DIR/fast_check_cache_v2\" \"$DENO_DIR\"/fast_check_cache_v2-* \\",
-      "  \"$DENO_DIR/gen\"",
-      "find \"$DENO_DIR/npm\" -path '*/registry.npmjs.org/*/registry.json' -delete 2>/dev/null || true",
+      # The declared DENO_DIR output is a LOCK PROJECTION, not a copy of
+      # the working dir: the working dir was seeded from untracked host
+      # state, so copying it wholesale would let seed surplus change
+      # artifact contents. tools/deno_store_prune.py copies exactly the
+      # locked npm closure (excluding registry.json metadata and deno's
+      # analysis caches by construction) and fails closed on anything it
+      # does not understand.
       "mkdir -p \"$OUT_DENO_DIR\"",
-      "cp -R \"$DENO_DIR\"/. \"$OUT_DENO_DIR\"/",
+      "python3 \"$PRUNE\" \"$WORK/deno.lock\" \"$DENO_DIR\" \"$OUT_DENO_DIR\"",
       "mkdir -p \"$OUT_NODE_MODULES\"",
       "[ -d \"$WORK/node_modules\" ] && cp -R \"$WORK/node_modules\"/. \"$OUT_NODE_MODULES\"/ || true",
     ],
@@ -302,7 +312,7 @@ def _deno_cache_impl(ctx: AnalysisContext) -> list[Provider]:
   )
 
   ctx.actions.run(
-    cmd_args(["/bin/sh", script, staged, deno, deno_dir_out.as_output(), node_modules_out.as_output()] + _resolve_entries(ctx)),
+    cmd_args(["/bin/sh", script, staged, deno, deno_dir_out.as_output(), node_modules_out.as_output(), ctx.attrs._prune_tool] + _resolve_entries(ctx)),
     category = "deno_cache",
     identifier = ctx.label.name,
     local_only = True,
@@ -321,6 +331,7 @@ _deno_cache_rule = rule(
     "deno": attrs.dep(default = _DENO_TOOLCHAIN),
     "deno_json": attrs.source(default = "//:deno.json"),
     "deno_lock": attrs.source(default = "//:deno.lock"),
+    "_prune_tool": attrs.source(default = "//:deno_store_prune.py"),
     # deps of DenoSourcesInfo targets (deno_library/deno_app) contribute the
     # bulk of the staged tree without a hand-written path dict; `srcs` stays
     # available for the rare direct addition/override.

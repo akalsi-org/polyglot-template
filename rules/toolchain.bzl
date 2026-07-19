@@ -73,6 +73,9 @@ def _download_and_extract(ctx: AnalysisContext, name: str, url: str, sha256: str
     cmd_args(["/bin/sh", stage_archive_script, archive.as_output()]),
     category = "stage_toolchain_archive",
     identifier = name,
+    # Reads the untracked .local/downloads path, which only exists on the
+    # bootstrapped host - never eligible for remote execution.
+    local_only = True,
   )
   out_dir = ctx.actions.declare_output(name + "-extracted", dir = True)
   extract_script = ctx.actions.write(

@@ -175,9 +175,13 @@ jobs:
           # relax that for this step only.
           sudo sysctl -qw kernel.apparmor_restrict_unprivileged_userns=0 || true
           unshare -rn true || { echo "error: unprivileged user+net namespaces unavailable; cannot prove offline replay" >&2; exit 1; }
-          ./repo.sh exec buck2 clean
-          unshare -rn sh -c 'ip link set lo up 2>/dev/null || true; ./repo.sh build'
-          unshare -rn sh -c 'ip link set lo up 2>/dev/null || true; ./repo.sh test'
+          # EVERYTHING - including `buck2 clean`, which is what spawns the
+          # daemon - runs inside ONE namespace invocation. The daemon
+          # executes the actions; a daemon spawned outside the namespace
+          # would give every action full network access while only the
+          # thin client sat sandboxed, silently defeating this assertion.
+          ./repo.sh exec buck2 kill || true
+          unshare -rn sh -c 'ip link set lo up 2>/dev/null || true; ./repo.sh exec buck2 clean && ./repo.sh build && ./repo.sh test'
           ./repo.sh exec buck2 kill
 
       - name: Run repository quality gates
