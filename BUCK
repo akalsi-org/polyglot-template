@@ -79,10 +79,13 @@ load("//rules:file.bzl", "export_file")
 # `config/defs.bzl`'s own docstring claims `-m` works for `//cpp/...`
 # - that claim was not re-verified here for non-test/non-binary targets, but
 # does not hold for this repo's test/binary rules specifically.
-# //:deno-cache - the ONE network-permitted population action shared by the
-# ts/ and tsweb/ lanes (deno cache resolves the whole graph in one pass, so
-# it belongs to neither lane; it lives here at the root as cross-lane
-# infrastructure, next to the deno.json/deno.lock it consumes). deps fold
+# //:deno-cache - the one deno population action shared by the ts/ and
+# tsweb/ lanes (deno cache resolves the whole graph in one pass, so it
+# belongs to neither lane; it lives here at the root as cross-lane
+# infrastructure, next to the deno.json/deno.lock it consumes). It
+# resolves STRICTLY OFFLINE from bootstrap's .local/cache/deno seed
+# (--frozen --cached-only, fail-closed) - graph actions never fetch; see
+# rules/deno.bzl's deno_cache doc comment. deps fold
 # every deno component's DenoSourcesInfo into the staged tree (see
 # rules/deno.bzl's DenoSourcesInfo doc comment); `entries` stays a small
 # explicit list of representative entrypoints (deno cache only needs to walk

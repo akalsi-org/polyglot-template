@@ -84,6 +84,11 @@ Buck2, and doctest are likewise pinned; every non-Buck2 tool above is
 also wired into the Buck2 graph as an in-graph toolchain (see
 `toolchains/lock.bzl`, generated from `tools.lock.toml`), so buck2-driven
 builds never depend on a host-installed compiler, interpreter, or runtime.
+Graph actions never fetch: in-graph toolchains extract from the
+sha256-verified archives bootstrap retains under `.local/downloads/`, and
+deno resolution seeds from bootstrap's `.local/cache/deno` - a cold
+`buck-out` replays the entire graph offline (CI proves this by wiping
+buck-out and rebuilding+testing inside a no-network namespace).
 
 ## Build And Test Graph
 

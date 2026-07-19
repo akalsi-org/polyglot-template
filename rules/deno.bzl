@@ -228,8 +228,17 @@ def _entries_to_layout(deno_json, deno_lock, srcs):
 def _deno_bin(ctx: AnalysisContext) -> Artifact:
   return ctx.attrs.deno[DefaultInfo].default_outputs[0]
 
-# --- deno_cache: the one population action, network-permitted, keyed on
-# deno.json + deno.lock (and every source file `deno cache` walks into).
+# --- deno_cache: the one population action, keyed on deno.json + deno.lock
+# (and every source file `deno cache` walks into). OFFLINE-AFTER-BOOTSTRAP
+# (same doctrine as rules/toolchain.bzl's module docstring): the action
+# seeds its DENO_DIR from bootstrap's own .local/cache/deno (populated by
+# toolchain/bootstrap.sh's `deno cache --frozen` over the same lock) and
+# runs with --cached-only, so it NEVER fetches. The seed lives outside
+# buck2's tracked inputs deliberately; correctness is keyed on deno.lock (a
+# tracked input): --frozen --cached-only fails closed against a stale or
+# incomplete seed ("run ./repo.sh bootstrap"), and the emitted npm store is
+# content-addressed by the lock, so an over-full seed can only speed the
+# action up, never change its declared outputs.
 def _deno_cache_impl(ctx: AnalysisContext) -> list[Provider]:
   srcs = _flatten_deno_sources(ctx, ctx.attrs.deps)
   srcs.update(ctx.attrs.srcs)
@@ -259,8 +268,24 @@ def _deno_cache_impl(ctx: AnalysisContext) -> list[Provider]:
       "mkdir -p \"$WORK/.denodir\"",
       "export DENO_DIR=\"$WORK/.denodir\"",
       "export DENO_NO_UPDATE_CHECK=1",
+      # Seed from bootstrap's cache, then resolve OFFLINE. `deno cache`
+      # has no --cached-only on this pin, so offline is enforced from
+      # outside: where the host supports unprivileged user+net namespaces
+      # (dev boxes, CI after its sysctl step), deno runs inside
+      # `unshare -rn` and physically cannot fetch; elsewhere the seeded
+      # cache makes fetching unnecessary but unenforced. A missing/stale
+      # seed fails closed with an actionable message either way.
+      "if [ -d \"$ROOT/.local/cache/deno\" ]; then",
+      "  cp -R \"$ROOT/.local/cache/deno\"/. \"$DENO_DIR\"/",
+      "  chmod -R u+w \"$DENO_DIR\"",
+      "fi",
       "cd \"$WORK\"",
-      "\"$DENO\" cache --frozen \"$@\"",
+      "NET_SANDBOX=\"\"",
+      "if unshare -rn true 2>/dev/null; then NET_SANDBOX=\"unshare -rn\"; fi",
+      "if ! $NET_SANDBOX \"$DENO\" cache --frozen \"$@\"; then",
+      "  echo 'error: deno cache could not resolve offline from .local/cache/deno - run ./repo.sh bootstrap (graph actions never fetch)' >&2",
+      "  exit 1",
+      "fi",
       "rm -rf \"$DENO_DIR/check_cache_v2\" \"$DENO_DIR\"/check_cache_v2-* \\",
       "  \"$DENO_DIR/dep_analysis_cache_v2\" \"$DENO_DIR\"/dep_analysis_cache_v2-* \\",
       "  \"$DENO_DIR/node_analysis_cache_v2\" \"$DENO_DIR\"/node_analysis_cache_v2-* \\",

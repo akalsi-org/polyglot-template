@@ -1,11 +1,22 @@
-"""First-party toolchain rules: download a pinned archive, extract it with the
-host's tar/unzip, then run the same capability probe toolchain/bootstrap.sh
-and toolchain/doctor.sh already run, producing a stamp artifact that proves
+"""First-party toolchain rules: consume the pinned archive that
+toolchain/bootstrap.sh already fetched and retained at
+.local/downloads/<sha256>-<archive>, extract it with the host's tar/unzip,
+then run the same capability probe toolchain/bootstrap.sh and
+toolchain/doctor.sh already run, producing a stamp artifact that proves
 the extracted tool is actually usable (not just present).
 
-There is no prelude in this project, so buck2's own sha256-verified
-ctx.actions.download_file() is the integrity guard; extraction reuses the
-host's tar/unzip the same way toolchain/bootstrap.sh does.
+OFFLINE-AFTER-BOOTSTRAP: normal graph actions never fetch. Bootstrap owns
+every download; the graph consumes its retained, sha-named archives. The
+archive file deliberately lives OUTSIDE buck2's tracked inputs (.local/ is
+not a buck2 package) - correctness is keyed on the sha256 attr from
+toolchains/lock.bzl (itself drift-guarded against tools.lock.toml by
+tools/lint.py): a pin change re-runs the staging action, and the action
+verifies the file's actual bytes against the pinned sha before use, so a
+stale or corrupt local file can never silently feed the graph. A missing
+archive is an actionable "run ./repo.sh bootstrap" failure, never a
+fallback download - a non-native triple's toolchain targets therefore only
+build on a host whose bootstrap fetched that triple's archives, which
+nothing in the normal graph requires.
 
 Every rule takes a `probe` bool. Extraction always runs (a cross-arch archive
 is still worth downloading and unpacking in-graph), but the capability probe
@@ -34,7 +45,35 @@ def _extract_cmd(kind: str) -> str:
   fail("unsupported archive kind: {}".format(kind))
 
 def _download_and_extract(ctx: AnalysisContext, name: str, url: str, sha256: str, archive_name: str, post_extract: list[str] = []) -> Artifact:
-  archive = ctx.actions.download_file(archive_name, url, sha256 = sha256, is_executable = False)
+  # `url` is deliberately unused here (kept for lock parity/diagnostics):
+  # bootstrap owns fetching. See the module docstring's
+  # OFFLINE-AFTER-BOOTSTRAP block for the correctness story.
+  _ = url
+  archive = ctx.actions.declare_output(archive_name)
+  stage_archive_script = ctx.actions.write(
+    name + "-local-archive.sh",
+    [
+      "#!/bin/sh",
+      "set -eu",
+      "src=\".local/downloads/%s-%s\"" % (sha256, archive_name),
+      "if [ ! -f \"$src\" ]; then",
+      "  echo \"error: $src is missing - run ./repo.sh bootstrap (graph actions never fetch; bootstrap owns downloads)\" >&2",
+      "  exit 1",
+      "fi",
+      "actual=$(sha256sum \"$src\" | cut -d ' ' -f1)",
+      "if [ \"$actual\" != \"%s\" ]; then" % sha256,
+      "  echo \"error: $src sha256 $actual does not match pinned %s - re-run ./repo.sh bootstrap\" >&2" % sha256,
+      "  exit 1",
+      "fi",
+      "cp -- \"$src\" \"$1\"",
+    ],
+    is_executable = True,
+  )
+  ctx.actions.run(
+    cmd_args(["/bin/sh", stage_archive_script, archive.as_output()]),
+    category = "stage_toolchain_archive",
+    identifier = name,
+  )
   out_dir = ctx.actions.declare_output(name + "-extracted", dir = True)
   extract_script = ctx.actions.write(
     name + "-extract.sh",

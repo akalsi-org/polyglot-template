@@ -161,6 +161,25 @@ jobs:
           ./repo.sh exec buck2 test //...
           ./repo.sh exec buck2 kill
 
+      - name: Offline full-graph replay (cold buck-out, no network)
+        run: |
+          set -euo pipefail
+          # The strongest form of the offline-after-bootstrap contract:
+          # wipe every buck2 materialization and replay the ENTIRE graph
+          # (toolchain extraction from .local/downloads archives, deno
+          # resolution from .local/cache/deno, every lane's build+test)
+          # inside a network namespace with no interfaces but loopback.
+          # Any rule that still fetches fails hard here instead of
+          # passing green on a networked runner. Ubuntu 24.04 restricts
+          # unprivileged user namespaces via AppArmor by default; CI may
+          # relax that for this step only.
+          sudo sysctl -qw kernel.apparmor_restrict_unprivileged_userns=0 || true
+          unshare -rn true || { echo "error: unprivileged user+net namespaces unavailable; cannot prove offline replay" >&2; exit 1; }
+          ./repo.sh exec buck2 clean
+          unshare -rn sh -c 'ip link set lo up 2>/dev/null || true; ./repo.sh build'
+          unshare -rn sh -c 'ip link set lo up 2>/dev/null || true; ./repo.sh test'
+          ./repo.sh exec buck2 kill
+
       - name: Run repository quality gates
         run: |
           ./repo.sh lint
