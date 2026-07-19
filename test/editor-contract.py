@@ -33,8 +33,8 @@ def main() -> None:
   assert settings["clangd.arguments"] == ["--compile-commands-dir=${workspaceFolder}"]
   assert settings["deno.enable"] is True
   assert settings["deno.enablePaths"] == ["./ts", "./tsweb"]
-  assert settings["deno.config"] == "${workspaceFolder}/deno.json"
-  assert settings["deno.cache"] == "${workspaceFolder}/.local/cache/deno"
+  assert settings["deno.config"] == "./deno.json"
+  assert settings["deno.cache"] == "./.local/cache/deno"
   deno_config = json.loads((ROOT / "deno.json").read_text())
   assert deno_config["fmt"]["indentWidth"] == 2
   assert deno_config["fmt"]["useTabs"] is False
@@ -59,7 +59,10 @@ def main() -> None:
   assert settings["python.analysis.extraPaths"] == [
     "${workspaceFolder}/python/lib",
     "${workspaceFolder}/python/app",
+    "${workspaceFolder}/python/test",
   ]
+  assert (ROOT / "python/test/pyfast_test_ext/__init__.pyi").is_file()
+  assert (ROOT / "python/test/pyfast_test_ext/py.typed").is_file()
   assert settings["python.defaultInterpreterPath"] == "${workspaceFolder}/.local/bin/python"
   assert settings["python.envFile"] == "${workspaceFolder}/.vscode/python.env"
   assert settings["python.terminal.useEnvFile"] is True
@@ -84,7 +87,7 @@ def main() -> None:
   assert 'format [--check]' in repo_sh
   assert 'PYTHONPATH="$build_python:$ROOT/python/lib:$ROOT/python/app' in repo_sh
   assert (ROOT / ".vscode" / "go").stat().st_mode & 0o111
-  assert settings["deno.path"] == "${workspaceFolder}/.local/bin/deno"
+  assert settings["deno.path"] == "./.local/bin/deno"
   assert settings["buck2-lsp-adapter.buck2Path"] == "${workspaceFolder}/.local/bin/buck2"
 
   tasks = json.loads((ROOT / ".vscode" / "tasks.json").read_text())

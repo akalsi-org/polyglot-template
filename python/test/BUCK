@@ -13,6 +13,10 @@ py_extension(
   package = "pyfast_test_ext",
   init_src = "extension_init.py",
   srcs = ["pyfast_test_ext.c"],
+  stubs = [
+    "pyfast_test_ext/__init__.pyi",
+    "pyfast_test_ext/py.typed",
+  ],
 )
 
 py_tests(

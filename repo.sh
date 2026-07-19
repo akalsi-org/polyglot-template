@@ -86,6 +86,48 @@ target_platform_args() {
   printf -- '--target-platforms\n//config:%s-opt\n' "$target"
 }
 
+stage_python_extensions() {
+  local target stage parent tmp query_out query_err output_out output_err entry output name
+  local -a plat=("$@") extensions outputs
+  target=$("$ROOT/toolchain/target.sh")
+  stage="$ROOT/build/python/$target/lib"
+  parent=$(dirname -- "$stage")
+  query_out=$(mktemp)
+  query_err=$(mktemp)
+  if ! "$POLYGLOT_BUCK2" uquery "kind('^_py_extension_rule$', '//...')" >"$query_out" 2>"$query_err"; then
+    cat "$query_err" >&2
+    rm -f "$query_out" "$query_err"
+    return 1
+  fi
+  mapfile -t extensions < <(grep '^root//' "$query_out")
+  rm -f "$query_out" "$query_err"
+  if ((${#extensions[@]} == 0)); then
+    rm -rf "$stage"
+    return 0
+  fi
+  output_out=$(mktemp)
+  output_err=$(mktemp)
+  if ! "$POLYGLOT_BUCK2" build "${plat[@]}" --show-output "${extensions[@]}" >"$output_out" 2>"$output_err"; then
+    cat "$output_err" >&2
+    rm -f "$output_out" "$output_err"
+    return 1
+  fi
+  mapfile -t outputs < <(awk '{ print $2 }' "$output_out")
+  rm -f "$output_out" "$output_err"
+  ((${#outputs[@]} == ${#extensions[@]})) || { printf 'error: extension output query returned an incomplete result\n' >&2; return 1; }
+  mkdir -p "$parent"
+  tmp=$(mktemp -d "$parent/.lib.tmp.XXXXXX")
+  for output in "${outputs[@]}"; do
+    for entry in "$ROOT/$output"/*; do
+      name=$(basename -- "$entry")
+      [[ -e "$tmp/$name" ]] && { printf 'error: Python extension package collision at %s\n' "$name" >&2; rm -rf "$tmp"; return 1; }
+    done
+    cp -R "$ROOT/$output/." "$tmp"
+  done
+  rm -rf "$stage"
+  mv "$tmp" "$stage"
+}
+
 # Package publication is intentionally Buck2-owned. A catalog entry is
 # release metadata, not evidence that this checkout knows how to build its
 # executable payload: only a //packages:<name> package() target supplies that
@@ -238,6 +280,7 @@ case "$command" in
     ((${#buildables[@]} > 0)) || { cat "$uquery_err" >&2; rm -f "$uquery_err"; printf 'error: no buildable targets discovered\n' >&2; exit 1; }
     rm -f "$uquery_err"
     "$POLYGLOT_BUCK2" build "${plat[@]}" "${buildables[@]}"
+    stage_python_extensions "${plat[@]}"
     ;;
   coverage)
     (($# == 0)) || { printf 'usage: ./repo.sh coverage\n' >&2; exit 2; }
@@ -305,22 +348,11 @@ case "$command" in
     ;;
   python-build)
     setup_environment
-    target=$("$ROOT/toolchain/target.sh")
     "$POLYGLOT_BUCK2" build //python/app/hello:hello
-    # //python/app/hello:hello's own DefaultInfo output is a loader-wrapped
-    # launcher script, not the built fastbytes package - stage that
-    # separately (a cache hit; //python/app/hello:hello already built it
-    # transitively) at build/python/<target>/lib so repo.sh's direct
-    # `python` passthrough (whose PYTHONPATH is
-    # build/python/<target>/lib:python/lib:python/app, in that precedence
-    # order) and the editor's python.env resolve the compiled extension
-    # rather than its uncompiled source, matching the layout
-    # tools/python_build.py used to stage by hand.
-    fastbytes_out=$("$POLYGLOT_BUCK2" build --show-output //python/lib/fastbytes:fastbytes 2>/dev/null | awk '{ print $2 }')
-    stage="$ROOT/build/python/$target/lib"
-    mkdir -p "$stage"
-    rm -rf "$stage/fastbytes"
-    cp -R "$ROOT/$fastbytes_out/fastbytes" "$stage/fastbytes"
+    # The application target brings in its Python dependencies, while this
+    # generic helper materializes every declared extension for direct runtime
+    # imports under the target-specific PYTHONPATH root.
+    stage_python_extensions
     [[ ${POLYGLOT_DEFER_COMPDB:-0} == 1 ]] || "$ROOT/repo.sh" compile-commands "${POLYGLOT_CPP_PROFILE:-dbg}"
     ;;
   python-test)

@@ -45,8 +45,10 @@ indentation and project naming conventions.
 | Run Python | `./repo.sh python <args...>` |
 
 Do not use host `python`, `pip`, or a virtual environment for repository work.
-`python-build` stages native extension outputs under `build/python/<target>/lib`
-and updates the canonical compilation database. Keep pure Python tests under
+`build` and `python-build` stage every declared native extension under
+`build/python/<target>/lib`; `python-build` also updates the canonical compilation
+database. Keep each extension's `.pyi` stub and `py.typed` marker in a checked-in
+source root so editor typing stays independent of the host target. Keep pure Python tests under
 `python/test/` as top-level `test_*` functions; `py_tests()` discovers them
 with the repository's readable stdlib-only runner.
 

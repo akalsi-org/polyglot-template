@@ -12,10 +12,13 @@ the Python source and typed native-extension stub roots.
 Pylance intentionally does not search `build/python/<target>/lib`: that
 directory contains a CPU-specific compiled extension, and permanently listing
 both supported architectures can make an old foreign artifact win import
-resolution. Use **Python: build native extension** followed by **Python: run
-active file with native extension** whenever execution must load the compiled
-module. That task invokes `./repo.sh python`, which selects the current host
-target and places only its staged extension first on `PYTHONPATH`.
+resolution. Instead, every native extension keeps its `.pyi` stub and `py.typed`
+marker in a checked-in Python source root; Pylance reads those architecture-neutral
+paths. `./repo.sh build` stages every declared native extension for the current
+host target. Use **Python: build native extension** as the focused shortcut,
+then **Python: run active file with native extension** whenever execution must
+load a compiled module. That task invokes `./repo.sh python`, which selects the
+current host target and places the staged extensions first on `PYTHONPATH`.
 
 Use **C++: refresh compile commands** after C/C++ graph changes. The remaining
 lane tasks use the same pinned command surface as CI; they are quick entry

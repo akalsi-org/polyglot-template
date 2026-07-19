@@ -27,7 +27,8 @@
   },
   "python.analysis.extraPaths": [
     "${workspaceFolder}/python/lib",
-    "${workspaceFolder}/python/app"
+    "${workspaceFolder}/python/app",
+    "${workspaceFolder}/python/test"
   ],
   "python.defaultInterpreterPath": "${workspaceFolder}/.local/bin/python",
   "python.envFile": "${workspaceFolder}/.vscode/python.env",
