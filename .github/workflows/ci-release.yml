@@ -83,6 +83,17 @@ jobs:
             buck-out/v2/cache
           key: polyglot-buck2-v1-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('tools.lock.toml', 'toolchains/**', 'rules/**', 'platforms/**', '.buckconfig') }}
 
+      - name: Enable unprivileged user namespaces
+        run: |
+          # rules/deno.bzl's deno_cache runs deno inside `unshare -rn` and
+          # FAILS CLOSED when user+net namespaces are unavailable - Ubuntu
+          # 24.04 restricts unprivileged userns via AppArmor by default, so
+          # every buck2 invocation that can build //:deno-cache (the main
+          # `buck2 test //...` pass, quality gates, packaging) needs this
+          # relaxed up front, not just the offline-replay step.
+          sudo sysctl -qw kernel.apparmor_restrict_unprivileged_userns=0 || true
+          unshare -rn true || { echo "error: unprivileged user+net namespaces unavailable on this runner" >&2; exit 1; }
+
       - name: Bootstrap and validate pinned tools
         run: |
           ./repo.sh bootstrap
