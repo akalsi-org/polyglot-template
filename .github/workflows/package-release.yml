@@ -1,0 +1,55 @@
+# Package release: fires ONLY on packages/<name>/v<semver> tags, so
+# branch/PR runs of ci-release.yml never show a skipped release job. Runs the same
+# reusable verify matrix (which, on a tag ref, also assembles + smokes +
+# uploads the package archives), then publishes the GitHub Release.
+name: package-release
+
+on:
+  push:
+    tags: ["packages/*/v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CI: "1"
+
+jobs:
+  verify:
+    uses: ./.github/workflows/verify.yml
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/packages/')
+    needs: verify
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Check out release metadata
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Download verified package assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: package-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Publish package-specific GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./repo.sh release-notes "$GITHUB_REF_NAME" > release-notes.md
+          gh release create "$GITHUB_REF_NAME" artifacts/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file release-notes.md \
+            --verify-tag

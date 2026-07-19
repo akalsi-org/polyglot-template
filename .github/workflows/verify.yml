@@ -1,0 +1,243 @@
+# Reusable verification matrix: called by ci-release.yml (branch/PR pushes) and
+# package-release.yml (packages/*/v* tags). One definition, two callers -
+# the tag-conditional package steps inside self-skip on branch refs, so
+# callers need no inputs. Artifacts uploaded here attach to the CALLER's
+# run, which is what lets package-release.yml's release job download them.
+name: verify
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  CI: "1"
+
+jobs:
+  verify:
+    name: verify ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-linux-musl
+          - runner: ubuntu-24.04-arm
+            target: aarch64-linux-musl
+    steps:
+      - name: Check out the exact revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Assert native CPU and musl output triplet
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(./repo.sh target)" = "${{ matrix.target }}"
+
+      - name: Restore exact pinned toolchain
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            .local/downloads
+            .local/toolchain/${{ matrix.target }}
+          key: polyglot-tools-v1-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('tools.lock.toml', 'toolchain/**') }}
+
+      - name: Restore exact Deno dependency graph
+        # This caches toolchain/bootstrap.sh's own `deno cache --frozen` warm
+        # (.local/cache/deno + node_modules), which repo.sh's `deno`/`ts-*`/
+        # `tsweb-*` direct passthroughs and Buck2's action-hidden inputs both
+        # still exercise outside the graph. It is independent of buck2's own
+        # deno_cache action (rules/deno.bzl), which populates a
+        # lockfile-keyed, buck-out-scoped DENO_DIR per build action and is
+        # already covered by the Buck2 toolchain cache step below.
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            .local/cache/deno
+            node_modules
+          key: polyglot-deno-v1-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('tools.lock.toml', 'deno.lock') }}
+
+      - name: Restore exact Buck2 toolchain cache
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          # buck-out/v2/art holds the materialized (downloaded + extracted) toolchain
+          # trees that back //toolchains:native (the host-native triple's toolchain
+          # targets only - see toolchains/defs.bzl - so each matrix leg here
+          # materializes just its own triple, not both); buck-out/v2/cache holds
+          # buck2's action and materializer state db, which buck2 consults
+          # alongside the artifacts to recognize them as up to date and skip
+          # re-downloading them. Both are required together for a cache hit to
+          # also mean zero network transfer. buck-out/v2/log, buck-out/v2/tmp,
+          # and buck-out/v2/forkserver are per-invocation scratch state and are
+          # deliberately left uncached.
+          path: |
+            buck-out/v2/art
+            buck-out/v2/cache
+          key: polyglot-buck2-v1-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('tools.lock.toml', 'toolchains/**', 'rules/**', 'platforms/**', '.buckconfig') }}
+
+      - name: Enable unprivileged user namespaces
+        run: |
+          # rules/deno.bzl's deno_cache runs deno inside `unshare -rn` and
+          # FAILS CLOSED when user+net namespaces are unavailable - Ubuntu
+          # 24.04 restricts unprivileged userns via AppArmor by default, so
+          # every buck2 invocation that can build //:deno-cache (the main
+          # `buck2 test //...` pass, quality gates, packaging) needs this
+          # relaxed up front, not just the offline-replay step.
+          sudo sysctl -qw kernel.apparmor_restrict_unprivileged_userns=0 || true
+          unshare -rn true || { echo "error: unprivileged user+net namespaces unavailable on this runner" >&2; exit 1; }
+
+      - name: Bootstrap and validate pinned tools
+        run: |
+          ./repo.sh bootstrap
+          ./repo.sh bootstrap --offline
+          ./repo.sh doctor --deep
+
+      - name: Buck2 toolchain smoke and full graph test
+        run: |
+          set -euo pipefail
+          ./repo.sh exec buck2 build //toolchains:native
+          # The second build below should be a full cache hit against the toolchain
+          # tree restored or produced above. Assert it performed no network transfer
+          # by grepping *this specific invocation's own* stderr for a nonzero
+          # download (buck2 writes its whole build status, including any "Network:
+          # ... Down: <bytes>" line, to stderr - confirmed empirically, redirection
+          # here does not depend on a tty) rather than `buck2 log summary`.
+          # `buck2 log summary`'s "Total downloaded" figure is NOT scoped to the
+          # selected invocation despite its header naming that invocation's build
+          # ID: proven empirically with a throwaway `--isolation-dir`, cold (no
+          # prior state) - build #1 of //toolchains:native downloaded 178MiB,
+          # build #2 (immediately after, 0 network per its own inline status line)
+          # still reported "Total downloaded: 178MiB" from `buck2 log summary`
+          # with no args and even with an explicit `--trace-id` pinned to build
+          # #2's own build ID. The figure appears to accumulate over the whole
+          # daemon session rather than reset per command. Since CI always starts
+          # from a fresh daemon and this is the first buck2 invocation of the job,
+          # `buck2 log summary | grep -q 'Total downloaded: 0B'` would have failed
+          # on every real cold-cache run (build #1's real download bleeding into
+          # build #2's summary) even though build #2 itself performed no network
+          # transfer - this was never caught because the original dry-run of this
+          # step used an already-warm cache, where build #1 was also a 0B no-op.
+          #
+          # The per-invocation "Network: Up: X  Down: Y" status line itself is
+          # also empirically NOT always printed on a true no-op: it only appears
+          # once buck2's console does at least one progress refresh during the
+          # command (e.g. because some action or file-watch event fired), which a
+          # near-instant, perfectly quiet no-op build can finish before reaching -
+          # observed directly: an immediate, ambient-noise-free repeat build
+          # printed only "Build ID: ..." / "BUILD SUCCEEDED" with no Network line
+          # at all, while a real download always printed the line with its actual
+          # byte count regardless of ambient noise. So the correct assertion is
+          # "no line reports a nonzero download", not "a specific zero-download
+          # line is present" - the latter would false-fail on a real CI runner's
+          # quiet, single-tenant, freshly-booted VM, which is exactly the shape
+          # a cache-hit second build takes there. Verified both directions with
+          # the same throwaway isolation dir: a forced real re-download match
+          # 'Down: [1-9]' as expected, and both a quiet and a file-watch-noisy
+          # true no-op do not match it.
+          #
+          # Scoped to //toolchains:native (this leg's own triple only, not both
+          # x86_64 and aarch64) rather than //toolchains/... so the cache payload
+          # restored/saved per leg above is roughly half of what building every
+          # triple's toolchain would need.
+          # This step opts into `set -euo pipefail` above, but bash exempts
+          # any command negated with a leading `!` from errexit - `! grep -q
+          # ...` would return 0 (and the step would report success) even when
+          # the grep DID match, i.e. even when a real network download
+          # occurred. Use an explicit if/then instead so a nonzero download
+          # fails the step for real.
+          ./repo.sh exec buck2 build //toolchains:native 2> buck2-second-build.log
+          cat buck2-second-build.log
+          if grep -q 'Down: [1-9]' buck2-second-build.log; then
+            echo "error: expected a cache-hit build with 0B network downloaded, but a nonzero download was recorded" >&2
+            exit 1
+          fi
+          rm -f buck2-second-build.log
+          # buck2 test //... builds and runs every buildable target's test in one
+          # pass. In this graph that includes each lane's lint-as-test targets
+          # (go:gofmt_check, go:go_vet, ts:fmt_check, ts:lint, tsweb:fmt_check,
+          # tsweb:lint, python/test:compileall) alongside the real tests, plus
+          # //packages:manifest-validate and //tsweb:tsconfig_drift - there is no
+          # separate "lint" verb in this buck2 graph (see the root BUCK file's
+          # header comment for why), so this one command is buck2's equivalent
+          # of "test //... and lint //...". It does not touch the non-native
+          # toolchain triple, since nothing else in the graph depends on it.
+          ./repo.sh exec buck2 test //...
+          ./repo.sh exec buck2 kill
+
+      - name: Offline full-graph replay (cold buck-out, no network)
+        run: |
+          set -euo pipefail
+          # The strongest form of the offline-after-bootstrap contract:
+          # wipe every buck2 materialization and replay the ENTIRE graph
+          # (toolchain extraction from .local/downloads archives, deno
+          # resolution from .local/cache/deno, every lane's build+test)
+          # inside a network namespace with no interfaces but loopback.
+          # Any rule that still fetches fails hard here instead of
+          # passing green on a networked runner. Ubuntu 24.04 restricts
+          # unprivileged user namespaces via AppArmor by default; CI may
+          # relax that for this step only.
+          sudo sysctl -qw kernel.apparmor_restrict_unprivileged_userns=0 || true
+          unshare -rn true || { echo "error: unprivileged user+net namespaces unavailable; cannot prove offline replay" >&2; exit 1; }
+          # EVERYTHING - including `buck2 clean`, which is what spawns the
+          # daemon - runs inside ONE namespace invocation. The daemon
+          # executes the actions; a daemon spawned outside the namespace
+          # would give every action full network access while only the
+          # thin client sat sandboxed, silently defeating this assertion.
+          ./repo.sh exec buck2 kill || true
+          unshare -rn sh -c 'ip link set lo up 2>/dev/null || true; ./repo.sh exec buck2 clean && ./repo.sh build && ./repo.sh test'
+          ./repo.sh exec buck2 kill
+
+      - name: Run repository quality gates
+        run: |
+          ./repo.sh lint
+          ./repo.sh package-validate
+          ./repo.sh build
+          ./repo.sh test
+
+      - name: Build and run C++ profiles
+        run: |
+          ./repo.sh cpp-build dbg
+          ./repo.sh cpp-run dbg
+          ./repo.sh cpp-build opt
+          ./repo.sh cpp-run opt
+
+      - name: Exercise pinned Python runtime
+        run: ./repo.sh python -I -c 'import ctypes, hashlib, sqlite3, ssl, sys, zlib; print(sys.version)'
+
+      - name: Resolve tagged package
+        if: startsWith(github.ref, 'refs/tags/packages/')
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          package=${GITHUB_REF_NAME#packages/}
+          package=${package%%/v*}
+          printf 'name=%s\n' "$package" >> "$GITHUB_OUTPUT"
+
+      - name: Assemble and verify tagged package
+        if: startsWith(github.ref, 'refs/tags/packages/')
+        shell: bash
+        run: |
+          set -euo pipefail
+          package=${{ steps.package.outputs.name }}
+          ./repo.sh package "$package" opt
+          ./repo.sh release-check "$package" "$GITHUB_REF_NAME"
+          archive=$(find dist -maxdepth 1 -type f -name "$package-*-${{ matrix.target }}.tar.gz" -print -quit)
+          test -n "$archive"
+          sha256sum "$archive" > "$archive.sha256"
+
+      - name: Upload verified package asset
+        if: startsWith(github.ref, 'refs/tags/packages/')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: package-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          if-no-files-found: error
+          compression-level: 0
