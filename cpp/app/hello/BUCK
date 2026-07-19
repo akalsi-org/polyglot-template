@@ -1,12 +1,9 @@
-# Mirrors cpp/app/hello/build.toml's [[targets]] "hello" executable.
-
 load("//rules:cxx.bzl", "cxx_binary")
 
 cxx_binary(
   name = "hello",
   srcs = ["main.cc"],
-  include_dirs = ["cpp/lib"],
-  deps = ["//cpp/adapters:example-vendor"],
+  deps = ["//cpp/lib/example:example"],
   pkg_name = "cpp-hello",
   visibility = ["PUBLIC"],
 )

@@ -95,7 +95,7 @@ def _logical_prefix(ctx: AnalysisContext) -> str:
   if pkg.startswith(_LIB_ROOT + "/"):
     return pkg[len(_LIB_ROOT) + 1:]
 
-  # Targets outside cpp/lib (cpp/app, cpp/test, cpp/adapters, ...) have no
+  # Targets outside cpp/lib (cpp/app, cpp/test, ...) have no
   # cpp/lib-relative logical path of their own; falling back to the full
   # package path still gives a stable, collision-free logical prefix for any
   # cxx_library that might someday live outside cpp/lib, without special-
@@ -327,37 +327,30 @@ _cxx_library_rule = rule(
   } | _TOOLCHAIN_ATTRS | _PROFILE_ATTRS | PACKAGE_LABELS_ATTR,
 )
 
-# --- cxx_adapter: one precompiled object, mirroring tools/cpp_graph.py's
-# load_adapter() for a single native-dependency adapter action (this repo's
-# fragments currently declare exactly one action each; cpp/adapters/BUCK
-# hand-declares one cxx_adapter per fragment action, since Starlark cannot
-# parse the JSON fragment at analysis time the way cpp_graph.py does).
+# --- cxx_object: one precompiled object with no include tree of its own
+# (nothing can include headers "from" a lone object). Sole current use is
+# cpp/test's shared doctest runner (doctest = True): built once per
+# configuration and reused by every cxx_test via the _runner attr.
 
-def _cxx_adapter_impl(ctx: AnalysisContext) -> list[Provider]:
+def _cxx_object_impl(ctx: AnalysisContext) -> list[Provider]:
   tools = _toolchain_tools(ctx)
   include_dirs, hdrs, _objects, _gcnos, tree_children = _merge_deps(ctx.attrs.deps)
   hdrs = list(ctx.attrs.hdrs) + hdrs
-  # cxx_adapter mirrors a hand-declared vendor action (see this rule's own
-  # module doc comment below) - it doesn't stage its own hdrs into an
-  # include-tree node the way cxx_library does, but still folds any deps'
-  # trees forward so a future cxx_adapter with cxx_library deps works.
+  # Deps' include trees still fold forward so a cxx_object with cxx_library
+  # deps compiles against and re-exports them correctly.
   include_args = _include_args(ctx, tree_children, include_dirs)
-  obj, gcno = _compile_one(ctx, tools, ctx.attrs.src, include_args, hdrs, ctx.attrs.compile_flags, ctx.attrs.extra_args, ctx.attrs.doctest, ctx.attrs.name)
-  adapter_tree_tset = ctx.actions.tset(IncludeTreeSet, children = tree_children) if tree_children else None
+  obj, gcno = _compile_one(ctx, tools, ctx.attrs.src, include_args, hdrs, ctx.attrs.compile_flags, [], ctx.attrs.doctest, ctx.attrs.name)
+  tree_tset = ctx.actions.tset(IncludeTreeSet, children = tree_children) if tree_children else None
   return [
     DefaultInfo(default_outputs = [obj]),
-    CxxInfo(include_dirs = [], hdrs = hdrs, objects = [obj], gcnos = [gcno] if gcno != None else [], include_trees = adapter_tree_tset),
+    CxxInfo(include_dirs = [], hdrs = hdrs, objects = [obj], gcnos = [gcno] if gcno != None else [], include_trees = tree_tset),
   ]
 
-# Also used for the shared doctest runner object (cpp/test/BUCK,
-# doctest = True): a single precompiled object is the common shape shared by
-# tools/cpp_graph.py's adapter actions and its test-framework runner action.
-_cxx_adapter_rule = rule(
-  impl = _cxx_adapter_impl,
+_cxx_object_rule = rule(
+  impl = _cxx_object_impl,
   attrs = {
     "deps": attrs.list(attrs.dep(providers = [CxxInfo]), default = []),
     "doctest": attrs.bool(default = False),
-    "extra_args": attrs.list(attrs.string(), default = []),
     "hdrs": attrs.list(attrs.source(), default = []),
     "src": attrs.source(),
   } | _TOOLCHAIN_ATTRS | _PROFILE_ATTRS,
@@ -529,9 +522,9 @@ def cxx_library(**kwargs):
   kwargs.setdefault("default_target_platform", _DEFAULT_PLATFORM)
   _cxx_library_rule(**kwargs)
 
-def cxx_adapter(**kwargs):
+def cxx_object(**kwargs):
   kwargs.setdefault("default_target_platform", _DEFAULT_PLATFORM)
-  _cxx_adapter_rule(**kwargs)
+  _cxx_object_rule(**kwargs)
 
 def cxx_binary(**kwargs):
   kwargs.setdefault("default_target_platform", _DEFAULT_PLATFORM)

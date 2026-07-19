@@ -1,19 +1,10 @@
-# example.cc is compiled through the adapter mechanism (see
-# cpp/adapters/BUCK), mirroring cpp/adapters/example-vendor.json, which
-# treats it as third-party vendor code without its own build file. Only
-# export_file() targets live here so cpp/adapters/BUCK and any consumer of
-# example.hh can reference these sources across the package boundary.
+# Minimal cxx_library: consumers include "example/example.hh" via the
+# staged cpp/lib include tree (see rules/cxx.bzl's IncludeTreeSet).
+load("//rules:cxx.bzl", "cxx_library")
 
-load("//rules:file.bzl", "export_file")
-
-export_file(
-  name = "example.cc",
-  src = "example.cc",
-  visibility = ["//cpp/..."],
-)
-
-export_file(
-  name = "example.hh",
-  src = "example.hh",
+cxx_library(
+  name = "example",
+  srcs = ["example.cc"],
+  hdrs = ["example.hh"],
   visibility = ["//cpp/..."],
 )

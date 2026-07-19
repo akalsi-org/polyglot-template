@@ -19,7 +19,7 @@ Every packaging-aware rule must also add `labels` (default []) to its attrs
 PackageInfo) when "no-package" is one of that target's own labels, without
 requiring the rule impl itself to special-case anything.
 
-Test rules and cxx_adapter are deliberately NOT packaging-aware: they don't
+Test rules and cxx_object are deliberately NOT packaging-aware: they don't
 call package_info() at all (not even with empty entries/needs), and don't
 carry the `labels` attr - a target that will never be staged into a package
 has no reason to participate in this contract.
