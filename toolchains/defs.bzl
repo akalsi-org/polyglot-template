@@ -49,7 +49,7 @@ def define_toolchains():
       visibility = ["PUBLIC"],
     )
 
-  for tool, probe_arg in (("go", "version"), ("deno", "--version"), ("ninja", "--version")):
+  for tool, probe_arg in (("go", "version"), ("deno", "--version")):
     for target, fields in TOOLCHAINS[tool].items():
       version_probe_toolchain(
         name = tool + "-" + target,
@@ -74,7 +74,7 @@ def define_toolchains():
     )
 
   # //toolchains:native: only the host-native triple's toolchain targets
-  # (6 of the 12 defined above - every one of //toolchains:'s tool kinds,
+  # (5 of the 10 defined above - every one of //toolchains:'s tool kinds,
   # once, for native_target only). Each CI matrix leg only ever needs its
   # own triple (see .github/workflows/ci-release.yml), so building this
   # group instead of //toolchains/... halves the cache payload materialized
@@ -88,7 +88,6 @@ def define_toolchains():
       ":python-" + native_target,
       ":go-" + native_target,
       ":deno-" + native_target,
-      ":ninja-" + native_target,
       ":doctest-" + native_target,
     ],
     visibility = ["PUBLIC"],

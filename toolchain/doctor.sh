@@ -57,13 +57,6 @@ deep_validate_deno() {
   }
 }
 
-deep_validate_ninja() {
-  local install=$1 expected=$2 version=$3
-  [[ $("$install/$expected" --version) == "$version" ]] || {
-    printf 'invalid: Ninja version mismatch\n' >&2; return 1;
-  }
-}
-
 deep_validate_go() {
   local install=$1 expected=$2 version=$3
   [[ $("$install/$expected" version | awk '{ print $3 }') == "go$version" ]] || {
@@ -94,7 +87,6 @@ deep_validate() {
     python:*) deep_validate_python "$install" "$expected" ;;
     gcc-musl:*) deep_validate_gcc "$install" "$expected" ;;
     deno:*) deep_validate_deno "$install" "$expected" "$version" ;;
-    ninja:*) deep_validate_ninja "$install" "$expected" "$version" ;;
     go:*) deep_validate_go "$install" "$expected" "$version" ;;
     doctest:*) deep_validate_doctest "$install" "$expected" ;;
     buck2:*) deep_validate_buck2 "$install" "$expected" ;;

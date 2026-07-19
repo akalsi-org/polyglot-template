@@ -6,7 +6,7 @@
 
 [build]
   # A first-party platform target; see platforms/BUCK. Required for BXL actions
-  # such as toolchains/compdb.bxl, which need a concrete execution platform to
+  # such as bxl/compdb.bxl, which need a concrete execution platform to
   # bind bxl_actions() to (buck2 otherwise has no default when there is no
   # prelude to supply one).
   execution_platforms = root//platforms:execution_platforms

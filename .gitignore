@@ -2,8 +2,6 @@
 /build/
 /dist/
 /compile_commands.json
-/.ninja_log
-/.ninja_deps
 **/__pycache__/
 *.pyc
 /node_modules/

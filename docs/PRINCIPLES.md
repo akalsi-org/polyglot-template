@@ -15,7 +15,7 @@ Need language-specific correctness?
   -> native ecosystem retains semantic ownership
 
 Need C/C++ incrementality and editor truth?
-  -> one compile-action IR emits Ninja + complete compdb
+  -> the Buck2 action graph is the single compile-action source; compdb is a BXL query over it
 
 Need complex third-party C configuration?
   -> use upstream build frontend as an isolated adapter
@@ -64,7 +64,7 @@ evidence: Flow's native manifest derives build graph and compile tooling; schema
 boundary: native manifest owns compile actions; schema owns generated code; package manifest owns staging
 validate: deterministic regeneration produces no diff and drift checks compare normalized models
 falsifier: the derived artifact contains independent user-authored information that cannot live in the source
-avoid: separately maintaining Ninja source lists, compdb commands, tests, and package file lists
+avoid: separately maintaining compile source lists, compdb commands, tests, and package file lists
 ```
 
 ## P3. Tooling Products Are Build Correctness
@@ -72,7 +72,7 @@ avoid: separately maintaining Ninja source lists, compdb commands, tests, and pa
 ```text
 principle: consumer-critical tooling artifacts are mandatory build outputs, not optional conveniences
 evidence: Please's stale compdb implementation built successfully while remaining unusable by clangd
-boundary: every native compile-capable command refreshes Ninja and complete compdb first
+boundary: compdb is derived on demand from the same Buck2 action graph that builds (`./repo.sh compile-commands`), never hand-maintained
 validate: every executed compile action has an equivalent compdb entry and clangd checks representative sources
 falsifier: no consumer uses the artifact and its absence cannot affect development or verification
 avoid: a manual compile-commands step developers must remember
@@ -247,7 +247,7 @@ avoid: installing a DNS-edit token on every reverse proxy
 
 ### MR1. Extract The Boundary, Not The Proper Noun
 
-`repo.sh`, Buck2, Ninja, Deno, and zstd are current anchors. Durable guidance states what they own and the validation they enable. Replace an anchor when another tool satisfies the same boundary with less liability.
+`repo.sh`, Buck2, Deno, and zstd are current anchors. Durable guidance states what they own and the validation they enable. Replace an anchor when another tool satisfies the same boundary with less liability.
 
 ### MR2. Add Abstraction Only For Two Consumers Or One Safety Invariant
 

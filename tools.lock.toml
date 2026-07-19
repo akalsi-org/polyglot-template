@@ -49,24 +49,6 @@ ext_suffix = ".cpython-314-x86_64-linux-musl.so"
 include_subpath = "include/python3.14"
 
 [[artifact]]
-tool = "ninja"
-target = "x86_64-linux-musl"
-version = "1.13.1"
-url = "https://github.com/ninja-build/ninja/releases/download/v1.13.1/ninja-linux.zip"
-sha256 = "0830252db77884957a1a4b87b05a1e2d9b5f658b8367f82999a941884cbe0238"
-archive = "ninja-linux.zip"
-expected = "ninja"
-
-[[artifact]]
-tool = "ninja"
-target = "aarch64-linux-musl"
-version = "1.13.1"
-url = "https://github.com/ninja-build/ninja/releases/download/v1.13.1/ninja-linux-aarch64.zip"
-sha256 = "740f1b9f9d8ae68438240a6a2f3f7a27fc8b1946d2024a6a6b25857ee877987b"
-archive = "ninja-linux-aarch64.zip"
-expected = "ninja"
-
-[[artifact]]
 tool = "python"
 target = "aarch64-linux-musl"
 version = "3.14.6+20260610"

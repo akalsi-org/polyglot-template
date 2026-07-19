@@ -7,7 +7,7 @@ This repository is a pinned, offline-after-bootstrap polyglot workspace. Use `./
 - The current CPU architecture selects the build architecture. Native artifacts use the pinned GCC+musl ABI and never cross CPU architectures.
 - `tools.lock.toml` owns tool provenance. Missing or placeholder digests fail closed.
 - `package.toml` and `runtime-resolution.lock.toml` own package declarations and exact runtime closure resolution.
-- Buck2 is the sole scheduler; there is no separate task runner. `BUCK` files plus `config/flags.bzl` own C++ targets and profile (`dbg`/`opt`) flags — `cpp/cpp.toml` no longer exists. Every first-party rule lives under `rules/` (no prelude in this repo). Ninja stays a pinned in-graph tool, and `compile_commands.json` is materialized by `./repo.sh compile-commands` from a BXL compdb query (`bxl/compdb.bxl`) over the buck2 action graph, not hand-generated.
+- Buck2 is the sole scheduler; there is no separate task runner. `BUCK` files plus `config/flags.bzl` own C++ targets and profile (`dbg`/`opt`) flags — `cpp/cpp.toml` no longer exists. Every first-party rule lives under `rules/` (no prelude in this repo). `compile_commands.json` is materialized by `./repo.sh compile-commands` from a BXL compdb query (`bxl/compdb.bxl`) over the buck2 action graph, not hand-generated.
 - Each language owns `lib/<name>/`, `app/<name>/`, and `test/`; its `lib/` directory is an import/include root.
 - `.vscode/settings.json` mirrors repository discovery: clangd uses the root compdb, Deno owns `ts/` and `tsweb/`, and Python analysis includes `python/lib` plus `python/app`.
 - Python native extensions build against the exact pinned interpreter ABI with pinned GCC/musl; pure Go uses the pinned repo-local toolchain with `CGO_ENABLED=0` and isolated caches.
@@ -34,6 +34,10 @@ Lane commands are thin wrappers over Buck2 targets: `build [dbg|opt]` runs `buck
 ## Agent Skills
 
 Repository-owned skills, when added, belong under `.agents/skills/`. This checkout currently has no repository-owned skills; load only the smallest applicable installed skill set needed for a task.
+
+## Reviews
+
+After any large pass (multi-file feature, migration stage, sweeping cleanup), run two parallel external reviews before committing, both through OMC (`omc team 1:antigravity:code-reviewer ...`): one worker pinned to "Gemini 3.1 Pro (High)" (agy display name) and one to GPT 5.6 Terra (codex worker, model slug `gpt-5.6-terra`). Pass each a short task string pointing at a review brief file (long inline tasks break tmux submission); triage their verdicts adversarially — confirm findings against sources before fixing, and record refuted claims rather than silently dropping them.
 
 ## Collaboration Shorthand
 

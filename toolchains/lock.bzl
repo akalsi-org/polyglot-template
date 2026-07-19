@@ -84,22 +84,6 @@ TOOLCHAINS = {
       "version": "1.26.5",
     },
   },
-  "ninja": {
-    "aarch64-linux-musl": {
-      "archive": "ninja-linux-aarch64.zip",
-      "expected": "ninja",
-      "sha256": "740f1b9f9d8ae68438240a6a2f3f7a27fc8b1946d2024a6a6b25857ee877987b",
-      "url": "https://github.com/ninja-build/ninja/releases/download/v1.13.1/ninja-linux-aarch64.zip",
-      "version": "1.13.1",
-    },
-    "x86_64-linux-musl": {
-      "archive": "ninja-linux.zip",
-      "expected": "ninja",
-      "sha256": "0830252db77884957a1a4b87b05a1e2d9b5f658b8367f82999a941884cbe0238",
-      "url": "https://github.com/ninja-build/ninja/releases/download/v1.13.1/ninja-linux.zip",
-      "version": "1.13.1",
-    },
-  },
   "python": {
     "aarch64-linux-musl": {
       "archive": "cpython-3.14.6+20260610-aarch64-unknown-linux-musl-install_only_stripped.tar.gz",

@@ -17,7 +17,7 @@ tool_path() {
 }
 
 setup_environment() {
-  local target gcc python deno go ninja buck2 gcc_bin go_root path_prefix loader loader_path env_bin gcc_install
+  local target gcc python deno go buck2 gcc_bin go_root path_prefix loader loader_path env_bin gcc_install
   target=$("$ROOT/toolchain/target.sh")
   export POLYGLOT_TARGET=$target
   export POLYGLOT_LOCK_FILE=${POLYGLOT_LOCK_FILE:-$ROOT/tools.lock.toml}
@@ -26,9 +26,8 @@ setup_environment() {
   python=$(tool_path python)
   deno=$(tool_path deno)
   go=$(tool_path go)
-  ninja=$(tool_path ninja)
   buck2=$(tool_path buck2)
-  for tool in "$gcc" "$python" "$deno" "$go" "$ninja" "$buck2"; do
+  for tool in "$gcc" "$python" "$deno" "$go" "$buck2"; do
     [[ -x $tool ]] || { printf 'error: pinned toolchain is not installed; run ./repo.sh bootstrap\n' >&2; return 1; }
   done
 
@@ -42,12 +41,11 @@ setup_environment() {
   env_bin="$POLYGLOT_LOCAL_DIR/bin"
   export CC="${gcc%g++}gcc"
   export CXX=$gcc
-  write_repo_tool_wrappers "$POLYGLOT_LOCAL_DIR" "$CC" "$CXX" "$python" "$loader_path" "$deno" "$go" "$ninja" "$buck2" "$gcc_install" "$target"
+  write_repo_tool_wrappers "$POLYGLOT_LOCAL_DIR" "$CC" "$CXX" "$python" "$loader_path" "$deno" "$go" "$buck2" "$gcc_install" "$target"
   export POLYGLOT_CXX=$gcc
   export POLYGLOT_PYTHON=$python
   export POLYGLOT_DENO=$deno
   export POLYGLOT_GO=$go
-  export POLYGLOT_NINJA=$ninja
   export POLYGLOT_BUCK2=$buck2
   export GOROOT=$go_root
   export GOPATH="$POLYGLOT_LOCAL_DIR/cache/go/path"
@@ -66,7 +64,7 @@ setup_environment() {
   export DENO_DIR="$POLYGLOT_LOCAL_DIR/cache/deno"
   export XDG_CACHE_HOME="$POLYGLOT_LOCAL_DIR/cache/xdg"
   export PYTHONPATH="$ROOT/build/python/$target/lib:$ROOT/python/lib:$ROOT/python/app${PYTHONPATH:+:$PYTHONPATH}"
-  path_prefix="$env_bin:$gcc_bin:$go_root/bin:$(dirname -- "$deno"):$(dirname -- "$ninja"):$(dirname -- "$buck2")"
+  path_prefix="$env_bin:$gcc_bin:$go_root/bin:$(dirname -- "$deno"):$(dirname -- "$buck2")"
   export POLYGLOT_PATH_PREFIX=$path_prefix
   export PATH="$path_prefix:$PATH"
 }

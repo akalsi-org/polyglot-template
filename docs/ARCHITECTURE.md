@@ -79,7 +79,7 @@ and Python-extension work uses the pinned GCC+musl toolchain. The Python
 interpreter and C++ executables run through that toolchain's matching musl
 loader on glibc hosts. Go runs with `CGO_ENABLED=0`, a repo-local Go toolchain,
 isolated caches, and the currently global `GOEXPERIMENT=jsonv2` setting. Deno,
-Ninja, Buck2, and doctest are likewise pinned; every non-Buck2 tool above is
+Buck2, and doctest are likewise pinned; every non-Buck2 tool above is
 also wired into the Buck2 graph as an in-graph toolchain (see
 `toolchains/lock.bzl`, generated from `tools.lock.toml`), so buck2-driven
 builds never depend on a host-installed compiler, interpreter, or runtime.

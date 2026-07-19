@@ -136,22 +136,21 @@ tool_install_path() {
 }
 
 write_bootstrap_wrappers() {
-  local cxx cc python deno go ninja buck2 loader gcc_version loader_path gcc_install
+  local cxx cc python deno go buck2 loader gcc_version loader_path gcc_install
   cxx=$(tool_install_path gcc-musl) || return 0
   cc="${cxx%g++}gcc"
   python=$(tool_install_path python) || return 0
   deno=$(tool_install_path deno) || return 0
   go=$(tool_install_path go) || return 0
-  ninja=$(tool_install_path ninja) || return 0
   buck2=$(tool_install_path buck2) || return 0
   gcc_version=$(lock_value gcc-musl "$target" version)
   loader=$(lock_value gcc-musl "$target" loader)
   gcc_install="$LOCAL/toolchain/$target/gcc-musl-$gcc_version"
   loader_path="$gcc_install/$loader"
-  for tool in "$cc" "$cxx" "$python" "$deno" "$go" "$ninja" "$buck2" "$loader_path"; do
+  for tool in "$cc" "$cxx" "$python" "$deno" "$go" "$buck2" "$loader_path"; do
     [[ -x $tool ]] || return 0
   done
-  write_repo_tool_wrappers "$LOCAL" "$cc" "$cxx" "$python" "$loader_path" "$deno" "$go" "$ninja" "$buck2" "$gcc_install" "$target"
+  write_repo_tool_wrappers "$LOCAL" "$cc" "$cxx" "$python" "$loader_path" "$deno" "$go" "$buck2" "$gcc_install" "$target"
   printf 'bootstrap: wrote self-contained tool wrappers\n'
 }
 

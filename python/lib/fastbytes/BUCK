@@ -1,5 +1,5 @@
-# The pinned-ABI C++ extension built by tools/python_build.py under the moon
-# lane; see rules/python.bzl for the py_extension rule semantics.
+# Pinned-ABI C++ extension; see rules/python.bzl for the py_extension
+# rule semantics (pinned gcc-musl against the pinned CPython headers).
 
 load("//rules:python.bzl", "py_extension")
 

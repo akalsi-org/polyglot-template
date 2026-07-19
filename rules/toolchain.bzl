@@ -56,8 +56,8 @@ def _download_and_extract(ctx: AnalysisContext, name: str, url: str, sha256: str
 def _skipped_stamp(ctx: AnalysisContext, name: str) -> Artifact:
   return ctx.actions.write(name + ".stamp", "skipped: non-native execution platform\n")
 
-# go, deno, ninja: extract, then a version probe (go uses the `version`
-# subcommand rather than a `--version` flag; ninja/deno accept `--version`).
+# go, deno: extract, then a version probe (go uses the `version`
+# subcommand rather than a `--version` flag; deno accepts `--version`).
 def _version_probe_toolchain_impl(ctx: AnalysisContext) -> list[Provider]:
   name = ctx.label.name
   out_dir = _download_and_extract(ctx, name, ctx.attrs.url, ctx.attrs.sha256, ctx.attrs.archive)

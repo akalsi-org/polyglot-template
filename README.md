@@ -19,7 +19,7 @@ to run one command in that same environment; `python`/`python3`, `go`,
 `deno`, and the binutils `ar`/`ranlib`/`nm`/`strip`/`objcopy`/`ld` resolve to
 repository wrappers, while `CC` and `CXX` name the pinned native compiler.
 
-CPython 3.14.6, CPU-native GCC 16.1+musl, bundled mold 2.41, Ninja 1.13.1, Deno 2.9.2, Go 1.26.5, and Buck2 (2026-07-15) are pinned for x64 and ARM64 using immutable upstream URLs and verified SHA-256 values. The Python artifacts and C++ outputs are dynamically linked musl programs, so repository commands invoke them through the exact pinned loader/libc closure on glibc hosts.
+CPython 3.14.6, CPU-native GCC 16.1+musl, bundled mold 2.41, Deno 2.9.2, Go 1.26.5, and Buck2 (2026-07-15) are pinned for x64 and ARM64 using immutable upstream URLs and verified SHA-256 values. The Python artifacts and C++ outputs are dynamically linked musl programs, so repository commands invoke them through the exact pinned loader/libc closure on glibc hosts.
 
 The userdocs compiler source is intentional rather than historical accident. Against cross-tools release `20260515`, userdocs release `2628` is about half the compressed download and 22–24% smaller unpacked. Its ARM archive also contains an ARM64-hosted compiler suitable for `ubuntu-24.04-arm`; the cross-tools ARM64-target archive inspected during selection contains an x86-64-hosted compiler. See the parent architecture document for the measured table.
 
