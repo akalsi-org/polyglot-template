@@ -15,8 +15,8 @@
     "./ts",
     "./tsweb"
   ],
-  "deno.config": "${workspaceFolder}/deno.json",
-  "deno.cache": "${workspaceFolder}/.local/cache/deno",
+  "deno.config": "./deno.json",
+  "deno.cache": "./.local/cache/deno",
   "go.alternateTools": {
     "go": "${workspaceFolder}/.vscode/go"
   },
@@ -52,7 +52,7 @@
     "**/dist": true,
     "**/__pycache__": true
   },
-  "deno.path": "${workspaceFolder}/.local/bin/deno",
+  "deno.path": "./.local/bin/deno",
   "deno.lint": true,
   "buck2-lsp-adapter.buck2Path": "${workspaceFolder}/.local/bin/buck2"
 }
