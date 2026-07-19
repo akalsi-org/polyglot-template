@@ -51,3 +51,7 @@ from past sessions — call `memory_search` first.
 facts — call `memory_save` to persist them for future sessions.
 
 Memory is your first source of truth for anything not visible in the current conversation.
+
+## Component agent guides
+
+- `cpp/lib/pyfast/AGENTS.md` — pyfast: single-header CPython fastcall/vectorcall scaffolding (known defects, wiring gaps, test plan).
