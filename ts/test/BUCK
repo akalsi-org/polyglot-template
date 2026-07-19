@@ -6,9 +6,9 @@ deno_library(
     "greeting_test.ts",
     "server_test.ts",
   ],
-  # //tsweb:cache (the shared deno_cache population action - see tsweb/BUCK)
+  # //:deno-cache (the shared deno_cache population action - see root BUCK)
   # depends on this too, alongside //ts/... itself.
-  visibility = ["//ts/...", "//tsweb/..."],
+  visibility = ["//:", "//ts/...", "//tsweb/..."],
 )
 
 # ts-test parity, part 1: `deno test --frozen ts/test/`.

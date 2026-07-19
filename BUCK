@@ -1,3 +1,4 @@
+load("//rules:deno.bzl", "deno_cache")
 load("//rules:file.bzl", "export_file")
 
 # Uniform build/test/lint entry points across all five lanes.
@@ -78,6 +79,43 @@ load("//rules:file.bzl", "export_file")
 # `config/defs.bzl`'s own docstring claims `-m` works for `//cpp/...`
 # - that claim was not re-verified here for non-test/non-binary targets, but
 # does not hold for this repo's test/binary rules specifically.
+# //:deno-cache - the ONE network-permitted population action shared by the
+# ts/ and tsweb/ lanes (deno cache resolves the whole graph in one pass, so
+# it belongs to neither lane; it lives here at the root as cross-lane
+# infrastructure, next to the deno.json/deno.lock it consumes). deps fold
+# every deno component's DenoSourcesInfo into the staged tree (see
+# rules/deno.bzl's DenoSourcesInfo doc comment); `entries` stays a small
+# explicit list of representative entrypoints (deno cache only needs to walk
+# far enough to resolve every REMOTE/npm dependency - local file imports
+# never require pre-caching; app mains fold in automatically via their
+# DenoAppInfo.entry, see rules/deno.bzl's _resolve_entries). This deps list
+# is guarded FAIL-CLOSED: repo.sh lint's deno-cache-coverage check uqueries
+# every deno_library/deno_app in the graph and fails if any is not in this
+# target's dep closure, so forgetting to register a new component is a red
+# lint, not a mystery --cached-only resolution error.
+deno_cache(
+  name = "deno-cache",
+  entries = [
+    "ts/test/greeting_test.ts",
+    "tsweb/app/site/main.tsx",
+    "tsweb/test/app_test.tsx",
+    "tsweb/test/title_test.ts",
+    "tsweb/vite.config.ts",
+  ],
+  deps = [
+    "//ts/app/hello:hello",
+    "//ts/app/server:server",
+    "//ts/lib/greeting:greeting",
+    "//ts/test:test_srcs",
+    "//tsweb/app/site:site",
+    "//tsweb/lib/app:app",
+    "//tsweb/lib/title:title",
+    "//tsweb/test:test_srcs",
+  ],
+  srcs = {"tsweb/vite.config.ts": "//tsweb:vite.config.ts"},
+  visibility = ["PUBLIC"],
+)
+
 export_file(
   name = "deno.json",
   src = "deno.json",

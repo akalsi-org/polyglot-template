@@ -1,8 +1,6 @@
 /// <reference types="npm:@types/react@19.2.17" />
 
-import React from "react";
-
-export function App(): React.ReactElement {
+export function App(): React.JSX.Element {
   return (
     <main>
       <p className="eyebrow">polyglot-template</p>

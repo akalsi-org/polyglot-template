@@ -6,7 +6,7 @@ deno_library(
     "app_test.tsx",
     "title_test.ts",
   ],
-  visibility = ["//tsweb/..."],
+  visibility = ["//:", "//tsweb/..."],
 )
 
 # tsweb-test parity: `deno test --frozen --allow-env=NODE_ENV tsweb/test/`.

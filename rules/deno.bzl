@@ -383,14 +383,14 @@ def _stage_and_run(
 
 _CONSUMER_ATTRS = {
   "deno": attrs.dep(default = _DENO_TOOLCHAIN),
-  "deno_dir": attrs.dep(default = "//tsweb:cache[deno-dir]"),
+  "deno_dir": attrs.dep(default = "//:deno-cache[deno-dir]"),
   "deno_json": attrs.source(default = "//:deno.json"),
   "deno_lock": attrs.source(default = "//:deno.lock"),
   # deps of DenoSourcesInfo targets (deno_library/deno_app) - see
   # _flatten_deno_sources - fold transitive sources into the staged tree;
   # `srcs` stays available for the rare direct addition/override.
   "deps": attrs.list(attrs.dep(providers = [DenoSourcesInfo]), default = []),
-  "node_modules": attrs.dep(default = "//tsweb:cache[node-modules]"),
+  "node_modules": attrs.dep(default = "//:deno-cache[node-modules]"),
   "srcs": attrs.dict(attrs.string(), attrs.source(), default = {}),
 }
 
@@ -403,10 +403,10 @@ _CONSUMER_ATTRS = {
 # attrs layer can't express (see rules/cxx.bzl's identical macro doctrine).
 def _consumer_defaults(kwargs):
   kwargs.setdefault("deno", _DENO_TOOLCHAIN)
-  kwargs.setdefault("deno_dir", "//tsweb:cache[deno-dir]")
+  kwargs.setdefault("deno_dir", "//:deno-cache[deno-dir]")
   kwargs.setdefault("deno_json", "//:deno.json")
   kwargs.setdefault("deno_lock", "//:deno.lock")
-  kwargs.setdefault("node_modules", "//tsweb:cache[node-modules]")
+  kwargs.setdefault("node_modules", "//:deno-cache[node-modules]")
   return kwargs
 
 # --- deno_check: `deno check --frozen <entry>`, ts-build parity. Build-only

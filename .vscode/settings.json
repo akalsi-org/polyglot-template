@@ -57,5 +57,5 @@
   },
   "deno.path": "./.local/toolchain/x86_64-linux-musl/deno-2.9.2/deno",
   "deno.lint": true,
-  "buck2-lsp-adapter.buck2Path": "./.local/toolchain/x86_64-linux-musl/buck2-2026-07-15/buck2",
+  "buck2-lsp-adapter.buck2Path": "./.local/toolchain/x86_64-linux-musl/buck2-2026-07-15/buck2"
 }

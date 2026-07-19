@@ -164,6 +164,21 @@ case "$command" in
     "$ROOT/repo.sh" infra-lint
     setup_environment
     "$POLYGLOT_BUCK2" test //... --labels lint
+    # deno-cache-coverage: //:deno-cache's deps list is hand-declared (a
+    # BUCK file cannot query the graph), so guard it fail-closed here -
+    # every deno_library/deno_app in the graph must be inside its dep
+    # closure, or `deno run --cached-only` in that component fails later
+    # with a far-away resolution error instead of a red lint.
+    mapfile -t _deno_all < <("$POLYGLOT_BUCK2" uquery \
+      "kind('^_deno_(library|app)_rule$', '//...')" 2>/dev/null | grep '^root//' | sort)
+    mapfile -t _deno_covered < <("$POLYGLOT_BUCK2" uquery \
+      "kind('^_deno_(library|app)_rule$', deps('//:deno-cache'))" 2>/dev/null | grep '^root//' | sort)
+    _deno_missing=$(comm -23 <(printf '%s\n' "${_deno_all[@]}") <(printf '%s\n' "${_deno_covered[@]}"))
+    if [[ -n $_deno_missing ]]; then
+      printf 'error: deno components not covered by //:deno-cache deps (add them so `deno run --cached-only` can resolve their imports):\n%s\n' "$_deno_missing" >&2
+      exit 1
+    fi
+    printf 'deno-cache-coverage: ok (%d components)\n' "${#_deno_all[@]}"
     ;;
   build)
     profile=${1:-dbg}
