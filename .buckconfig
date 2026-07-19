@@ -11,6 +11,17 @@
   # prelude to supply one).
   execution_platforms = root//platforms:execution_platforms
 
+[buck2]
+  # Required gate for `buck2 clean --stale` on this pin (without it the
+  # scan refuses outright: "Skipping clean, set buck2.defer_write_actions
+  # to use clean --stale"), which is the sanctioned way to prune old
+  # configuration generations from buck-out/v2/art (observed: 8G+ of
+  # superseded toolchain materializations accumulated across a week of
+  # rule churn with no working reclamation path). The sqlite materializer
+  # state this scan reads already exists and survives restarts - see the
+  # action-cache investigation note below.
+  defer_write_actions = true
+
 # No [buck2] isolation_dir is set: buck2 state (buck-out/, the daemon) stays
 # repo-local under ./buck-out by default, mirroring how .local/ and build/ keep
 # every other lane's state inside the checkout. Set isolation_dir only if

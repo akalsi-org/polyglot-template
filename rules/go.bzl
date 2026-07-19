@@ -257,7 +257,12 @@ def _go_binary_impl(ctx: AnalysisContext) -> list[Provider]:
   binary = ctx.actions.declare_output(ctx.attrs.name)
   tail = [
     "PKG=" + ctx.attrs.package,
-    "exec \"$GOROOT/bin/go\" build -trimpath -o \"$1\" \"$PKG\"",
+    # NOT `exec`: exec replaces the shell, so the EXIT trap that removes
+    # $SCRATCH would never fire and every action would leak its scratch
+    # dir (observed: ~63M per invocation accumulating under
+    # buck-out/v2/tmp/go-rules). Run as a child; the script's exit status
+    # is still the go command's status.
+    "\"$GOROOT/bin/go\" build -trimpath -o \"$1\" \"$PKG\"",
   ]
   script, written = _write_go_script(ctx, ctx.attrs.name + "-build", tools, tail)
   ctx.actions.run(
@@ -320,7 +325,8 @@ def _go_test_coverage_action(ctx, tools, all_srcs):
   cov_file = ctx.actions.declare_output(ctx.attrs.name + ".cov")
   coverpkg = ",".join(ctx.attrs.packages)
   tail = [
-    "exec \"$GOROOT/bin/go\" test -trimpath -coverpkg=" + coverpkg +
+    # No `exec` - see go_binary's tail comment (EXIT trap must fire).
+    "\"$GOROOT/bin/go\" test -trimpath -coverpkg=" + coverpkg +
     " -coverprofile=\"$1\" " + " ".join(ctx.attrs.packages),
   ]
   script, written = _write_go_script(ctx, ctx.attrs.name + "-cov", tools, tail)
@@ -336,7 +342,8 @@ def _go_test_impl(ctx: AnalysisContext) -> list[Provider]:
   own_srcs, srcs_tset = _go_srcs(ctx, ctx.attrs.srcs, ctx.attrs.deps)
   all_srcs = own_srcs + [ctx.attrs._gomod]
   tail = [
-    "exec \"$GOROOT/bin/go\" test -trimpath " + " ".join(ctx.attrs.packages),
+    # No `exec` - see go_binary's tail comment (EXIT trap must fire).
+    "\"$GOROOT/bin/go\" test -trimpath " + " ".join(ctx.attrs.packages),
   ]
   script, written = _write_go_script(ctx, ctx.attrs.name, tools, tail)
   command = cmd_args(script, hidden = all_srcs + written + [tools.go_dir])
@@ -426,7 +433,8 @@ def _go_lint_impl(ctx: AnalysisContext) -> list[Provider]:
     ]
   elif ctx.attrs.mode == "vet":
     tail = [
-      "exec \"$GOROOT/bin/go\" vet " + " ".join(ctx.attrs.packages),
+      # No `exec` - see go_binary's tail comment (EXIT trap must fire).
+      "\"$GOROOT/bin/go\" vet " + " ".join(ctx.attrs.packages),
     ]
   else:
     fail("go_lint: unknown mode '{}' (want 'fmt' or 'vet')".format(ctx.attrs.mode))
