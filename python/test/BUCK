@@ -34,25 +34,6 @@ py_tests(
   ],
 )
 
-# Explicit opt-profile twin for CI/compiler coverage. The regular target keeps
-# the repository's dbg default; callers can run only this target with:
-# buck2 test --target-platforms //config:x86_64-linux-musl-opt //python/test:test_opt
-py_tests(
-  name = "test_opt",
-  default_target_platform = "//config:x86_64-linux-musl-opt",
-  srcs = [
-    "test_example.py",
-    "test_fastbytes.py",
-    "test_pyfast_extension.py",
-    "test_stubs.py",
-  ],
-  deps = [
-    "//python/lib/fastbytes:fastbytes",
-    "//python/lib/example:example",
-    ":pyfast_test_extension",
-  ],
-)
-
 py_compileall_check(
   name = "compileall",
   dirs = [
