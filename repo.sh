@@ -326,7 +326,25 @@ case "$command" in
     # else (gateway, schema-cli: manifest-declared packages with no buck2
     # target) falls through to tools/package_release.py's assemble(), which
     # requires a pre-populated --build-dir.
-    if "$POLYGLOT_BUCK2" targets "//packages:$1" >/dev/null 2>&1; then
+    #
+    # The probe's own failure must not be conflated with "no buck2 target for
+    # this name": a crashed daemon, a bad .buckconfig, or any other real
+    # build-system failure needs to surface as-is, never masquerade as a
+    # silent fallthrough to assemble()'s misleading --build-dir error.
+    # `buck2 targets` on a genuinely absent target fails with a specific,
+    # verified message ("Unknown target `<name>` from package `<pkg>`." -
+    # confirmed against the pinned buck2 binary by probing a target that
+    # does not exist); only THAT failure shape is treated as "not a buck2
+    # package". Any other nonzero exit prints buck2's own stderr and exits
+    # nonzero immediately.
+    probe_err=$(mktemp)
+    if "$POLYGLOT_BUCK2" targets "//packages:$1" >/dev/null 2>"$probe_err"; then
+      probe_status=0
+    else
+      probe_status=$?
+    fi
+    if ((probe_status == 0)); then
+      rm -f "$probe_err"
       version=$(python3 "$ROOT/tools/package_model.py" --manifest "$ROOT/package.toml" \
         --lock "$ROOT/runtime-resolution.lock.toml" --tools-lock "$ROOT/tools.lock.toml" resolve \
         --package "$1" --target "$target" | python3 -c 'import json, sys; print(json.load(sys.stdin)["version"])')
@@ -338,11 +356,17 @@ case "$command" in
       cp -- "$ROOT/$out" "$tmp"
       mv -- "$tmp" "$archive"
       printf '%s\n' "$archive"
-    else
+    elif grep -q '^Unknown target `' "$probe_err"; then
+      rm -f "$probe_err"
       python3 "$ROOT/tools/package_release.py" --root "$ROOT" --manifest "$ROOT/package.toml" \
         --lock "$ROOT/runtime-resolution.lock.toml" --tools-lock "$ROOT/tools.lock.toml" \
         --dist-dir "$ROOT/dist" --changelog "$ROOT/CHANGELOG.md" package \
         --package "$1" --target "$target" --profile "$profile"
+    else
+      printf 'error: buck2 targets probe for //packages:%s failed:\n' "$1" >&2
+      cat "$probe_err" >&2
+      rm -f "$probe_err"
+      exit "$probe_status"
     fi
     ;;
   package-smoke)

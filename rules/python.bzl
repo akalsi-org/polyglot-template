@@ -323,17 +323,26 @@ def _py_binary_impl(ctx: AnalysisContext) -> list[Provider]:
   # at python/app/hello/main.py) - see py_library's identical dest formula
   # above for why ctx.label.package (not short_path alone) is load-bearing
   # here now that a py_binary may be declared several directories below
-  # python/app/ - plus a "py-app-launcher" marker entry (no artifact of its
-  # own) at bin/<pkg_name> - rules/package.bzl's kind handler generates
-  # bin/<pkg_name> + bin/python + bin/python3 from it, with PYTHONPATH
-  # assembled from every folded python/* tree entry (this target's own deps'
-  # py_library/py_extension entries, folded in transitively below).
+  # python/app/ (or anywhere else - a py_binary is not required to live
+  # under python/app/ at all) - plus a "py-app-launcher" marker entry (no
+  # artifact of its own) at bin/<pkg_name> whose `meta` records this app's
+  # own entrypoint dest directly, the same PackageEntry.meta mechanism
+  # rules/deno.bzl's "deno-app-launcher" marker uses for its own entrypoint
+  # (see rules/pkg.bzl's PackageEntry.meta doc comment for why pairing a
+  # marker back to its source by dest-prefix/owner convention alone isn't
+  # reliable - it previously assumed every py_binary's own source entry
+  # started with "python/app/", which broke for any py_binary declared
+  # elsewhere). rules/package.bzl's kind handler generates bin/<pkg_name> +
+  # bin/python + bin/python3 from it, with PYTHONPATH assembled from every
+  # folded python/* tree entry (this target's own deps' py_library/
+  # py_extension entries, folded in transitively below).
   pkg_name = check_pkg_name(ctx, ctx.attrs.pkg_name or ctx.attrs.name)
+  main_dest = ctx.label.package + "/" + ctx.attrs.main.short_path
   info = package_info(
     ctx,
     entries = [
-      PackageEntry(dest = ctx.label.package + "/" + ctx.attrs.main.short_path, artifact = ctx.attrs.main, kind = "tree", owner = str(ctx.label.raw_target())),
-      PackageEntry(dest = "bin/" + pkg_name, artifact = None, kind = "py-app-launcher", owner = str(ctx.label.raw_target())),
+      PackageEntry(dest = main_dest, artifact = ctx.attrs.main, kind = "tree", owner = str(ctx.label.raw_target())),
+      PackageEntry(dest = "bin/" + pkg_name, artifact = None, kind = "py-app-launcher", owner = str(ctx.label.raw_target()), meta = main_dest),
     ],
     # bin/python + bin/python3 (the loader-wrapped interpreter launchers
     # rules/package.bzl's "py-app-launcher" kind handler also writes) need

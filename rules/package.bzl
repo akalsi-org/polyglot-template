@@ -321,23 +321,24 @@ def _stage_lines(ctx, entries, needs):
       "chmod 0755 \"$OUT/bin/{name}\"".format(name = name),
     ]
 
-  # "py-app-launcher": bin/<name> (execing this same target's own
-  # python/app/* source entry, paired by `owner`) plus the shared
-  # bin/python + bin/python3 loader-wrapped interpreter launchers (written
-  # once total, byte-for-byte write_python_runtime_launcher()'s shape).
-  main_by_owner = {}
-  for entry in entries:
-    if entry.kind == "tree" and entry.dest.startswith("python/app/"):
-      main_by_owner[entry.owner] = entry.dest
-
+  # "py-app-launcher": bin/<name> (execing this same target's own `main`
+  # source entry, whose staged dest is carried directly on the marker's own
+  # `meta` - see rules/python.bzl's py_binary emission and rules/pkg.bzl's
+  # PackageEntry.meta doc comment; this is the same mechanism
+  # "deno-app-launcher" below uses for its own entrypoint, and for the same
+  # reason: pairing a marker back to its source by dest-prefix/owner
+  # convention alone isn't reliable once a py_binary isn't required to live
+  # under any particular directory) plus the shared bin/python + bin/python3
+  # loader-wrapped interpreter launchers (written once total, byte-for-byte
+  # write_python_runtime_launcher()'s shape).
   wrote_python_launchers = False
   for entry in entries:
     if entry.kind != "py-app-launcher":
       continue
     name = entry.dest.rsplit("/", 1)[-1]
-    main_dest = main_by_owner.get(entry.owner)
+    main_dest = entry.meta
     if main_dest == None:
-      fail("package({}): py-app-launcher entry for dest {!r} (target {}) has no matching python/app/* source entry from the same target".format(ctx.attrs.name, entry.dest, entry.owner))
+      fail("package({}): py-app-launcher entry for dest {!r} (target {}) has no `meta` entrypoint dest set".format(ctx.attrs.name, entry.dest, entry.owner))
     lines += [
       "cat > \"$OUT/bin/{name}\" <<'PKGEOF'".format(name = name),
       "#!/bin/sh",
