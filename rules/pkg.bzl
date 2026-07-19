@@ -43,8 +43,14 @@ PackageEntry = record(
   # own and exist purely as a marker for a kind handler to synthesize output
   # from (e.g. "py-app-launcher").
   artifact = field([Artifact, None], None),
-  # One of "loader-bin", "static-bin", "tree", "py-app-launcher" - see
-  # rules/package.bzl's kind-handler dispatch.
+  # One of "loader-bin", "static-bin", "tree", "loader-lib",
+  # "py-app-launcher" - see rules/package.bzl's kind-handler dispatch.
+  # "loader-lib" is the musl loader's own executable (ld-musl-*.so.1,
+  # exec'd directly by every "loader-bin"/"py-app-launcher" launcher
+  # script) - distinguished from the plain "tree" kind (e.g. libc.so,
+  # which sits alongside it but is never exec'd) purely so
+  # rules/package.bzl's staging script knows which artifacts must land
+  # 0755 instead of the default 0644.
   kind = field(str),
   # str(ctx.label.raw_target()) of the target that emitted this entry - used
   # for dest-collision error messages and to pair a py_binary's
@@ -115,3 +121,54 @@ def flatten_package_needs(info: [PackageInfo, None]) -> list:
         seen[need] = True
         out.append(need)
   return out
+
+def flatten_merged_package_entries(ctx: AnalysisContext, infos: list) -> list:
+  """Same result shape as calling flatten_package_entries() once per `infos`
+  element and concatenating - EXCEPT correct under diamond deps. Two of
+  `infos`' tsets may share a descendant node (e.g. two deps of a `package()`
+  target both transitively depend on the same py_library), and traversing
+  each tset separately then concatenating the flattened python lists visits
+  that shared node once per parent, duplicating its entries even though
+  buck2's tset DAG never actually stores it twice. Building ONE new tset
+  node with every info's `entries` tset as a child and traversing THAT once
+  fixes it structurally: a single traverse() call visits each DAG node
+  exactly once no matter how many parents reach it, so the shared
+  descendant's entries surface exactly once - no post-hoc (dest, owner)
+  dedup needed."""
+  children = [i.entries for i in infos if i.entries != None]
+  if not children:
+    return []
+  merged = ctx.actions.tset(PackageEntrySet, children = children)
+  out = []
+  for value in merged.traverse():
+    out += value
+  return out
+
+def flatten_merged_package_needs(ctx: AnalysisContext, infos: list) -> list:
+  """needs analogue of flatten_merged_package_entries() - see its docstring
+  for why merging as children of one tset node before a single traverse()
+  matters under diamond deps."""
+  children = [i.needs for i in infos if i.needs != None]
+  if not children:
+    return []
+  merged = ctx.actions.tset(PackageNeedSet, children = children)
+  seen = {}
+  out = []
+  for value in merged.traverse():
+    for need in value:
+      if need not in seen:
+        seen[need] = True
+        out.append(need)
+  return out
+
+def check_pkg_name(ctx, pkg_name: str) -> str:
+  """Validates a packaged-executable name at the emitting rule, before it is
+  embedded in a PackageEntry dest. Names are single path components: a
+  separator or dot-segment here would silently nest or escape under bin/
+  and libexec/, sidestepping package()'s dest checks until much later."""
+  if pkg_name == "" or pkg_name in (".", "..") or "/" in pkg_name:
+    fail("{}: invalid pkg_name \"{}\": must be a non-empty single path component".format(
+      ctx.label.raw_target(),
+      pkg_name,
+    ))
+  return pkg_name

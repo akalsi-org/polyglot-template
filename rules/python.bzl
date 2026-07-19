@@ -53,7 +53,7 @@ therefore also include `roots` directly, alongside gcc_dir/py_dir.
 load("//config:defs.bzl", "fail_if_cross_arch", "target_arch_attr")
 load("//config:flags.bzl", "COVERAGE_FLAG", "FORBIDDEN_FLAGS", "STANDARD", "coverage_enabled_flag", "profile_compile_flags", "profile_link_flags")
 load("//rules:coverage.bzl", "CoverageInfo")
-load("//rules:pkg.bzl", "PACKAGE_LABELS_ATTR", "PackageEntry", "package_info")
+load("//rules:pkg.bzl", "PACKAGE_LABELS_ATTR", "PackageEntry", "check_pkg_name", "package_info")
 load("//toolchains:lock.bzl", "TOOLCHAINS")
 
 def _native_target() -> str:
@@ -318,7 +318,7 @@ def _py_binary_impl(ctx: AnalysisContext) -> list[Provider]:
   # PYTHONPATH assembled from every folded app/python/* tree entry (this
   # target's own deps' py_library/py_extension entries, folded in
   # transitively below).
-  pkg_name = ctx.attrs.pkg_name or ctx.attrs.name
+  pkg_name = check_pkg_name(ctx, ctx.attrs.pkg_name or ctx.attrs.name)
   info = package_info(
     ctx,
     entries = [

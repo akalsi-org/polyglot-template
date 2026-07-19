@@ -20,16 +20,19 @@ transitively underneath one) - and:
      identical resolved artifact; this is asserted, not just assumed (see
      _resolve_needs).
   3. Runs one "kind handler" per entry kind ("loader-bin", "static-bin",
-     "tree", "py-app-launcher" - see _stage_lines below) to stage the layout,
-     the same shape tools/package_release.py's assemble_polyglot_demo() +
-     write_launcher() + write_python_runtime_launcher() built by hand for the
-     one polyglot-demo package (same relative launcher paths, same
-     "#!/bin/sh\\nset -eu\\n" preamble, same loader --library-path wiring).
-  4. Reuses the EXISTING deterministic archive + metadata machinery this file
-     already had (sorted entries, uid/gid 0, mtime 0, mode normalization,
-     gzip mtime 0; package.json/closure.json/runtime-ref.json via the
-     embedded package_model metadata step) unchanged - see _ARCHIVE_PY /
-     _METADATA_PY below, both byte-for-byte the same as before this rewrite.
+     "loader-lib", "tree", "py-app-launcher" - see _stage_lines below) to
+     stage the layout, the same shape tools/package_release.py's
+     assemble_polyglot_demo() + write_launcher() + write_python_runtime_launcher()
+     built by hand for the one polyglot-demo package (same relative launcher
+     paths, same "#!/bin/sh\\nset -eu\\n" preamble, same loader
+     --library-path wiring).
+  4. Reuses the EXISTING deterministic archive machinery this file already
+     had (sorted entries, uid/gid 0, mtime 0, mode normalization, gzip
+     mtime 0 - see _ARCHIVE_PY below, byte-for-byte the same as before this
+     rewrite) and a metadata step (package.json/closure.json/runtime-ref.json
+     via the embedded package_model metadata step - see _METADATA_PY below)
+     that additionally asserts the `version` attr matches package.toml's own
+     recorded version for this package.
 
 package_smoke and package_manifest_test are unchanged from before this
 rewrite (package_smoke only ever consumed `package()`'s DefaultInfo output
@@ -43,7 +46,7 @@ every toolchain directory a resolved-need artifact was `.project()`ed from.
 """
 
 load("//config:defs.bzl", "fail_if_cross_arch", "target_arch_attr")
-load("//rules:pkg.bzl", "PackageEntry", "PackageInfo", "flatten_package_entries", "flatten_package_needs")
+load("//rules:pkg.bzl", "PackageEntry", "PackageInfo", "flatten_merged_package_entries", "flatten_merged_package_needs")
 load("//toolchains:lock.bzl", "TOOLCHAINS")
 
 def _native_target() -> str:
@@ -100,7 +103,11 @@ def _resolve_musl_loader(ctx):
   libc = gcc_dir.project(_LOADER_DIR + "/libc.so")
   owner = "//toolchains:gcc-musl-" + _NATIVE_TARGET
   return [
-    PackageEntry(dest = "lib/" + _LOADER_NAME, artifact = loader, kind = "tree", owner = owner),
+    # "loader-lib", not "tree": every "loader-bin"/"py-app-launcher"
+    # launcher script `exec`s this file directly, so it must land 0755 (see
+    # _EXECUTABLE_KINDS above) - libc.so is only ever dlopen'd/linked
+    # against, never exec'd, so it stays a plain "tree" entry at 0644.
+    PackageEntry(dest = "lib/" + _LOADER_NAME, artifact = loader, kind = "loader-lib", owner = owner),
     PackageEntry(dest = "lib/libc.so", artifact = libc, kind = "tree", owner = owner),
   ]
 
@@ -132,13 +139,98 @@ def _resolve_needs(ctx, needs):
     extra_entries += entries
   return extra_entries
 
+# Kinds that always stage as a single leaf artifact (a real file, or a
+# marker a kind handler later writes as one file/script) - used by both the
+# chmod decision in _stage_lines and the nesting check in _check_collisions
+# below. "tree" is deliberately excluded from both: several lanes
+# intentionally merge multiple entries under one shared tree dest (e.g.
+# py_extension's "app/python/lib" tree entry plus py_library's individual
+# "app/python/lib/<path>" file entries - both copy INTO that directory
+# rather than clobbering a leaf - see rules/python.bzl's _py_library_impl /
+# _py_extension_impl docstrings), and a plain "tree" entry's own artifact
+# may itself be either a file or a directory (only known at stage-script RUN
+# time, per _stage_lines' `-d` branch below).
+_LEAF_KINDS = ("loader-bin", "static-bin", "loader-lib", "py-app-launcher", "synthetic-marker")
+
+# Kinds whose staged artifact is a real executable that must land 0755 - a
+# strict subset of _LEAF_KINDS (py-app-launcher/synthetic-marker entries
+# carry no artifact of their own, so they never reach the chmod decision in
+# _stage_lines below; their launcher scripts are chmod 0755 explicitly at
+# the point they're written instead).
+_EXECUTABLE_KINDS = ("loader-bin", "static-bin", "loader-lib")
+
+def _check_dest(ctx, dest, owner):
+  # Reject rather than silently normalize: absolute paths, "."/".." path
+  # segments, and empty segments (which also catches a leading/trailing/
+  # duplicated "/") are always a bug in a kind handler or in a lane's own
+  # PackageEntry construction, never something package() should paper over.
+  if dest.startswith("/"):
+    fail("package({}): dest {!r} (from {}) must be a package-relative path, not absolute".format(ctx.attrs.name, dest, owner))
+  for segment in dest.split("/"):
+    if segment == "":
+      fail("package({}): dest {!r} (from {}) has an empty path segment (leading/trailing/duplicate '/')".format(ctx.attrs.name, dest, owner))
+    if segment == "." or segment == "..":
+      fail("package({}): dest {!r} (from {}) has a {!r} path segment - malformed path".format(ctx.attrs.name, dest, owner, segment))
+
 def _check_collisions(ctx, entries):
   by_dest = {}
   for entry in entries:
+    _check_dest(ctx, entry.dest, entry.owner)
     other = by_dest.get(entry.dest)
     if other != None:
       fail("package({}): dest collision at {!r} between {} and {}".format(ctx.attrs.name, entry.dest, other.owner, entry.owner))
     by_dest[entry.dest] = entry
+
+  # Prefix/nesting conflicts: dest B nested under dest A ("A/B...") is only
+  # legitimate when BOTH sides are "tree" entries merging into a shared
+  # directory (see _LEAF_KINDS' docstring above) - anything else nesting
+  # under/over a single-leaf-artifact dest is a real collision, just not a
+  # same-dest one.
+  dests = sorted(by_dest.keys())
+  for i in range(len(dests)):
+    dest_a = dests[i]
+    a = by_dest[dest_a]
+    prefix = dest_a + "/"
+    for dest_b in dests[i + 1:]:
+      if not dest_b.startswith(prefix):
+        continue
+      b = by_dest[dest_b]
+      if a.kind == "tree" and b.kind == "tree":
+        continue
+      fail(
+        "package({}): dest {!r} (from {}, kind {!r}) nests {!r} (from {}, kind {!r}) - only \"tree\"-kind entries may share a directory this way".format(
+          ctx.attrs.name,
+          dest_a,
+          a.owner,
+          a.kind,
+          dest_b,
+          b.owner,
+          b.kind,
+        ),
+      )
+
+def _synthesize_launcher_markers(entries):
+  # _stage_lines writes bin/<name> for every "loader-bin" entry, plus
+  # bin/python + bin/python3 once whenever ANY "py-app-launcher" entry is
+  # present - none of which have their own PackageEntry, so without this
+  # they're invisible to _check_collisions and another target quietly
+  # staging the same bin/ dest would collide at RUN time instead of at
+  # analysis time. ("py-app-launcher"'s own bin/<name> dest already has a
+  # real marker entry - see rules/python.bzl's _py_binary_impl - so it
+  # doesn't need one synthesized here.)
+  markers = []
+  has_py_app = False
+  for entry in entries:
+    if entry.kind == "loader-bin":
+      name = entry.dest.rsplit("/", 1)[-1]
+      markers.append(PackageEntry(dest = "bin/" + name, artifact = None, kind = "synthetic-marker", owner = entry.owner))
+    elif entry.kind == "py-app-launcher":
+      has_py_app = True
+  if has_py_app:
+    shared_owner = "<package(): shared bin/python + bin/python3 launcher>"
+    markers.append(PackageEntry(dest = "bin/python", artifact = None, kind = "synthetic-marker", owner = shared_owner))
+    markers.append(PackageEntry(dest = "bin/python3", artifact = None, kind = "synthetic-marker", owner = shared_owner))
+  return markers
 
 # --- kind handlers: build the `stage.sh` script body that lays out every
 # entry under $OUT, plus the two synthesized launcher families
@@ -182,20 +274,21 @@ def _stage_lines(ctx, entries, needs):
     lines.append(cmd_args("{}=\"$(pwd)/".format(var), entry.artifact, "\"", delimiter = ""))
     hidden.append(entry.artifact)
     dest = "\"$OUT/{}\"".format(entry.dest)
+    # A directory artifact's own file permissions are whatever its own
+    # producing action gave them (cp -R preserves them) - only the
+    # single-file branch needs an explicit mode, since that's the only case
+    # package() itself picks the mode. Plain sources/assets stay 0644;
+    # "loader-bin"/"static-bin" raw binaries and the musl loader's own
+    # "loader-lib" entry (exec'd directly by launcher scripts, see below)
+    # need 0755 - see _LEAF_KINDS' docstring above for why nothing else does.
+    mode = "0755" if entry.kind in _EXECUTABLE_KINDS else "0644"
     lines.append(
-      "if [ -d \"${var}\" ]; then mkdir -p {dest}; cp -R \"${var}\"/. {dest}/; else cp \"${var}\" {dest}; chmod 0755 {dest}; fi".format(
+      "if [ -d \"${var}\" ]; then mkdir -p {dest}; cp -R \"${var}\"/. {dest}/; else cp \"${var}\" {dest}; chmod {mode} {dest}; fi".format(
         var = var,
         dest = dest,
+        mode = mode,
       ),
     )
-    # Same __pycache__/*.pyc exclusion tools/package_release.py's
-    # copy_tree(..., ignore=(...)) applies to runtime/python and
-    # app/python/{lib,app}: any of these directories may carry
-    # probe/build-time bytecode cache files that are not part of the
-    # deterministic package contract.
-    if entry.dest == "runtime/python" or entry.dest.startswith("app/python/"):
-      lines.append("find {dest} -name __pycache__ -type d -prune -exec rm -rf {{}} + 2>/dev/null || true".format(dest = dest))
-      lines.append("find {dest} -name '*.pyc' -delete 2>/dev/null || true".format(dest = dest))
 
   # "loader-bin": bin/<name> launcher exec'ing the staged libexec/<name>
   # binary through the staged lib/<loader>. Byte-for-byte
@@ -254,6 +347,19 @@ def _stage_lines(ctx, entries, needs):
           "chmod 0755 \"$OUT/bin/{py}\"".format(py = py),
         ]
 
+  # __pycache__/*.pyc exclusion (mirrors tools/package_release.py's
+  # copy_tree(..., ignore=(...))): run ONCE at the end over the two roots
+  # that can ever carry probe/build-time bytecode cache files
+  # (runtime/python and app/python), rather than once per staged entry -
+  # entries under app/python/ number in the dozens for a real py_library
+  # fan-out, and re-walking the same shared subtree that many times bought
+  # nothing. `2>/dev/null || true` also makes each find tolerant of either
+  # root not existing at all (a pure cxx/go/deno package stages neither).
+  lines += [
+    "find \"$OUT/runtime/python\" \"$OUT/app/python\" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true",
+    "find \"$OUT/runtime/python\" \"$OUT/app/python\" -name '*.pyc' -delete 2>/dev/null || true",
+  ]
+
   return lines, hidden
 
 # --- package(): fold deps' PackageInfo, resolve needs, stage, then archive.
@@ -262,22 +368,25 @@ def _package_impl(ctx: AnalysisContext) -> list[Provider]:
   fail_if_cross_arch(ctx, _NATIVE_TARGET)
   _check_version(ctx, ctx.attrs.version)
 
+  # Merge every dep's PackageInfo.entries (resp. .needs) tset as children of
+  # ONE new tset node and traverse THAT once, rather than flattening each
+  # dep's tset separately and concatenating the python lists - see
+  # flatten_merged_package_entries()'s docstring in rules/pkg.bzl: a target
+  # shared transitively by two deps (a diamond dep) is a single DAG node
+  # reachable from both, and only a single shared traversal dedupes it the
+  # way buck2's tsets are meant to.
   infos = [d[PackageInfo] for d in ctx.attrs.deps if PackageInfo in d]
-  entries = []
-  for info in infos:
-    entries += flatten_package_entries(info)
-  needs = []
-  seen_needs = {}
-  for info in infos:
-    for need in flatten_package_needs(info):
-      if need not in seen_needs:
-        seen_needs[need] = True
-        needs.append(need)
+  entries = flatten_merged_package_entries(ctx, infos)
+  needs = flatten_merged_package_needs(ctx, infos)
 
-  _check_collisions(ctx, entries)
   extra_entries = _resolve_needs(ctx, needs)
   all_entries = entries + extra_entries
-  _check_collisions(ctx, all_entries)  # entries vs. toolchain-resolved extras
+  markers = _synthesize_launcher_markers(all_entries)
+  _check_collisions(ctx, all_entries + markers)
+
+  # Sort by dest so the staging script's content (and its ART<n> variable
+  # numbering) is stable regardless of the tset traversal order above.
+  all_entries = [pair[1] for pair in sorted([(e.dest, e) for e in all_entries])]
 
   stage_lines, stage_hidden = _stage_lines(ctx, all_entries, needs)
 
@@ -298,7 +407,7 @@ def _package_impl(ctx: AnalysisContext) -> list[Provider]:
     cmd_args("MANIFEST=\"$(pwd)/", ctx.attrs.manifest, "\"", delimiter = ""),
     cmd_args("LOCK=\"$(pwd)/", ctx.attrs.lock, "\"", delimiter = ""),
     cmd_args("TOOLS_LOCK=\"$(pwd)/", ctx.attrs.tools_lock, "\"", delimiter = ""),
-    "python3 -B \"$METADATA_SCRIPT\" \"$PACKAGE_MODEL\" \"$MANIFEST\" \"$LOCK\" \"$TOOLS_LOCK\" %s %s %s \"$OUT\"" % (ctx.attrs.name, _NATIVE_TARGET, ctx.attrs.profile),
+    "python3 -B \"$METADATA_SCRIPT\" \"$PACKAGE_MODEL\" \"$MANIFEST\" \"$LOCK\" \"$TOOLS_LOCK\" %s %s %s %s \"$OUT\"" % (ctx.attrs.name, _NATIVE_TARGET, ctx.attrs.profile, ctx.attrs.version),
   ]
   metadata_inputs = [ctx.attrs._package_model, ctx.attrs.manifest, ctx.attrs.lock, ctx.attrs.tools_lock]
   stage_inputs = stage_hidden + [metadata_script] + metadata_inputs
@@ -387,12 +496,23 @@ _METADATA_PY = [
   "package_name = sys.argv[5]",
   "target = sys.argv[6]",
   "profile = sys.argv[7]",
-  "stage = Path(sys.argv[8])",
+  "attr_version = sys.argv[8]",
+  "stage = Path(sys.argv[9])",
   "",
   "model = package_model.load(manifest)",
   "catalog = package_model.packages(model)",
   "entry = catalog[package_name]",
   "closure, runtime_ref = package_model.resolve(model, package_model.load(lock), package_model.load(tools_lock), package_name, target)",
+  "",
+  # package()'s `version` attr is validated independently (rules/package.bzl's
+  # _check_version) and passed through here so it can never silently drift
+  # from what package.toml's manifest itself says for this package - a
+  # mismatch means someone edited one without the other.
+  "if attr_version != entry['version']:",
+  "    sys.exit(",
+  "        'package(): version attr %r does not match package.toml version %r for package %r'",
+  "        % (attr_version, entry['version'], package_name)",
+  "    )",
   "",
   "",
   "def write_json(path, value):",
