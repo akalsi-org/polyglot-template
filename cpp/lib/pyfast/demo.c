@@ -1,12 +1,19 @@
 #include "pyfast/pyfast.h"
 
 #include <math.h>
+#include <string.h>
 
 /* ═══════════════════════════════════════════════════════════════════════════
    Module-level functions
    ═══════════════════════════════════════════════════════════════════════════ */
 
+/* Previously: no VEXPECT, so VINT(0,..)/VINT(1,..) read _a[0]/_a[1]
+ * unconditionally — calling add() or add(1) from Python read past the
+ * (possibly zero-length) argument vector. VA(i) itself is now
+ * bounds-checked as defense-in-depth, but the correct fix at the call
+ * site is still to state the arity up front. */
 VFUNC(vcall_add) {
+  VEXPECT(2);
   long x, y;
   VALL(VINT(0, &x) && VINT(1, &y));
   VRETURN_LONG(x + y);
@@ -77,6 +84,11 @@ VFUNC_KW(vcall_greet) {
   return PyUnicode_FromFormat("Hello, %.*s.", (int)name_len, name);
 }
 
+/* Exercises VMOVE: each loop iteration used to do `result =
+ * VSTEAL(joined);`, which clobbers the cleanup-managed `result` pointer
+ * without releasing the reference it held from the previous iteration —
+ * a leak on every iteration but the last. VMOVE(result, VSTEAL(joined))
+ * DECREFs the old `result` first. */
 VFUNC_KW(vcall_prefix_join) {
   PyObject *items;
   const char *prefix; Py_ssize_t prefix_len;
@@ -95,7 +107,7 @@ VFUNC_KW(vcall_prefix_join) {
     if (!item_str) return NULL;
     VREF_AUTO(joined, PyUnicode_Concat(result, item_str));
     if (!joined) return NULL;
-    result = VSTEAL(joined);
+    VMOVE(result, VSTEAL(joined));
   }
   return VSTEAL(result);
 }
@@ -119,21 +131,27 @@ VFUNC_KW(vcall_xor_buffer) {
   return out;
 }
 
+/* times is `long`, not `int`: VKWOPT_INT (like VINT) always writes
+ * through a `long *` — passing an `int *` here used to be a silent
+ * pointer-type mismatch that only -Wincompatible-pointer-types caught. */
 VFUNC_KW(vcall_repeat) {
   const char *src; Py_ssize_t len;
-  int times;
+  long times;
   VEXPECT(1);
   if (!(src = VBYTES(0, &len))) return NULL;
   if (!VKWOPT_INT("times", &times, 1)) return NULL;
   PyObject *out = VNEW_BYTES(NULL, len * times);
   if (!out) return NULL;
   char *dst = PyBytes_AS_STRING(out);
-  for (int t = 0; t < times; t++)
+  for (long t = 0; t < times; t++)
     memcpy(dst + (Py_ssize_t)t * len, src, len);
   return out;
 }
 
+/* Previously: no VEXPECT, so VINT(0,..) read _a[0] unconditionally —
+ * range() with zero arguments read past the argument vector. */
 VFUNC(vcall_range) {
+  VEXPECT(1);
   long stop;
   if (!VINT(0, &stop)) return NULL;
   VREF_AUTO(list, PyList_New(0));
@@ -147,30 +165,58 @@ VFUNC(vcall_range) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   Point — vectorcall type with zero-alloc methods
+   Point — vectorcall type: fastcall methods AND a callable instance
    ═══════════════════════════════════════════════════════════════════════════ */
 
 VTYPE_HEAD(Point)
   double x, y;
 VTYPE_END(Point);
 
+/* Forward declaration: Point_call (below) constructs new Points via
+ * VNEW_CALLABLE(Point, ...), which needs Point_type; Point_new (below)
+ * also needs it to arm freshly allocated instances. VTOBJ_DEF's
+ * definition further down completes this tentative declaration — legal
+ * C, and the same pattern any self-referential/constructing type needs. */
+static PyTypeObject Point_type;
+
+/* Point's own vc_call: what runs when an existing Point instance is
+ * *called*, e.g. `p(1.0, -2.0)`. This used to be Point_vc, dead code
+ * wired up incorrectly as if calling the *type* `Point(x, y)` went
+ * through vectorcall (it doesn't — see pyfast.h's VTYPE_FLAGS doc
+ * comment). Now it is what it is actually declared as: the instance
+ * call, which returns a new Point translated by (dx, dy). */
 static PyObject *
-Point_vc(PyObject *callable,
-         PyObject *const *args, size_t nargsf, PyObject *kwnames)
+Point_call(VCALL_SIG)
 {
-  Py_ssize_t n = PyVectorcall_NARGS(nargsf);
-  if (n != 2) {
-    PyErr_Format(PyExc_TypeError,
-                 "Point() takes 2 arguments (%zd given)", n);
-    return NULL;
-  }
+  VCALL_BEGIN;
+  VSELF(Point);
+  VEXPECT(2);
+  double dx, dy;
+  VALL(VDOUBLE(0, &dx) && VDOUBLE(1, &dy));
+  Point *out = VNEW_CALLABLE(Point, Point_call);
+  if (!out) return NULL;
+  out->x = self->x + dx;
+  out->y = self->y + dy;
+  return (PyObject *)out;
+}
+
+/* Real construction path: Point(x, y). tp_new (not vc_call — see
+ * pyfast.h) parses via the standard (args, kwds) tuple/dict convention
+ * (there is no vectorcall hook for type construction available to
+ * extension authors) and arms vc_call via VNEW_CALLABLE so every live
+ * instance has a valid function pointer there before tp_call =
+ * PyVectorcall_Call can ever read it. */
+static PyObject *
+Point_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+  (void)kwds;
   double x, y;
-  VALL(_v_double(args[0], &x, "argument 0")
-       && _v_double(args[1], &y, "argument 1"));
-  Point *self = VNEW(Point);
+  if (!PyArg_ParseTuple(args, "dd", &x, &y)) return NULL;
+  Point *self = VNEW_CALLABLE(Point, Point_call);
   if (!self) return NULL;
   self->x = x;
   self->y = y;
+  (void)type;
   return (PyObject *)self;
 }
 
@@ -183,8 +229,11 @@ static PyObject *Point_dist(VMETHOD_SIG) {
   VRETURN_DOUBLE(sqrt(self->x * self->x + self->y * self->y));
 }
 
+/* Previously: no VEXPECT, so VDOUBLE(0,..) read _a[0] unconditionally —
+ * scale() with zero arguments read past the argument vector. */
 static PyObject *Point_scale(VMETHOD_SIG) {
   VSELF(Point);
+  VEXPECT(1);
   double factor;
   if (!VDOUBLE(0, &factor)) return NULL;
   self->x *= factor;
@@ -202,22 +251,45 @@ static PyObject *Point_move(VMETHOD_KW_SIG) {
   VRETURN_NONE;
 }
 
-static PyObject *Point_repr(VMETHOD_SIG) {
-  VSELF(Point);
-  return PyUnicode_FromFormat("Point(%.16g, %.16g)", self->x, self->y);
+/* Two independent, previously-unknown bugs used to live here:
+ *
+ * 1. PyUnicode_FromFormat() only understands a small fixed whitelist of
+ *    conversions (%d/%ld/%zd/%s/%p/%A/%U/%S/%R/...) — unlike libc
+ *    printf, it has no %f/%g float support. `PyUnicode_FromFormat(
+ *    "Point(%.16g, %.16g)", ...)` raised SystemError("invalid format
+ *    string: ...") the moment it actually ran (confirmed by directly
+ *    invoking it against the pinned 3.14 runtime). snprintf() into a
+ *    stack buffer, then PyUnicode_FromString(), is the correct way to
+ *    interpolate a float with libc's format machinery.
+ *
+ * 2. Naming entries "__repr__"/"__str__" in tp_methods does NOT wire
+ *    them into the tp_repr/tp_str slots for a static (non-heap)
+ *    PyTypeObject like this one — that method-table-to-slot sync
+ *    (fixup_slot_dispatchers) only runs for heap types created via
+ *    the `class` statement / PyType_FromSpec. A static type's repr()/
+ *    str() builtins fall through to the default `<module.Point object
+ *    at 0x...>` unless tp_repr/tp_str are set directly, which is what
+ *    the two functions below do (matching the real `reprfunc`
+ *    signature — a single `PyObject *self`, not the fastcall triple).
+ */
+static PyObject *Point_tp_repr(PyObject *self) {
+  Point *p = (Point *)self;
+  char buf[64];
+  snprintf(buf, sizeof buf, "Point(%.16g, %.16g)", p->x, p->y);
+  return PyUnicode_FromString(buf);
 }
 
-static PyObject *Point_str(VMETHOD_SIG) {
-  VSELF(Point);
-  return PyUnicode_FromFormat("(%.2f, %.2f)", self->x, self->y);
+static PyObject *Point_tp_str(PyObject *self) {
+  Point *p = (Point *)self;
+  char buf[64];
+  snprintf(buf, sizeof buf, "(%.2f, %.2f)", p->x, p->y);
+  return PyUnicode_FromString(buf);
 }
 
 static PyMethodDef Point_methods[] = {
   VMETH_ENTRY("dist",  Point, dist,  "dist() -> float\nDistance from origin."),
   VMETH_ENTRY("scale", Point, scale, "scale(factor)\nMultiply coordinates by factor."),
   VMETH_KW_ENTRY("move", Point, move, "move(*, dx=0, dy=0)\nTranslate by (dx, dy)."),
-  VMETH_ENTRY("__repr__", Point, repr, NULL),
-  VMETH_ENTRY("__str__",  Point, str,  NULL),
   {NULL, NULL, 0, NULL}
 };
 
@@ -225,9 +297,12 @@ VTOBJ_DEF(Point,
   .tp_name = "vcall_demo.Point",
   .tp_flags = VTYPE_FLAGS,
   .tp_methods = Point_methods,
+  .tp_new = Point_new,
   .tp_dealloc = Point_dealloc,
   .tp_call = PyVectorcall_Call,
-  .tp_doc = "Point(x, y)",
+  .tp_repr = Point_tp_repr,
+  .tp_str = Point_tp_str,
+  .tp_doc = "Point(x, y) - call an instance p(dx, dy) to get a translated copy.",
 );
 
 /* ═══════════════════════════════════════════════════════════════════════════
