@@ -45,18 +45,46 @@ CxxInfo = provider(fields = ["include_dirs", "hdrs", "objects", "gcnos", "includ
 # physically at cpp/lib/pgt/core/types.hh is always included as
 # "pgt/core/types.hh") - derived below from the staging target's own package
 # path relative to cpp/lib. CxxInfo carries this as one node of a transitive
-# set (IncludeTreeSet) of staged-tree artifacts; consumers fold their deps'
-# tsets into ONE merged tset and traverse it ONCE (mirrors
-# rules/pkg.bzl's flatten_merged_package_entries()/rules/deno.bzl's
-# DenoSourceSet doc comments: diamond-safe by construction, since a shared
-# descendant node is only visited once no matter how many parents reach it),
-# turning each resulting artifact into a real `-I<artifact>` compiler arg -
-# a genuine Artifact reference in the action's command, not a literal string,
-# so it is a tracked input per this project's artifact-tracking law (see
-# rules/pkg.bzl's module docstring) - unlike a bare "-Icpp/lib" string, which
-# would make every header under cpp/lib reachable regardless of whether the
-# consuming target actually declared a dep on it.
+# set (IncludeTreeSet) of IncludeTreeNode records (artifact + the logical
+# paths it stages + its owning target, not a bare Artifact - see FIX A
+# below); consumers fold their deps' tsets into ONE merged tset and traverse
+# it ONCE (mirrors rules/pkg.bzl's flatten_merged_package_entries()/
+# rules/deno.bzl's DenoSourceSet doc comments: diamond-safe by construction,
+# since a shared descendant node is only visited once no matter how many
+# parents reach it), turning each resulting artifact into a real
+# `-I<artifact>` compiler arg - a genuine Artifact reference in the action's
+# command, not a literal string, so it is a tracked input per this project's
+# artifact-tracking law (see rules/pkg.bzl's module docstring) - unlike a
+# bare "-Icpp/lib" string, which would make every header under cpp/lib
+# reachable regardless of whether the consuming target actually declared a
+# dep on it.
+#
+# COLLISION DETECTION: two different cxx_library targets can stage the same
+# LOGICAL path from different physical locations (e.g. cpp/lib/a with
+# hdrs=["b/c.hh"] and cpp/lib/a/b with hdrs=["c.hh"] both produce
+# "a/b/c.hh") - each lands in its own -I tree, so without a check the
+# compiler would silently resolve whichever tree happens to appear earlier
+# on the command line. _flatten_include_trees fails at analysis time,
+# naming both owning targets, the moment two nodes in the same folded
+# closure claim the same logical path - mirrors rules/package.bzl's
+# _check_collisions()/dest-collision error style.
+#
+# ORDERING: buck2's TransitiveSet.traverse() defaults to (and is passed
+# here explicitly as) ordering = "preorder" - confirmed against this
+# project's pinned buck2 build's own generated docs (`buck2 docs
+# starlark-builtins`, build/TransitiveSet.md: `traverse(*, ordering: str =
+# "preorder")`). Preorder visits a node's own `value` before recursing into
+# its `children`, so _own_include_tree_tset's construction (own tree as the
+# node's `value`, deps' tsets as its `children`) already means a target's
+# own tree is walked, and therefore appears first in its own -I sequence,
+# before any dep's tree. This is made explicit below (rather than relying on
+# the default) purely for command-line determinism/cache stability - with
+# collision detection in place, no two reachable trees can define the same
+# logical path any more, so traversal order can no longer change which
+# header actually RESOLVES on a name clash.
 IncludeTreeSet = transitive_set()
+
+IncludeTreeNode = record(artifact = field(Artifact), paths = field(list[str]), owner = field(str))
 
 _LIB_ROOT = "cpp/lib"
 
@@ -74,7 +102,7 @@ def _logical_prefix(ctx: AnalysisContext) -> str:
   # casing this function's caller.
   return pkg
 
-def _stage_include_tree(ctx: AnalysisContext, hdrs: list) -> [Artifact, None]:
+def _stage_include_tree(ctx: AnalysisContext, hdrs: list) -> [IncludeTreeNode, None]:
   if not hdrs:
     return None
   prefix = _logical_prefix(ctx)
@@ -82,28 +110,49 @@ def _stage_include_tree(ctx: AnalysisContext, hdrs: list) -> [Artifact, None]:
   for hdr in hdrs:
     logical = "{}/{}".format(prefix, hdr.short_path) if prefix else hdr.short_path
     layout[logical] = hdr
-  return ctx.actions.symlinked_dir(ctx.attrs.name + "__include_tree__", layout)
+  tree = ctx.actions.symlinked_dir(ctx.attrs.name + "__include_tree__", layout)
+  return IncludeTreeNode(artifact = tree, paths = sorted(layout.keys()), owner = str(ctx.label.raw_target()))
 
 def _own_include_tree_tset(ctx: AnalysisContext, own_hdrs: list, tree_children: list):
-  own = _stage_include_tree(ctx, own_hdrs)
-  if own == None and not tree_children:
+  own_node = _stage_include_tree(ctx, own_hdrs)
+  if own_node == None and not tree_children:
     return None
-  return ctx.actions.tset(IncludeTreeSet, value = [own] if own != None else [], children = tree_children)
+  return ctx.actions.tset(IncludeTreeSet, value = [own_node] if own_node != None else [], children = tree_children)
 
 def _flatten_include_trees(ctx: AnalysisContext, tsets: list) -> list:
   tsets = [t for t in tsets if t != None]
   if not tsets:
     return []
   merged = ctx.actions.tset(IncludeTreeSet, children = tsets)
-  out = []
-  for value in merged.traverse():
-    out += value
-  return out
+  # ordering = "preorder" is buck2's documented default - see this file's
+  # IncludeTreeSet doc comment above for the empirical citation and why it's
+  # pinned here explicitly rather than left implicit.
+  nodes = []
+  for value in merged.traverse(ordering = "preorder"):
+    nodes += value
+  artifacts = []
+  seen_artifacts = {}
+  owner_by_path = {}
+  for node in nodes:
+    key = str(node.artifact)
+    if key not in seen_artifacts:
+      seen_artifacts[key] = True
+      artifacts.append(node.artifact)
+    for path in node.paths:
+      other_owner = owner_by_path.get(path)
+      if other_owner != None and other_owner != node.owner:
+        fail("cxx include tree: logical header path {!r} collision between {} and {} - rename one of the headers or its owning package so their logical paths (rooted at cpp/lib) don't collide".format(path, other_owner, node.owner))
+      owner_by_path[path] = node.owner
+  return artifacts
 
 def _include_args(ctx: AnalysisContext, tsets: list, include_dirs: list) -> list:
+  # include_dirs (the explicit escape hatch) is listed FIRST: gcc's -I
+  # search order is first-wins, so an explicit include_dirs entry can
+  # deliberately override a staged tree's header of the same name, while a
+  # staged tree can never silently shadow an explicit override.
   return (
-    [cmd_args(tree, format = "-I{}") for tree in _flatten_include_trees(ctx, tsets)] +
-    [cmd_args(d, format = "-I{}") for d in include_dirs]
+    [cmd_args(d, format = "-I{}") for d in include_dirs] +
+    [cmd_args(tree, format = "-I{}") for tree in _flatten_include_trees(ctx, tsets)]
   )
 
 def _check_flags(flags):
