@@ -259,7 +259,9 @@ def _py_extension_impl(ctx: AnalysisContext) -> list[Provider]:
     ctx.actions.run(
       cmd_args(args),
       category = "cxx_compile",
-      identifier = "{}/{}".format(ctx.attrs.name, src.short_path),
+      # Match rules/cxx.bzl's structured identifier contract so compdb can
+      # obtain its source field without parsing rendered action commands.
+      identifier = "source={}/{};{}/{}".format(ctx.label.package, src.short_path, ctx.attrs.name, src.short_path),
     )
     objects.append(obj)
 
@@ -390,21 +392,22 @@ _py_binary_rule = rule(
   } | _TOOLCHAIN_ATTRS | PACKAGE_LABELS_ATTR,
 )
 
-# --- py_test: unittest discovery over `start` (python/test by default),
-# mirroring repo.sh's `python -m unittest discover -s python/test -p
-# 'test_*.py'`, exposed as ExternalRunnerTestInfo so `buck2 test` runs it.
+# --- py_test: repo-local discovery over `start` (python/test by default),
+# supporting both unittest.TestCase methods and top-level `test_*` functions
+# (including async functions), exposed as ExternalRunnerTestInfo so `buck2
+# test` runs it.
 
 # Coverage (default-on under dbg - see rules/coverage.bzl's module
-# docstring): runs the SAME unittest discovery a second time, in-process
+# docstring): runs the SAME repo-local discovery a second time, in-process
 # under tools/py_cover.py's PEP 669 (sys.monitoring) line collector instead
-# of a plain `python -m unittest`, as its own ctx.actions.run() build action
+# of a plain subprocess, as its own ctx.actions.run() build action
 # separate from the ExternalRunnerTestInfo path `buck2 test` uses for
 # pass/fail reporting (mirrors rules/cxx.bzl's/rules/go.bzl's/
 # rules/deno.bzl's own coverage collection actions - see rules/coverage.bzl
 # for why). Only python/lib and python/app are measured (python/test itself
 # is excluded) - see tools/py_cover.py's own docstring. py_cover.py emits
 # lcov directly, so no further conversion is needed at merge time.
-def _py_test_coverage_action(ctx, gcc, py, srcs, roots):
+def _py_test_coverage_action(ctx, gcc, py, srcs, roots, start):
   lcov = ctx.actions.declare_output(ctx.attrs.name + ".lcov")
   # Every py_extension dep (e.g. python/lib/fastbytes) contributes a build
   # -output package dir as its PYTHONPATH root (a COPY of __init__.py
@@ -435,12 +438,12 @@ def _py_test_coverage_action(ctx, gcc, py, srcs, roots):
       ] + rewrite_args + [
         "--out",
         "\"$OUT\"",
+        "--runner",
+        ctx.attrs._py_test_runner,
         "--",
-        "-m",
-        "unittest",
         "discover",
         "-s",
-        ctx.attrs.start,
+        start,
         "-p",
         ctx.attrs.pattern,
       ],
@@ -449,7 +452,7 @@ def _py_test_coverage_action(ctx, gcc, py, srcs, roots):
   ]
   script, written = ctx.actions.write(ctx.attrs.name + "-cov.sh", lines, is_executable = True, allow_args = True)
   ctx.actions.run(
-    cmd_args(["/bin/sh", script, lcov.as_output()], hidden = srcs + written + roots + [gcc.gcc_dir, py.py_dir, ctx.attrs._py_cover]),
+    cmd_args(["/bin/sh", script, lcov.as_output()], hidden = srcs + written + roots + [gcc.gcc_dir, py.py_dir, ctx.attrs._py_cover, ctx.attrs._py_test_runner]),
     category = "py_test_coverage",
     identifier = ctx.attrs.name,
   )
@@ -460,25 +463,26 @@ def _py_test_impl(ctx: AnalysisContext) -> list[Provider]:
   py = _python_tools(ctx)
   dep_srcs, roots = _merge_pyinfo(ctx.attrs.deps)
   srcs = list(ctx.attrs.srcs) + dep_srcs
+  start = ctx.attrs.start or ctx.label.package
   lines = ["#!/bin/sh", "set -eu"] + _pythonpath_env_lines(roots) + [
     cmd_args(
-      ["exec"] + _loader_exec_prefix(gcc, py) + ["-m", "unittest", "discover", "-s", ctx.attrs.start, "-p", ctx.attrs.pattern],
+      ["exec"] + _loader_exec_prefix(gcc, py) + [ctx.attrs._py_test_runner, "discover", "-s", start, "-p", ctx.attrs.pattern],
       delimiter = " ",
     ),
   ]
   script, written = ctx.actions.write(ctx.attrs.name + ".sh", lines, is_executable = True, allow_args = True)
-  command = cmd_args(script, hidden = srcs + written + roots + [gcc.gcc_dir, py.py_dir])
+  command = cmd_args(script, hidden = srcs + written + roots + [gcc.gcc_dir, py.py_dir, ctx.attrs._py_test_runner])
   providers = [
     DefaultInfo(default_output = script, other_outputs = written),
     RunInfo(args = command),
     ExternalRunnerTestInfo(
-      type = "python_unittest",
+      type = "python_test",
       command = [command],
       run_from_project_root = True,
     ),
   ]
   if ctx.attrs._coverage_enabled:
-    lcov = _py_test_coverage_action(ctx, gcc, py, srcs, roots)
+    lcov = _py_test_coverage_action(ctx, gcc, py, srcs, roots, start)
     providers.append(CoverageInfo(kind = "python_lcov", primary = lcov, tool = None, gcnos = None, toolchain_dir = None))
   return providers
 
@@ -488,9 +492,10 @@ _py_test_rule = rule(
     "deps": attrs.list(attrs.dep(providers = [PyInfo]), default = []),
     "pattern": attrs.string(default = "test_*.py"),
     "srcs": attrs.list(attrs.source(), default = []),
-    "start": attrs.string(default = "python/test"),
+    "start": attrs.option(attrs.string(), default = None),
     "_coverage_enabled": attrs.bool(default = coverage_enabled_flag()),
     "_py_cover": attrs.source(default = "//:py_cover.py"),
+    "_py_test_runner": attrs.source(default = "//:py_test_runner.py"),
   } | _TOOLCHAIN_ATTRS,
 )
 
@@ -555,15 +560,15 @@ def _py_lock_consistency_test_impl(ctx: AnalysisContext) -> list[Provider]:
       "",
       "errors = []",
       "if actual_ext_suffix != expected_ext_suffix:",
-      "    errors.append('EXT_SUFFIX drift: tools.lock.toml=%r sysconfig=%r' % (expected_ext_suffix, actual_ext_suffix))",
+      "  errors.append('EXT_SUFFIX drift: tools.lock.toml=%r sysconfig=%r' % (expected_ext_suffix, actual_ext_suffix))",
       "if not actual_include.endswith(expected_include_subpath):",
-      "    errors.append('include path drift: tools.lock.toml subpath=%r sysconfig include=%r' % (expected_include_subpath, actual_include))",
+      "  errors.append('include path drift: tools.lock.toml subpath=%r sysconfig include=%r' % (expected_include_subpath, actual_include))",
       "",
       "if errors:",
-      "    for error in errors:",
-      "        print(error, file=sys.stderr)",
-      "    print('run: update tools.lock.toml [[artifact]] python entries, then tools/gen_toolchain_lock.py', file=sys.stderr)",
-      "    sys.exit(1)",
+      "  for error in errors:",
+      "    print(error, file=sys.stderr)",
+      "  print('run: update tools.lock.toml [[artifact]] python entries, then tools/gen_toolchain_lock.py', file=sys.stderr)",
+      "  sys.exit(1)",
       "print('tools.lock.toml python ext_suffix/include_subpath snapshot matches sysconfig')",
     ],
   )
@@ -606,10 +611,10 @@ def py_binary(**kwargs):
   kwargs.setdefault("default_target_platform", _DEFAULT_PLATFORM)
   _py_binary_rule(**kwargs)
 
-def py_test(**kwargs):
+def py_tests(**kwargs):
   kwargs.setdefault("default_target_platform", _DEFAULT_PLATFORM)
   # See rules/cxx.bzl's cxx_test macro for why: the coverage bxl now depends on
-  # py_test targets directly, which need to be reachable from the root
+  # py_tests targets directly, which need to be reachable from the root
   # package without editing every existing python/test/BUCK call site.
   kwargs.setdefault("visibility", ["PUBLIC"])
   _py_test_rule(**kwargs)

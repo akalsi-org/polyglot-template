@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Repo-local PEP 669 (sys.monitoring) line-coverage collector for py_test.
 
-Runs `unittest discover` in-process (rather than via `python -m unittest`
-as a subprocess) so sys.monitoring's LINE event can observe every executed
-source line belonging to the roots under measurement, then emits lcov
-directly. This repo's python lane is stdlib-only (no pip - see
-rules/python.bzl's module docstring), so this stands in for coverage.py.
+Runs the repo-local test runner in-process so sys.monitoring's LINE event
+can observe every executed Python source line belonging to the roots under
+measurement, then emits lcov directly. This repo's Python lane is
+stdlib-only (no pip - see rules/python.bzl's module docstring), so this
+stands in for coverage.py.
 
 Only files under one of --root (or one of --rewrite's OLD sides - see
 below) are recorded; files under --exclude (an absolute-or-relative prefix,
@@ -26,9 +26,12 @@ repo-relative source path.
 
 Usage:
   py_cover.py --root DIR [--root DIR ...] [--exclude DIR ...] \
-      [--rewrite OLD=NEW ...] --out OUT.lcov \
-      -- -m unittest discover -s python/test -p 'test_*.py'
+      [--rewrite OLD=NEW ...] --out OUT.lcov --runner RUNNER \
+      -- discover -s python/test -p 'test_*.py'
 """
+import argparse
+import dis
+import importlib.util
 import os
 import sys
 
@@ -38,6 +41,7 @@ def _parse_args(argv):
   excludes = []
   rewrites = []
   out_path = None
+  runner_path = None
   i = 0
   while i < len(argv):
     arg = argv[i]
@@ -54,6 +58,9 @@ def _parse_args(argv):
     elif arg == "--out":
       i += 1
       out_path = argv[i]
+    elif arg == "--runner":
+      i += 1
+      runner_path = argv[i]
     elif arg == "--":
       i += 1
       break
@@ -62,11 +69,13 @@ def _parse_args(argv):
     i += 1
   if out_path is None:
     sys.exit("py_cover.py: --out is required")
+  if runner_path is None:
+    sys.exit("py_cover.py: --runner is required")
   # Every --rewrite OLD side is implicitly also a --root: it names a
   # directory whose files should be recorded, just under a different
   # reported path.
   roots = roots + [old for old, _new in rewrites]
-  return roots, excludes, rewrites, out_path, argv[i:]
+  return roots, excludes, rewrites, out_path, runner_path, argv[i:]
 
 
 def _make_scope_check(roots, excludes):
@@ -85,12 +94,40 @@ def _make_scope_check(roots, excludes):
   return in_scope
 
 
-def _run_with_monitoring(unittest_argv, in_scope):
+def _load_runner(path):
+  spec = importlib.util.spec_from_file_location("repo_py_test_runner", path)
+  if spec is None or spec.loader is None:
+    raise RuntimeError("could not load test runner %r" % (path,))
+  module = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(module)
+  return module
+
+
+def _run_with_monitoring(runner_path, runner_argv, in_scope):
   hits = {}
+  executable = {}
+  seen_codes = set()
   tool_id = sys.monitoring.COVERAGE_ID
   sys.monitoring.use_tool_id(tool_id, "py_cover")
 
+  def remember_executable(code):
+    # The module's constants contain function, class, and comprehension code
+    # objects even when their bodies are never called, so walk them all rather
+    # than treating only observed LINE callbacks as executable source lines.
+    if id(code) in seen_codes:
+      return
+    seen_codes.add(id(code))
+    path = code.co_filename
+    if in_scope(path):
+      ap = os.path.abspath(path)
+      lines = executable.setdefault(ap, set())
+      lines.update(line for _offset, line in dis.findlinestarts(code) if line > 0)
+    for constant in code.co_consts:
+      if isinstance(constant, type(code)):
+        remember_executable(constant)
+
   def on_line(code, line_number):
+    remember_executable(code)
     path = code.co_filename
     if not in_scope(path):
       return sys.monitoring.DISABLE
@@ -102,18 +139,23 @@ def _run_with_monitoring(unittest_argv, in_scope):
   sys.monitoring.register_callback(tool_id, sys.monitoring.events.LINE, on_line)
   sys.monitoring.set_events(tool_id, sys.monitoring.events.LINE)
   try:
-    import unittest
-    old_argv = sys.argv
-    sys.argv = ["unittest"] + unittest_argv
-    try:
-      unittest.main(module=None, argv=sys.argv, exit=False)
-    finally:
-      sys.argv = old_argv
+    parser = argparse.ArgumentParser(add_help = False)
+    parser.add_argument("command")
+    parser.add_argument("-s", "--start", default = "python/test")
+    parser.add_argument("-p", "--pattern", default = "test_*.py")
+    parser.add_argument("-f", "--failfast", action = "store_true")
+    args = parser.parse_args(runner_argv)
+    if args.command != "discover":
+      raise RuntimeError("py_cover.py only supports runner discovery")
+    runner = _load_runner(runner_path)
+    result = runner.run_discovery(args.start, args.pattern, stream = sys.stderr, failfast = args.failfast)
+    if not result.wasSuccessful():
+      raise RuntimeError("covered test run failed")
   finally:
     sys.monitoring.set_events(tool_id, 0)
     sys.monitoring.register_callback(tool_id, sys.monitoring.events.LINE, None)
     sys.monitoring.free_tool_id(tool_id)
-  return hits
+  return hits, executable
 
 
 def _rewrite_path(ap, rewrites, cwd):
@@ -123,17 +165,18 @@ def _rewrite_path(ap, rewrites, cwd):
   return os.path.relpath(ap, cwd)
 
 
-def _write_lcov(hits, rewrites, out_path):
+def _write_lcov(hits, executable, rewrites, out_path):
   cwd = os.getcwd()
   lines_out = []
-  for ap in sorted(hits):
+  files = sorted(set(hits) | set(executable))
+  for ap in files:
     rel = _rewrite_path(ap, rewrites, cwd)
-    file_hits = hits[ap]
+    file_hits = hits.get(ap, {})
     lines_out.append("SF:%s" % rel)
     found = 0
     covered = 0
-    for line in sorted(file_hits):
-      count = file_hits[line]
+    for line in sorted(set(file_hits) | executable.get(ap, set())):
+      count = file_hits.get(line, 0)
       lines_out.append("DA:%d,%d" % (line, count))
       found += 1
       if count > 0:
@@ -149,12 +192,10 @@ def _write_lcov(hits, rewrites, out_path):
 
 
 def main(argv):
-  roots, excludes, rewrites, out_path, rest = _parse_args(argv)
-  if rest[:2] == ["-m", "unittest"]:
-    rest = rest[2:]
+  roots, excludes, rewrites, out_path, runner_path, rest = _parse_args(argv)
   in_scope = _make_scope_check(roots, excludes)
-  hits = _run_with_monitoring(rest, in_scope)
-  _write_lcov(hits, rewrites, out_path)
+  hits, executable = _run_with_monitoring(runner_path, rest, in_scope)
+  _write_lcov(hits, executable, rewrites, out_path)
 
 
 if __name__ == "__main__":

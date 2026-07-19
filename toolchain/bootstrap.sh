@@ -230,19 +230,19 @@ if ((dry_run == 0)); then
   deno_install="$LOCAL/toolchain/$target/deno-$deno_version"
   if [[ -n $deno_version && -x $deno_install/$deno_expected ]]; then
     if ((offline == 0)); then
-      # Entry list mirrors //:deno-cache's (root BUCK) - this seed is what
-      # the in-graph deno_cache action later resolves from inside its
-      # no-network namespace, so an entry missing here surfaces as that
-      # action's fail-closed "run ./repo.sh bootstrap" error, never a
-      # network fetch.
-      DENO_DIR="$LOCAL/cache/deno" "$deno_install/$deno_expected" cache --frozen \
-        "$ROOT/ts/app/hello/main.ts" \
-        "$ROOT/ts/app/server/main.ts" \
-        "$ROOT/ts/test/greeting_test.ts" \
-        "$ROOT/tsweb/app/site/main.tsx" \
-        "$ROOT/tsweb/test/app_test.tsx" \
-        "$ROOT/tsweb/test/title_test.ts" \
-        "$ROOT/tsweb/vite.config.ts"
+      # Buck owns the Deno source universe. Build only its manifest
+      # subtarget: this does not run deno_cache or depend on an existing
+      # seed, and prevents bootstrap from carrying a second entry list.
+      manifest_output=$(cd "$ROOT" && "$LOCAL/bin/buck2" build --show-output //:deno-cache[manifest])
+      manifest_path=$(printf '%s\n' "$manifest_output" | awk 'NF { print $NF }')
+      [[ $manifest_path == /* ]] || manifest_path="$ROOT/$manifest_path"
+      [[ $(printf '%s\n' "$manifest_path" | sed '/^$/d' | wc -l) == 1 && -f $manifest_path ]] || {
+        printf 'error: Buck did not produce exactly one Deno cache manifest\n' >&2; exit 1;
+      }
+      DENO_DIR="$LOCAL/cache/deno" python3 "$ROOT/tools/deno_cache_exec.py" \
+        --deno "$deno_install/$deno_expected" \
+        --manifest "$manifest_path" \
+        --root "$ROOT"
       printf 'bootstrap: cached locked Deno dependency graph\n'
     else
       printf 'bootstrap: preserved cached locked Deno dependency graph\n'

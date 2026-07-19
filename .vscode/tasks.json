@@ -1,0 +1,53 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Workspace: bootstrap pinned tools",
+      "type": "shell",
+      "command": "./repo.sh bootstrap",
+      "problemMatcher": []
+    },
+    {
+      "label": "Workspace: verify editor prerequisites",
+      "type": "shell",
+      "command": "./repo.sh doctor",
+      "problemMatcher": []
+    },
+    {
+      "label": "C++: refresh compile commands",
+      "type": "shell",
+      "command": "./repo.sh compile-commands",
+      "problemMatcher": []
+    },
+    {
+      "label": "Python: build native extension",
+      "type": "shell",
+      "command": "./repo.sh python-build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Python: run active file with native extension",
+      "type": "shell",
+      "command": "./repo.sh python \"${file}\"",
+      "problemMatcher": []
+    },
+    {
+      "label": "Deno: type check",
+      "type": "shell",
+      "command": "./repo.sh ts-build",
+      "problemMatcher": []
+    },
+    {
+      "label": "React: build site",
+      "type": "shell",
+      "command": "./repo.sh tsweb-build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Go: test",
+      "type": "shell",
+      "command": "./repo.sh go-test",
+      "problemMatcher": []
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Deno: debug active TypeScript file",
+      "type": "deno",
+      "request": "launch",
+      "program": "${file}"
+    }
+  ]
+}

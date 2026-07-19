@@ -53,8 +53,8 @@ gh release create packages/<name>/v<version> artifacts/* --verify-tag
 
 The release notes are the matching section from the repository-root
 `CHANGELOG.md`. Package versions and target eligibility come from
-`package.toml`; runtime closure validation comes from
-`runtime-resolution.lock.toml`.
+`packages/catalog.bzl`; runtime closure validation comes from the same
+Buck-owned catalog.
 
 ## Current Boundaries
 

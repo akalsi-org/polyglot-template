@@ -1,6 +1,9 @@
 # Fleet Substrate Decisions
 
 Status: proposed implementation baseline for the optional `infra` profile.
+The first executable deployment slice is strictly read-only: Buck materializes
+deployment plans and checks observed state; it does not provision, connect to,
+or mutate hosts.
 
 This document defines the minimum host substrate required by [DEPLOYMENT.md](DEPLOYMENT.md). It does not make infrastructure tooling part of the default build/package template.
 

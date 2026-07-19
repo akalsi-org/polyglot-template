@@ -1,21 +1,51 @@
-# repo.sh's python-test lane equivalent: unittest discovery over
+# repo.sh's python-test lane equivalent: repository test discovery over
 # python/test, a `python -m compileall` lint-parity check across the whole
 # lane, and a lock-consistency check that the tools.lock.toml python
 # ext_suffix/include_subpath snapshot still matches the pinned interpreter's
 # own sysconfig (see rules/python.bzl's py_lock_consistency_test).
 
-load("//rules:python.bzl", "py_compileall_check", "py_lock_consistency_test", "py_test")
+load("//rules:python.bzl", "py_compileall_check", "py_extension", "py_lock_consistency_test", "py_tests")
 
-py_test(
-  name = "unittest",
+py_extension(
+  name = "pyfast_test_extension",
+  language = "c",
+  cxx_deps = ["//cpp/lib/pyfast:pyfast"],
+  package = "pyfast_test_ext",
+  init_src = "extension_init.py",
+  srcs = ["pyfast_test_ext.c"],
+)
+
+py_tests(
+  name = "test",
   srcs = [
     "test_example.py",
     "test_fastbytes.py",
+    "test_pyfast_extension.py",
     "test_stubs.py",
   ],
   deps = [
     "//python/lib/fastbytes:fastbytes",
     "//python/lib/example:example",
+    ":pyfast_test_extension",
+  ],
+)
+
+# Explicit opt-profile twin for CI/compiler coverage. The regular target keeps
+# the repository's dbg default; callers can run only this target with:
+# buck2 test --target-platforms //config:x86_64-linux-musl-opt //python/test:test_opt
+py_tests(
+  name = "test_opt",
+  default_target_platform = "//config:x86_64-linux-musl-opt",
+  srcs = [
+    "test_example.py",
+    "test_fastbytes.py",
+    "test_pyfast_extension.py",
+    "test_stubs.py",
+  ],
+  deps = [
+    "//python/lib/fastbytes:fastbytes",
+    "//python/lib/example:example",
+    ":pyfast_test_extension",
   ],
 )
 
@@ -29,6 +59,7 @@ py_compileall_check(
   srcs = [
     "test_example.py",
     "test_fastbytes.py",
+    "test_pyfast_extension.py",
     "test_stubs.py",
   ],
   deps = [

@@ -15,8 +15,7 @@ repo/
 |- AGENTS.md -> .agents/md/overview.md
 |- repo.sh                         # public command surface
 |- tools.lock.toml                 # exact bootstrap artifacts
-|- package.toml                    # package declarations
-|- runtime-resolution.lock.toml    # runtime closure lock
+|- packages/catalog.bzl            # canonical package and runtime catalog
 |- BUCK, rules/, config/, platforms/, toolchains/  # Buck2 build graph
 |- toolchain/                      # bootstrap, target, lock, doctor helpers
 |- cpp/{lib,app,test}/             # C++ sources (BUCK-owned targets)
@@ -128,8 +127,8 @@ query over the buck2-built cpp/python actions.
 
 ## Packages And Releases
 
-`package.toml` declares package identity, version, targets, executables, and
-runtime requirements. `runtime-resolution.lock.toml` fixes the exact runtime
+`packages/catalog.bzl` declares package identity, version, targets, executables,
+runtime requirements, and the exact runtime
 closure. `./repo.sh package-validate` validates these contracts before package
 assembly.
 

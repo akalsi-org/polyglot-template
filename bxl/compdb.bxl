@@ -5,7 +5,9 @@ cxx_compile ones (rules/python.bzl's py_extension reuses the same
 "cxx_compile" category/action shape as rules/cxx.bzl's cxx_library/cxx_test,
 so the fastbytes compile action is picked up here without any extra
 filtering logic), and re-renders each as a standard {directory, file,
-arguments} compdb entry. `./repo.sh compile-commands` invokes this and
+arguments} compdb entry. The file comes from the structured
+``source=<repo-relative-path>;...`` action identifier emitted by both native
+rules, not a positional command argument. `./repo.sh compile-commands` invokes this and
 copies the result to the repo-root compile_commands.json (this bxl owns
 that file's content; there is no other generator). Invoke directly with:
 
@@ -13,7 +15,7 @@ that file's content; there is no other generator). Invoke directly with:
 
 The printed path (an ensured artifact under buck-out) is the generated
 compile_commands.json for this invocation's active profile (dbg by default;
-pass -m //config:opt / --target-platforms to generate the opt one instead,
+pass --target-platforms //config:<native-target>-opt to generate the opt one,
 same as any other cpp lane build).
 """
 
@@ -25,6 +27,15 @@ def _parse_rendered_list(value: str) -> list[str]:
     return []
   return [item.strip() for item in inner.split(", ")]
 
+def _source_from_identifier(value: str) -> str:
+  prefix = "source="
+  if not value.startswith(prefix) or ";" not in value:
+    fail("cxx_compile action is missing structured source metadata: {}".format(value))
+  source = value[len(prefix):].split(";", 1)[0]
+  if not source or source.startswith("/") or ".." in source.split("/"):
+    fail("invalid structured cxx_compile source metadata: {}".format(value))
+  return source
+
 def _impl(ctx: bxl.Context):
   targets = ctx.uquery().eval("//cpp/... + //python/...")
   actions = ctx.aquery().all_actions(targets)
@@ -35,10 +46,8 @@ def _impl(ctx: bxl.Context):
     if info.category.value() != "cxx_compile":
       continue
     cmd = _parse_rendered_list(info.cmd.value())
-    # Every cxx_compile action ends in `-c <source> -o <output>`
-    # (rules/cxx.bzl's _compile_one); the source is 3 tokens from the end.
-    source = cmd[-3]
-    file_path = source if source.startswith("/") else "{}/{}".format(root, source)
+    source = _source_from_identifier(info.identifier.value())
+    file_path = "{}/{}".format(root, source)
     entries.append({
       "directory": root,
       "file": file_path,

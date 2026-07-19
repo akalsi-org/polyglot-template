@@ -1,0 +1,23 @@
+load("//rules:deploy.bzl", "deployment_plan", "deployment_readonly_contract_test")
+
+# This is an executable contract fixture, not a production environment. New
+# deployments declare their complete desired state as a deployment_plan() here
+# (or in their owning package), then Buck materializes a deterministic plan.
+deployment_plan(
+  name = "example-plan",
+  group = "example",
+  environment = "test",
+  target = "x86_64-linux-musl",
+  domain = "example.test",
+  packages = ["polyglot-demo@0.1.0"],
+  hosts = ["edge-test-1"],
+  routes = {"demo": "polyglot-demo"},
+  tool = "readonly.py",
+  visibility = ["PUBLIC"],
+)
+
+deployment_readonly_contract_test(
+  name = "readonly-contract",
+  plan = ":example-plan",
+  tool = "readonly.py",
+)

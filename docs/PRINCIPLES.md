@@ -61,7 +61,7 @@ avoid: copying build logic into repo.sh or first-party Buck2 rules
 ```text
 principle: choose one source artifact and derive all presentations from it
 evidence: Flow's native manifest derives build graph and compile tooling; schema skills derive all languages from one IR
-boundary: BUCK targets own compile actions; schema owns generated code; package.toml owns package identity while the Buck2 graph owns staging
+boundary: BUCK targets own compile actions, generated code contracts, package identity, and staging
 validate: deterministic regeneration produces no diff and drift checks compare normalized models
 falsifier: the derived artifact contains independent user-authored information that cannot live in the source
 avoid: separately maintaining compile source lists, compdb commands, tests, and package file lists

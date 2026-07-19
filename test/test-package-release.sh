@@ -6,9 +6,6 @@ tool="$root/tools/package_release.py"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-sed -e 's/loader_sha256 = "UNRESOLVED"/loader_sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"/g' \
-    -e 's|loader_path = "UNRESOLVED:[^"]*"|loader_path = "lib/ld-musl.so.1"|g' \
-    "$root/runtime-resolution.lock.toml" >"$tmp/resolved-runtime.lock.toml"
 sed -e '0,/sha256 = "UNRESOLVED"/s//sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"/' \
     -e '0,/loader = "UNRESOLVED:[^"]*"/s//loader = "lib\/ld-musl.so.1"/' \
     "$root/tools.lock.toml" >"$tmp/resolved-tools.lock.toml"
@@ -19,7 +16,7 @@ printf '#!/usr/bin/env bash\nexit 0\n' >"$build/bin/gateway"
 printf '#!/usr/bin/env bash\nexit 0\n' >"$build/bin/gateway-admin"
 chmod +x "$build/bin/gateway" "$build/bin/gateway-admin"
 
-common=(--root "$root" --manifest "$root/package.toml" --lock "$tmp/resolved-runtime.lock.toml" --tools-lock "$tmp/resolved-tools.lock.toml" --dist-dir "$tmp/dist" --changelog "$root/CHANGELOG.md")
+common=(--root "$root" --catalog "$root/packages/catalog.bzl" --tools-lock "$tmp/resolved-tools.lock.toml" --dist-dir "$tmp/dist" --changelog "$root/CHANGELOG.md")
 
 archive=$(python3 "$tool" "${common[@]}" package --package gateway --target x86_64-linux-musl --profile opt --build-dir "$build")
 cp "$archive" "$tmp/first-package.tar.gz"
@@ -36,9 +33,9 @@ if python3 "$tool" "${common[@]}" release-check --package gateway --target x86_6
   exit 1
 fi
 
-sed 's/loader_sha256 = "[a-f0-9]*"/loader_sha256 = "UNRESOLVED"/g' \
-  "$root/runtime-resolution.lock.toml" >"$tmp/unresolved-runtime.lock.toml"
-if python3 "$tool" --root "$root" --manifest "$root/package.toml" --lock "$tmp/unresolved-runtime.lock.toml" --tools-lock "$root/tools.lock.toml" --dist-dir "$tmp/unresolved" package --package gateway --target x86_64-linux-musl --profile opt --build-dir "$build" >/dev/null 2>&1; then
+sed 's/"loader_sha256": "[a-f0-9]*"/"loader_sha256": "UNRESOLVED"/g' \
+  "$root/packages/catalog.bzl" >"$tmp/unresolved-catalog.bzl"
+if python3 "$tool" --root "$root" --catalog "$tmp/unresolved-catalog.bzl" --tools-lock "$root/tools.lock.toml" --dist-dir "$tmp/unresolved" package --package gateway --target x86_64-linux-musl --profile opt --build-dir "$build" >/dev/null 2>&1; then
   echo "package unexpectedly accepted unresolved runtime closure" >&2
   exit 1
 fi

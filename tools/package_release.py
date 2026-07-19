@@ -20,7 +20,7 @@ import package_model
 
 # Hard ceiling on any single smoke execution (defense-in-depth): a smoke
 # that can hang forever is a broken smoke regardless of whether the
-# executable was given the right args (e.g. a manifest typo, or a future
+# executable was given the right args (e.g. a catalog typo, or a future
 # long-running executable nobody remembered to add smoke_args for). 60s is
 # generous for every executable in this repo's packages today (all exit in
 # well under a second).
@@ -41,12 +41,12 @@ def load(path: Path) -> dict[str, Any]:
     return tomllib.load(stream)
 
 
-def catalog(manifest: Path) -> dict[str, dict[str, Any]]:
-  return package_model.packages(load(manifest))
+def catalog(catalog_path: Path) -> dict[str, dict[str, Any]]:
+  return package_model.packages(package_model.load(catalog_path))
 
 
-def package_entry(manifest: Path, name: str) -> dict[str, Any]:
-  packages = catalog(manifest)
+def package_entry(catalog_path: Path, name: str) -> dict[str, Any]:
+  packages = catalog(catalog_path)
   require(name in packages, f"unknown package: {name}")
   entry = packages[name]
   require(entry["kind"] == "application", f"{name}: only applications can be assembled")
@@ -103,15 +103,15 @@ def make_archive(stage: Path, archive: Path) -> None:
 
 
 def resolve_closure(args: argparse.Namespace, package_name: str, target: str) -> tuple[dict[str, Any], dict[str, Any]]:
-  return package_model.resolve(load(args.manifest), load(args.lock), load(args.tools_lock), package_name, target)
+  return package_model.resolve(package_model.load(args.catalog), load(args.tools_lock), package_name, target)
 
 
 def assemble(args: argparse.Namespace) -> int:
-  entry = package_entry(args.manifest, args.package)
+  entry = package_entry(args.catalog, args.package)
   target = args.target
   require(target in entry["supported_targets"], f"{args.package}: target is not supported: {target}")
   closure, runtime_ref = resolve_closure(args, args.package, target)
-  # assemble() is for manifest-declared packages with no buck2 package()
+  # assemble() is for catalog-declared packages with no buck2 package()
   # target (e.g. gateway, schema-cli) - a package with a buck2 target (e.g.
   # polyglot-demo, polyglot-server) is built and archived entirely in-graph
   # by //packages:<name> (see rules/package.bzl); repo.sh's `package`
@@ -169,7 +169,7 @@ def read_json(path: Path) -> dict[str, Any]:
 
 
 def smoke(args: argparse.Namespace) -> int:
-  entry = package_entry(args.manifest, args.package)
+  entry = package_entry(args.catalog, args.package)
   with tempfile.TemporaryDirectory(prefix="package-smoke-") as scratch_name:
     scratch = Path(scratch_name)
     extract_archive(args.archive, scratch)
@@ -206,7 +206,7 @@ def smoke(args: argparse.Namespace) -> int:
             f"{args.package}: smoke execution of {executable!r} did not exit within "
             f"{SMOKE_EXECUTE_TIMEOUT_SECONDS}s (command: {command!r}) - if this executable "
             f"legitimately needs different arguments to exit on its own, declare them via "
-            f"package.toml's smoke_args"
+            f"packages/catalog.bzl's smoke_args"
           ) from None
   print("package smoke: ok")
   return 0
@@ -229,7 +229,7 @@ def changelog_section(changelog: Path, tag: str) -> str:
 
 
 def release_check(args: argparse.Namespace) -> int:
-  entry = package_entry(args.manifest, args.package)
+  entry = package_entry(args.catalog, args.package)
   tag = args.tag
   require(tag == expected_tag(entry), f"tag must be {expected_tag(entry)}")
   changelog_section(args.changelog, tag)
@@ -249,8 +249,7 @@ def release_notes(args: argparse.Namespace) -> int:
 def main() -> int:
   parser = argparse.ArgumentParser()
   parser.add_argument("--root", type=Path, default=Path.cwd())
-  parser.add_argument("--manifest", type=Path, default=Path("package.toml"))
-  parser.add_argument("--lock", type=Path, default=Path("runtime-resolution.lock.toml"))
+  parser.add_argument("--catalog", type=Path, default=Path("packages/catalog.bzl"))
   parser.add_argument("--tools-lock", type=Path, default=Path("tools.lock.toml"))
   parser.add_argument("--dist-dir", type=Path, default=Path("dist"))
   parser.add_argument("--changelog", type=Path, default=Path("CHANGELOG.md"))
@@ -274,7 +273,7 @@ def main() -> int:
   args = parser.parse_args()
   try:
     args.root = args.root.resolve()
-    for attr in ("manifest", "lock", "tools_lock", "dist_dir", "changelog"):
+    for attr in ("catalog", "tools_lock", "dist_dir", "changelog"):
       setattr(args, attr, getattr(args, attr).resolve())
     if args.command == "package":
       if args.build_dir is not None:

@@ -47,7 +47,8 @@ indentation and project naming conventions.
 Do not use host `python`, `pip`, or a virtual environment for repository work.
 `python-build` stages native extension outputs under `build/python/<target>/lib`
 and updates the canonical compilation database. Keep pure Python tests under
-`python/test/` using the existing `unittest` discovery pattern.
+`python/test/` as top-level `test_*` functions; `py_tests()` discovers them
+with the repository's readable stdlib-only runner.
 
 ## TypeScript
 

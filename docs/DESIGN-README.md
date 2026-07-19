@@ -42,7 +42,7 @@ The repository owns tool provenance, lifecycle policy, packaging, benchmarks, an
 8. Go produces native binaries; Green Tea GC is the Go 1.26 default. The current wrapper enables `jsonv2` for every Go command.
 9. Deno owns the implemented TypeScript checking, formatting, linting, testing, and local execution; Vite owns React 19 browser bundles.
 10. Python applications reference one compatible, independently released runtime package. The default stripped standalone runtime makes no JIT claim; an experimental source-built JIT variant is separate.
-11. Packages and runtimes are independently versioned and released. Package runtime requirements are declared in `package.toml`; resolution selects the matching host-triplet runtime closure. No global repository tarball is required.
+11. Packages and runtimes are independently versioned and released. Package runtime requirements are declared in `packages/catalog.bzl`; resolution selects the matching host-triplet runtime closure. No global repository tarball is required.
 12. The implemented package format is deterministic `.tar.gz`, with consumer smoke checks from clean extraction.
 13. `.agents/md/overview.md` is the canonical AI guide and root `AGENTS.md` is a relative symlink to it.
 14. `.agents/skills/` is the repository skill root when repository-owned skills are added. Vendor-specific `.claude/`, `.codex/`, `.grok/`, and runtime state remain ignored and machine-local.

@@ -215,6 +215,14 @@ def _deno_cache_impl(ctx: AnalysisContext) -> list[Provider]:
   srcs = merge_direct_deno_sources(ctx, flatten_deno_sources(ctx, ctx.attrs.deps), ctx.attrs.srcs)
   layout = _entries_to_layout(ctx.attrs.deno_json, ctx.attrs.deno_lock, srcs)
   staged = ctx.actions.symlinked_dir(ctx.label.name + "-staged", layout)
+  # Cache every TypeScript module in the declared source universe.  This is
+  # intentionally derived from Buck inputs, not an independently maintained
+  # representative-entry list.  The same manifest is exposed to bootstrap,
+  # making its seed and the graph action use exactly one contract.
+  entries = sorted([path for path in srcs.keys() if path.endswith(".ts") or path.endswith(".tsx")])
+  if not entries:
+    fail("{} has no TypeScript cache entries".format(ctx.label.raw_target()))
+  manifest = ctx.actions.write_json(ctx.label.name + "-manifest.json", entries)
 
   deno_dir_out = ctx.actions.declare_output(ctx.label.name + "-deno-dir", dir = True)
   node_modules_out = ctx.actions.declare_output(ctx.label.name + "-node-modules", dir = True)
@@ -231,7 +239,8 @@ def _deno_cache_impl(ctx: AnalysisContext) -> list[Provider]:
       "OUT_DENO_DIR=\"$ROOT/$3\"",
       "OUT_NODE_MODULES=\"$ROOT/$4\"",
       "PRUNE=\"$ROOT/$5\"",
-      "shift 5",
+      "CACHE_EXEC=\"$ROOT/$6\"",
+      "MANIFEST=\"$ROOT/$7\"",
       "chmod +x \"$DENO\"",
       "WORK=$(mktemp -d)",
       "trap 'rm -rf \"$WORK\"' EXIT",
@@ -271,7 +280,7 @@ def _deno_cache_impl(ctx: AnalysisContext) -> list[Provider]:
       "  echo 'error: user+net namespaces unavailable, so deno offline resolution cannot be enforced. Set POLYGLOT_ALLOW_ONLINE_DENO_CACHE=1 to explicitly allow this action to fetch (breaking offline-after-bootstrap), or run on a host with unprivileged userns.' >&2",
       "  exit 1",
       "fi",
-      "if ! run_offline \"$DENO\" cache --frozen \"$@\"; then",
+      "if ! run_offline python3 \"$CACHE_EXEC\" --deno \"$DENO\" --manifest \"$MANIFEST\" --root \"$WORK\"; then",
       "  echo 'error: deno cache failed (deno output above). If it needed the network, the .local/cache/deno seed is stale or incomplete - run ./repo.sh bootstrap. Otherwise fix the reported source/lock problem; graph actions never fetch.' >&2",
       "  exit 1",
       "fi",
@@ -291,7 +300,7 @@ def _deno_cache_impl(ctx: AnalysisContext) -> list[Provider]:
   )
 
   ctx.actions.run(
-    cmd_args(["/bin/sh", script, staged, deno, deno_dir_out.as_output(), node_modules_out.as_output(), ctx.attrs._prune_tool] + _resolve_entries(ctx)),
+    cmd_args(["/bin/sh", script, staged, deno, deno_dir_out.as_output(), node_modules_out.as_output(), ctx.attrs._prune_tool, ctx.attrs._cache_exec_tool, manifest]),
     category = "deno_cache",
     identifier = ctx.label.name,
     local_only = True,
@@ -301,6 +310,7 @@ def _deno_cache_impl(ctx: AnalysisContext) -> list[Provider]:
     sub_targets = {
       "deno-dir": [DefaultInfo(default_output = deno_dir_out)],
       "node-modules": [DefaultInfo(default_output = node_modules_out)],
+      "manifest": [DefaultInfo(default_output = manifest)],
     },
   )]
 
@@ -311,6 +321,7 @@ _deno_cache_rule = rule(
     "deno_json": attrs.source(default = "//:deno.json"),
     "deno_lock": attrs.source(default = "//:deno.lock"),
     "_prune_tool": attrs.source(default = "//:deno_store_prune.py"),
+    "_cache_exec_tool": attrs.source(default = "//:deno_cache_exec.py"),
     # deps of DenoSourcesInfo targets (deno_library/deno_app) contribute the
     # bulk of the staged tree without a hand-written path dict; `srcs` stays
     # available for the rare direct addition/override.

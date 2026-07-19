@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 import re
@@ -22,8 +23,19 @@ class ModelError(ValueError):
 
 
 def load(path: Path) -> dict:
-  with path.open("rb") as stream:
-    return tomllib.load(stream)
+  """Read the literal PACKAGE_CATALOG assignment from packages/catalog.bzl.
+
+  The catalog deliberately contains only literal data.  Parsing it instead of
+  importing it keeps this helper side-effect free and makes the Buck file the
+  authority rather than a mirrored TOML manifest.
+  """
+  tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+  for node in tree.body:
+    if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "PACKAGE_CATALOG" for target in node.targets):
+      value = ast.literal_eval(node.value)
+      require(isinstance(value, dict), "PACKAGE_CATALOG must be a dictionary")
+      return value
+  raise ModelError(f"{path}: missing literal PACKAGE_CATALOG assignment")
 
 
 def require(condition: bool, message: str) -> None:
@@ -34,7 +46,7 @@ def require(condition: bool, message: str) -> None:
 def packages(model: dict) -> dict[str, dict]:
   require(model.get("schema_version") == 1, "package schema_version must be 1")
   result: dict[str, dict] = {}
-  for item in model.get("package", []):
+  for item in model.get("packages", []):
     name = item.get("name", "")
     require(bool(NAME.fullmatch(name)), f"invalid package name: {name!r}")
     require(name not in result, f"duplicate package: {name}")
@@ -64,7 +76,7 @@ def packages(model: dict) -> dict[str, dict]:
       require(bool(NAME.fullmatch(item.get("runtime_name", ""))), f"{name}: runtime_name is required")
       require(bool(item.get("variant")), f"{name}: variant is required")
       require(bool(NAME.fullmatch(item.get("loader_tool", ""))), f"{name}: loader_tool is required")
-      artifacts = item.get("artifact", [])
+      artifacts = item.get("artifacts", [])
       require({a.get("target") for a in artifacts} == set(targets), f"{name}: exactly one artifact per supported target is required")
       require(all(DIGEST.fullmatch(a.get("sha256", "")) for a in artifacts), f"{name}: invalid artifact digest")
     result[name] = item
@@ -80,7 +92,7 @@ def compatible(constraint: str, version: str) -> bool:
   return actual >= tuple(base) and actual[0] == base[0]
 
 
-def resolve(model: dict, lock: dict, tools_lock: dict, package_name: str, target: str, *, allow_unresolved_loader: bool = False) -> tuple[dict, dict]:
+def resolve(model: dict, tools_lock: dict, package_name: str, target: str, *, allow_unresolved_loader: bool = False) -> tuple[dict, dict]:
   catalog = packages(model)
   require(package_name in catalog, f"unknown package: {package_name}")
   app = catalog[package_name]
@@ -89,7 +101,7 @@ def resolve(model: dict, lock: dict, tools_lock: dict, package_name: str, target
   runtime_req = app.get("runtime")
   runtime_ref = None
   if runtime_req:
-    matches = [x for x in lock.get("resolution", []) if x.get("package") == package_name and x.get("target") == target]
+    matches = [x for x in model.get("runtime_resolutions", []) if x.get("package") == package_name and x.get("target") == target]
     require(len(matches) == 1, f"{package_name}: expected exactly one locked runtime for {target}")
     resolved = matches[0]
     runtime = catalog.get(resolved.get("runtime_package"))
@@ -98,7 +110,7 @@ def resolve(model: dict, lock: dict, tools_lock: dict, package_name: str, target
     require(resolved.get("runtime_version") == runtime["version"] and compatible(runtime_req["version"], runtime["version"]), f"{package_name}: locked runtime version is incompatible")
     require(resolved.get("variant") == runtime_req["variant"] == runtime["variant"], f"{package_name}: locked runtime variant mismatch")
     require(target in runtime["supported_targets"], f"{package_name}: runtime does not support {target}")
-    artifact = next((a for a in runtime["artifact"] if a["target"] == target), None)
+    artifact = next((a for a in runtime["artifacts"] if a["target"] == target), None)
     require(artifact is not None, f"{package_name}: runtime artifact is missing for {target}")
     for key in ("artifact", "sha256"):
       expected = artifact["filename" if key == "artifact" else key]
@@ -130,10 +142,10 @@ def write_json(path: Path, value: dict) -> None:
 
 def main() -> int:
   parser = argparse.ArgumentParser()
-  parser.add_argument("--manifest", type=Path, default=Path("package.toml"))
-  parser.add_argument("--lock", type=Path, default=Path("runtime-resolution.lock.toml"))
+  parser.add_argument("--catalog", type=Path, default=Path("packages/catalog.bzl"))
   parser.add_argument("--tools-lock", type=Path, default=Path("tools.lock.toml"))
   sub = parser.add_subparsers(dest="command", required=True)
+  sub.add_parser("list")
   sub.add_parser("validate")
   resolver = sub.add_parser("resolve")
   resolver.add_argument("--package", required=True)
@@ -141,25 +153,36 @@ def main() -> int:
   resolver.add_argument("--out-dir", type=Path)
   args = parser.parse_args()
   try:
-    model = load(args.manifest)
-    tools_lock = load(args.tools_lock)
+    model = load(args.catalog)
+    # tools.lock.toml is intentionally still a bootstrap trust root. It is
+    # the one external-tool format that cannot be moved behind Buck.
+    with args.tools_lock.open("rb") as stream:
+      tools_lock = tomllib.load(stream)
     catalog = packages(model)
-    if args.command == "validate":
-      lock = load(args.lock)
-      require(lock.get("schema_version") == 1, "resolution lock schema_version must be 1")
+    if args.command == "list":
+      print("NAME\tVERSION\tKIND\tTARGETS\tEXECUTABLES")
+      for name, item in sorted(catalog.items()):
+        print("\t".join((
+          name,
+          item["version"],
+          item["kind"],
+          ",".join(item["supported_targets"]),
+          ",".join(item.get("executables", [])) or "-",
+        )))
+    elif args.command == "validate":
       for name, item in catalog.items():
         if item.get("runtime"):
           for target in item["supported_targets"]:
-            resolve(model, lock, tools_lock, name, target, allow_unresolved_loader=True)
+            resolve(model, tools_lock, name, target, allow_unresolved_loader=True)
       print("package model valid")
     else:
-      closure, runtime_ref = resolve(model, load(args.lock), tools_lock, args.package, args.target)
+      closure, runtime_ref = resolve(model, tools_lock, args.package, args.target)
       if args.out_dir:
         write_json(args.out_dir / "closure.json", closure)
         if runtime_ref:
           write_json(args.out_dir / "runtime-ref.json", runtime_ref)
       print(json.dumps(closure, sort_keys=True, separators=(",", ":")))
-  except (OSError, tomllib.TOMLDecodeError, ModelError) as error:
+  except (OSError, SyntaxError, ValueError, ModelError) as error:
     print(f"package model error: {error}", file=sys.stderr)
     return 2
   return 0

@@ -86,6 +86,32 @@ target_platform_args() {
   printf -- '--target-platforms\n//config:%s-opt\n' "$target"
 }
 
+# Package publication is intentionally Buck2-owned. A catalog entry is
+# release metadata, not evidence that this checkout knows how to build its
+# executable payload: only a //packages:<name> package() target supplies that
+# evidence.  Keep the target probe in one place so `package` and CI's early
+# tag gate fail with the same actionable error instead of falling through to
+# the legacy raw-build-dir assembler (which repo.sh never populated).
+require_buck_package_target() {
+  local name=$1 probe_err probe_status
+  probe_err=$(mktemp)
+  if "$POLYGLOT_BUCK2" targets "//packages:$name" >/dev/null 2>"$probe_err"; then
+    rm -f "$probe_err"
+    return 0
+  else
+    probe_status=$?
+  fi
+  if grep -q '^Unknown target `' "$probe_err"; then
+    rm -f "$probe_err"
+    printf 'error: package %q has no //packages:%s build target; catalog-only packages cannot be assembled or released by this repository\n' "$name" "$name" >&2
+    return 2
+  fi
+  printf 'error: buck2 targets probe for //packages:%s failed:\n' "$name" >&2
+  cat "$probe_err" >&2
+  rm -f "$probe_err"
+  return "$probe_status"
+}
+
 usage() {
   cat <<'EOF'
 Usage: ./repo.sh <command> [options]
@@ -104,7 +130,7 @@ Commands:
   lint                         Run buck2's lint-as-test targets plus infra-lint.
   build [dbg|opt]              Build every lane's primary outputs (discovered by rule kind).
   coverage                     Build the merged dbg coverage report (bxl/coverage.bxl).
-  test                         Test every language target (buck2 test //...).
+  test [dbg|opt]               Test every language target in the selected profile (default: dbg).
   compile-commands [dbg|opt]   Materialize compile_commands.json via the BXL compdb.
   cpp-build [dbg|opt]          Build the C++ hello binary via buck2.
   cpp-run [dbg|opt]            Run the C++ app through buck2.
@@ -121,8 +147,11 @@ Commands:
   go-build                     Build the Go application via buck2.
   go-test                      Build, run, and test the Go lane via buck2.
   infra-test                   Run repository infrastructure tests (bootstrap/workflow/package).
+  package-list                 List declared package identity, targets, and executables.
+  package-explain <name>       Show catalog identity, runtime closure, and Buck target status.
   package-validate             Validate package and runtime closure metadata.
   package-resolve <name> [out] Resolve an exact native-target package closure.
+  package-target-check <name>  Require a Buck2 package target suitable for release.
   package <name> [dbg|opt]     Assemble a deterministic package from build outputs.
   package-smoke <archive> <name>
                                Verify a packaged artifact and exact runtime closure.
@@ -189,24 +218,6 @@ case "$command" in
     "$ROOT/repo.sh" format --check
     setup_environment
     "$POLYGLOT_BUCK2" test //... --labels lint
-    # deno-cache-coverage: //:deno-cache's deps list is hand-declared (a
-    # BUCK file cannot query the graph), so guard it fail-closed here -
-    # every deno_library/deno_app in the graph must be inside its dep
-    # closure, or `deno run --cached-only` in that component fails later
-    # with a far-away resolution error instead of a red lint.
-    _deno_err=$(mktemp)
-    mapfile -t _deno_all < <("$POLYGLOT_BUCK2" uquery \
-      "kind('^_deno_(library|app)_rule$', '//...')" 2>"$_deno_err" | grep '^root//' | sort)
-    ((${#_deno_all[@]} > 0)) || { cat "$_deno_err" >&2; rm -f "$_deno_err"; printf 'error: deno-cache-coverage query found no deno components (query failure?)\n' >&2; exit 1; }
-    mapfile -t _deno_covered < <("$POLYGLOT_BUCK2" uquery \
-      "kind('^_deno_(library|app)_rule$', deps('//:deno-cache'))" 2>"$_deno_err" | grep '^root//' | sort)
-    rm -f "$_deno_err"
-    _deno_missing=$(comm -23 <(printf '%s\n' "${_deno_all[@]}") <(printf '%s\n' "${_deno_covered[@]}"))
-    if [[ -n $_deno_missing ]]; then
-      printf 'error: deno components not covered by //:deno-cache deps (add them so `deno run --cached-only` can resolve their imports):\n%s\n' "$_deno_missing" >&2
-      exit 1
-    fi
-    printf 'deno-cache-coverage: ok (%d components)\n' "${#_deno_all[@]}"
     ;;
   build)
     profile=${1:-dbg}
@@ -234,9 +245,12 @@ case "$command" in
     "$POLYGLOT_BUCK2" bxl //bxl:coverage.bxl:coverage
     ;;
   test)
-    (($# == 0)) || { printf 'usage: ./repo.sh test\n' >&2; exit 2; }
+    (($# <= 1)) || { printf 'usage: ./repo.sh test [dbg|opt]\n' >&2; exit 2; }
+    profile=${1:-dbg}
+    [[ $profile == dbg || $profile == opt ]] || { printf 'error: profile must be dbg or opt\n' >&2; exit 2; }
     setup_environment
-    "$POLYGLOT_BUCK2" test //...
+    mapfile -t plat < <(target_platform_args "$profile")
+    "$POLYGLOT_BUCK2" test "${plat[@]}" //...
     ;;
   compile-commands)
     profile=${1:-${POLYGLOT_CPP_PROFILE:-dbg}}
@@ -363,13 +377,18 @@ case "$command" in
     "$POLYGLOT_BUCK2" test //go/...
     ;;
   package-validate)
-    python3 "$ROOT/tools/package_model.py" --manifest "$ROOT/package.toml" \
-      --lock "$ROOT/runtime-resolution.lock.toml" --tools-lock "$ROOT/tools.lock.toml" validate
+    setup_environment
+    "$POLYGLOT_BUCK2" test //packages:manifest-validate
+    ;;
+  package-list)
+    (($# == 0)) || { printf 'usage: ./repo.sh package-list\n' >&2; exit 2; }
+    python3 "$ROOT/tools/package_model.py" --catalog "$ROOT/packages/catalog.bzl" \
+      --tools-lock "$ROOT/tools.lock.toml" list
     ;;
   package-resolve)
     (($# >= 1 && $# <= 2)) || { printf 'usage: ./repo.sh package-resolve <name> [out-dir]\n' >&2; exit 2; }
     target=$("$ROOT/toolchain/target.sh")
-    args=(--manifest "$ROOT/package.toml" --lock "$ROOT/runtime-resolution.lock.toml" --tools-lock "$ROOT/tools.lock.toml" resolve --package "$1" --target "$target")
+    args=(--catalog "$ROOT/packages/catalog.bzl" --tools-lock "$ROOT/tools.lock.toml" resolve --package "$1" --target "$target")
     [[ ${2:-} ]] && args+=(--out-dir "$2")
     python3 "$ROOT/tools/package_model.py" "${args[@]}"
     ;;
@@ -379,80 +398,56 @@ case "$command" in
     [[ $profile == dbg || $profile == opt ]] || { printf 'error: profile must be dbg or opt\n' >&2; exit 2; }
     target=$("$ROOT/toolchain/target.sh")
     setup_environment
-    # Any package with its own //packages:<name> buck2 target (rules/package.bzl's
-    # package() rule - currently polyglot-demo, polyglot-server) is assembled
-    # entirely in-graph; `buck2 targets` is the generic, name-list-free way to
-    # detect that without special-casing individual package names here. Build
-    # it, then copy the archive to dist/ under the same
-    # <package>-<version>-<target>.tar.gz naming tools/package_release.py's
-    # assemble() uses, so release-check/package-smoke/the release workflow stay
-    # naming-compatible regardless of which path built the archive. Everything
-    # else (gateway, schema-cli: manifest-declared packages with no buck2
-    # target) falls through to tools/package_release.py's assemble(), which
-    # requires a pre-populated --build-dir.
-    #
-    # The probe's own failure must not be conflated with "no buck2 target for
-    # this name": a crashed daemon, a bad .buckconfig, or any other real
-    # build-system failure needs to surface as-is, never masquerade as a
-    # silent fallthrough to assemble()'s misleading --build-dir error.
-    # `buck2 targets` on a genuinely absent target fails with a specific,
-    # verified message ("Unknown target `<name>` from package `<pkg>`." -
-    # confirmed against the pinned buck2 binary by probing a target that
-    # does not exist); only THAT failure shape is treated as "not a buck2
-    # package". Any other nonzero exit prints buck2's own stderr and exits
-    # nonzero immediately.
-    probe_err=$(mktemp)
-    if "$POLYGLOT_BUCK2" targets "//packages:$1" >/dev/null 2>"$probe_err"; then
-      probe_status=0
+    require_buck_package_target "$1"
+    version=$(python3 "$ROOT/tools/package_model.py" --catalog "$ROOT/packages/catalog.bzl" \
+      --tools-lock "$ROOT/tools.lock.toml" resolve \
+      --package "$1" --target "$target" | python3 -c 'import json, sys; print(json.load(sys.stdin)["version"])')
+    mapfile -t plat < <(target_platform_args "$profile")
+    out=$("$POLYGLOT_BUCK2" build "${plat[@]}" --show-output "//packages:$1" 2>/dev/null | awk '{ print $2 }')
+    mkdir -p "$ROOT/dist"
+    archive="$ROOT/dist/$1-$version-$target.tar.gz"
+    tmp="$archive.tmp.$$"
+    cp -- "$ROOT/$out" "$tmp"
+    mv -- "$tmp" "$archive"
+    printf '%s\n' "$archive"
+    ;;
+  package-target-check)
+    (($# == 1)) || { printf 'usage: ./repo.sh package-target-check <name>\n' >&2; exit 2; }
+    setup_environment
+    require_buck_package_target "$1"
+    ;;
+  package-explain)
+    (($# == 1)) || { printf 'usage: ./repo.sh package-explain <name>\n' >&2; exit 2; }
+    target=$("$ROOT/toolchain/target.sh")
+    python3 "$ROOT/tools/package_model.py" --catalog "$ROOT/packages/catalog.bzl" \
+      --tools-lock "$ROOT/tools.lock.toml" resolve --package "$1" --target "$target"
+    setup_environment
+    if "$POLYGLOT_BUCK2" targets "//packages:$1" >/dev/null 2>&1; then
+      printf 'buck_target=//packages:%s\n' "$1"
     else
-      probe_status=$?
-    fi
-    if ((probe_status == 0)); then
-      rm -f "$probe_err"
-      version=$(python3 "$ROOT/tools/package_model.py" --manifest "$ROOT/package.toml" \
-        --lock "$ROOT/runtime-resolution.lock.toml" --tools-lock "$ROOT/tools.lock.toml" resolve \
-        --package "$1" --target "$target" | python3 -c 'import json, sys; print(json.load(sys.stdin)["version"])')
-      mapfile -t plat < <(target_platform_args "$profile")
-      out=$("$POLYGLOT_BUCK2" build "${plat[@]}" --show-output "//packages:$1" 2>/dev/null | awk '{ print $2 }')
-      mkdir -p "$ROOT/dist"
-      archive="$ROOT/dist/$1-$version-$target.tar.gz"
-      tmp="$archive.tmp.$$"
-      cp -- "$ROOT/$out" "$tmp"
-      mv -- "$tmp" "$archive"
-      printf '%s\n' "$archive"
-    elif grep -q '^Unknown target `' "$probe_err"; then
-      rm -f "$probe_err"
-      python3 "$ROOT/tools/package_release.py" --root "$ROOT" --manifest "$ROOT/package.toml" \
-        --lock "$ROOT/runtime-resolution.lock.toml" --tools-lock "$ROOT/tools.lock.toml" \
-        --dist-dir "$ROOT/dist" --changelog "$ROOT/CHANGELOG.md" package \
-        --package "$1" --target "$target" --profile "$profile"
-    else
-      printf 'error: buck2 targets probe for //packages:%s failed:\n' "$1" >&2
-      cat "$probe_err" >&2
-      rm -f "$probe_err"
-      exit "$probe_status"
+      printf 'buck_target=missing\n'
     fi
     ;;
   package-smoke)
     (($# == 2)) || { printf 'usage: ./repo.sh package-smoke <archive> <name>\n' >&2; exit 2; }
     target=$("$ROOT/toolchain/target.sh")
-    python3 "$ROOT/tools/package_release.py" --root "$ROOT" --manifest "$ROOT/package.toml" \
-      --lock "$ROOT/runtime-resolution.lock.toml" --tools-lock "$ROOT/tools.lock.toml" \
+    python3 "$ROOT/tools/package_release.py" --root "$ROOT" --catalog "$ROOT/packages/catalog.bzl" \
+      --tools-lock "$ROOT/tools.lock.toml" \
       --dist-dir "$ROOT/dist" --changelog "$ROOT/CHANGELOG.md" smoke \
       --archive "$1" --package "$2" --target "$target" --execute
     ;;
   release-check)
     (($# == 2)) || { printf 'usage: ./repo.sh release-check <name> <tag>\n' >&2; exit 2; }
     target=$("$ROOT/toolchain/target.sh")
-    python3 "$ROOT/tools/package_release.py" --root "$ROOT" --manifest "$ROOT/package.toml" \
-      --lock "$ROOT/runtime-resolution.lock.toml" --tools-lock "$ROOT/tools.lock.toml" \
+    python3 "$ROOT/tools/package_release.py" --root "$ROOT" --catalog "$ROOT/packages/catalog.bzl" \
+      --tools-lock "$ROOT/tools.lock.toml" \
       --dist-dir "$ROOT/dist" --changelog "$ROOT/CHANGELOG.md" release-check \
       --package "$1" --target "$target" --tag "$2"
     ;;
   release-notes)
     (($# == 1)) || { printf 'usage: ./repo.sh release-notes <tag>\n' >&2; exit 2; }
-    python3 "$ROOT/tools/package_release.py" --root "$ROOT" --manifest "$ROOT/package.toml" \
-      --lock "$ROOT/runtime-resolution.lock.toml" --tools-lock "$ROOT/tools.lock.toml" \
+    python3 "$ROOT/tools/package_release.py" --root "$ROOT" --catalog "$ROOT/packages/catalog.bzl" \
+      --tools-lock "$ROOT/tools.lock.toml" \
       --dist-dir "$ROOT/dist" --changelog "$ROOT/CHANGELOG.md" release-notes --tag "$1"
     ;;
   infra-test)

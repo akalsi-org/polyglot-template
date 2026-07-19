@@ -34,6 +34,7 @@ def main() -> None:
   assert settings["deno.enable"] is True
   assert settings["deno.enablePaths"] == ["./ts", "./tsweb"]
   assert settings["deno.config"] == "${workspaceFolder}/deno.json"
+  assert settings["deno.cache"] == "${workspaceFolder}/.local/cache/deno"
   deno_config = json.loads((ROOT / "deno.json").read_text())
   assert deno_config["fmt"]["indentWidth"] == 2
   assert deno_config["fmt"]["useTabs"] is False
@@ -59,7 +60,9 @@ def main() -> None:
     "${workspaceFolder}/python/lib",
     "${workspaceFolder}/python/app",
   ]
+  assert settings["python.defaultInterpreterPath"] == "${workspaceFolder}/.local/bin/python"
   assert settings["python.envFile"] == "${workspaceFolder}/.vscode/python.env"
+  assert settings["python.terminal.useEnvFile"] is True
   assert (ROOT / ".vscode" / "python.env").read_text() == "PYTHONPATH=python/lib:python/app\n"
   assert settings["python.testing.unittestArgs"] == [
     "-s",
@@ -81,6 +84,32 @@ def main() -> None:
   assert 'format [--check]' in repo_sh
   assert 'PYTHONPATH="$build_python:$ROOT/python/lib:$ROOT/python/app' in repo_sh
   assert (ROOT / ".vscode" / "go").stat().st_mode & 0o111
+  assert settings["deno.path"] == "${workspaceFolder}/.local/bin/deno"
+  assert settings["buck2-lsp-adapter.buck2Path"] == "${workspaceFolder}/.local/bin/buck2"
+
+  tasks = json.loads((ROOT / ".vscode" / "tasks.json").read_text())
+  task_commands = {task["label"]: task["command"] for task in tasks["tasks"]}
+  assert task_commands.pop("Python: run active file with native extension") == './repo.sh python "${file}"'
+  assert task_commands == {
+    "Workspace: bootstrap pinned tools": "./repo.sh bootstrap",
+    "Workspace: verify editor prerequisites": "./repo.sh doctor",
+    "C++: refresh compile commands": "./repo.sh compile-commands",
+    "Python: build native extension": "./repo.sh python-build",
+    "Deno: type check": "./repo.sh ts-build",
+    "React: build site": "./repo.sh tsweb-build",
+    "Go: test": "./repo.sh go-test",
+  }
+  launch = json.loads((ROOT / ".vscode" / "launch.json").read_text())
+  assert launch["configurations"] == [{
+    "name": "Deno: debug active TypeScript file",
+    "type": "deno",
+    "request": "launch",
+    "program": "${file}",
+  }]
+  editor_guide = (ROOT / "docs" / "EDITOR.md").read_text()
+  assert "Pylance intentionally does not search `build/python/<target>/lib`" in editor_guide
+  assert "Python: run" in editor_guide
+  assert "active file with native extension" in editor_guide
 
   print("editor contract: ok")
 

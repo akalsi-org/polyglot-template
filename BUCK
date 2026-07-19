@@ -86,26 +86,13 @@ load("//rules:file.bzl", "export_file")
 # resolves STRICTLY OFFLINE from bootstrap's .local/cache/deno seed,
 # enforced by running deno inside a no-network user namespace (fail-closed
 # when namespaces are unavailable, absent an explicit env opt-out) - graph
-# actions never fetch; see rules/deno.bzl's deno_cache doc comment. deps fold
-# every deno component's DenoSourcesInfo into the staged tree (see
-# rules/deno.bzl's DenoSourcesInfo doc comment); `entries` stays a small
-# explicit list of representative entrypoints (deno cache only needs to walk
-# far enough to resolve every REMOTE/npm dependency - local file imports
-# never require pre-caching; app mains fold in automatically via their
-# DenoAppInfo.entry, see rules/deno.bzl's _resolve_entries). This deps list
-# is guarded FAIL-CLOSED: repo.sh lint's deno-cache-coverage check uqueries
-# every deno_library/deno_app in the graph and fails if any is not in this
-# target's dep closure, so forgetting to register a new component is a red
-# lint, not a mystery --cached-only resolution error.
+# actions never fetch; see rules/deno.bzl's deno_cache doc comment. Buck
+# cannot glob across nested BUCK packages, so its dependency closure remains
+# explicit and repo.sh's graph query validates it. The rule derives every
+# cache entry from that closure and emits a manifest subtarget that bootstrap
+# consumes before it seeds the offline Deno store: no second entrypoint list.
 deno_cache(
   name = "deno-cache",
-  entries = [
-    "ts/test/greeting_test.ts",
-    "tsweb/app/site/main.tsx",
-    "tsweb/test/app_test.tsx",
-    "tsweb/test/title_test.ts",
-    "tsweb/vite.config.ts",
-  ],
   deps = [
     "//ts/app/hello:hello",
     "//ts/app/server:server",
@@ -141,18 +128,6 @@ export_file(
 export_file(
   name = "tsweb_smoke.py",
   src = "tools/tsweb_smoke.py",
-  visibility = ["PUBLIC"],
-)
-
-export_file(
-  name = "package.toml",
-  src = "package.toml",
-  visibility = ["PUBLIC"],
-)
-
-export_file(
-  name = "runtime-resolution.lock.toml",
-  src = "runtime-resolution.lock.toml",
   visibility = ["PUBLIC"],
 )
 
@@ -193,7 +168,19 @@ export_file(
 )
 
 export_file(
+  name = "py_test_runner.py",
+  src = "tools/py_test_runner.py",
+  visibility = ["PUBLIC"],
+)
+
+export_file(
   name = "deno_store_prune.py",
   src = "tools/deno_store_prune.py",
+  visibility = ["PUBLIC"],
+)
+
+export_file(
+  name = "deno_cache_exec.py",
+  src = "tools/deno_cache_exec.py",
   visibility = ["PUBLIC"],
 )

@@ -2,7 +2,8 @@
 set -euo pipefail
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
-workflow=$root/.github/workflows/ci-release.yml
+workflow=$root/.github/workflows/verify.yml
+release_workflow=$root/.github/workflows/package-release.yml
 
 # `! grep ...` does not trip `set -e` (bash exempts commands negated with
 # `!` from errexit), so a bare `! grep -q pattern file` here would silently
@@ -19,17 +20,28 @@ assert_absent() {
 [[ $(grep -c 'runner: ubuntu-24.04-arm$' "$workflow") == 1 ]]
 grep -Fq 'actions/cache@5a3ec84eff668545956fd18022155c47e93e2684' "$workflow"
 grep -Fq 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' "$workflow"
-grep -Fq 'actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093' "$workflow"
+grep -Fq 'actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093' "$release_workflow"
 grep -Fq 'polyglot-tools-v1-${{ runner.os }}-${{ matrix.target }}-' "$workflow"
 grep -Fq "hashFiles('tools.lock.toml', 'toolchain/**')" "$workflow"
 grep -Fq 'polyglot-deno-v1-${{ runner.os }}-${{ matrix.target }}-' "$workflow"
-grep -Fq "hashFiles('tools.lock.toml', 'deno.lock')" "$workflow"
+grep -Fq "hashFiles('tools.lock.toml', 'deno.json', 'deno.lock')" "$workflow"
 grep -Fq 'polyglot-buck2-v1-${{ runner.os }}-${{ matrix.target }}-' "$workflow"
-grep -Fq "hashFiles('tools.lock.toml', 'toolchains/**', 'rules/**', 'platforms/**', '.buckconfig')" "$workflow"
+grep -Fq "hashFiles('tools.lock.toml', 'toolchain/**', 'toolchains/**', 'rules/toolchain.bzl', '.buckconfig')" "$workflow"
+assert_absent 'over-broad Buck cache key' grep -Fq "'rules/**'" "$workflow"
+grep -Fq 'buck-out/go-build-cache/${{ matrix.target }}' "$workflow"
+grep -Fq 'polyglot-go-build-v1-${{ runner.os }}-${{ matrix.target }}-' "$workflow"
+grep -Fq "hashFiles('go.mod', 'go.sum', 'tools.lock.toml', 'rules/go.bzl', 'toolchains/**')" "$workflow"
 grep -Fq '            node_modules' "$workflow"
 assert_absent 'restore-keys: in workflow' grep -q 'restore-keys:' "$workflow"
-grep -Fq 'tags: ["packages/*/v*"]' "$workflow"
-grep -Fq 'gh release create "$GITHUB_REF_NAME" artifacts/*' "$workflow"
+grep -Fq 'tags: ["packages/*/v*"]' "$release_workflow"
+grep -Fq 'cancel-in-progress: false' "$release_workflow"
+grep -Fq 'gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY"' "$release_workflow"
+grep -Fq 'actions/attest@36051bcae73b7c2a8a6945a48cbf80953c6baa35' "$workflow"
+grep -Fq 'attestations: write' "$workflow"
+grep -Fq 'sha256sum --check' "$release_workflow"
+grep -Fq 'cmp -- "$asset" "published/$name"' "$release_workflow"
+grep -Fq 'gh release upload "$GITHUB_REF_NAME" "$asset" --repo "$GITHUB_REPOSITORY"' "$release_workflow"
+grep -Fq 'gh release create "$GITHUB_REF_NAME" "${assets[@]}" "${checksums[@]}' "$release_workflow"
 assert_absent 'moon in workflow' grep -qi 'moon' "$workflow"
 
 bootstrap_line=$(grep -n './repo.sh bootstrap$' "$workflow" | cut -d: -f1)
@@ -38,17 +50,33 @@ doctor_line=$(grep -n './repo.sh doctor --deep$' "$workflow" | cut -d: -f1)
 ((bootstrap_line < offline_line && offline_line < doctor_line))
 
 for command in \
-  './repo.sh exec buck2 build //toolchains:native' './repo.sh exec buck2 test //...' \
+  './repo.sh exec buck2 build //toolchains:native' \
   './repo.sh lint' './repo.sh package-validate' './repo.sh build' './repo.sh test' \
+  './repo.sh package-target-check "$package"' \
+  './test/graph-compdb-contract.sh' \
+  './test/deno-manifest-contract.sh' \
   './repo.sh cpp-build dbg' './repo.sh cpp-run dbg' \
   './repo.sh cpp-build opt' './repo.sh cpp-run opt' \
+  './repo.sh exec buck2 test --target-platforms //config:${{ matrix.target }}-opt //python/test:test' \
   './repo.sh python -I -c'; do
   grep -Fq "$command" "$workflow"
 done
+assert_absent 'duplicate direct full-graph test' grep -Fq './repo.sh exec buck2 test //...' "$workflow"
+[[ $(grep -c '^          ./repo.sh build$' "$workflow") == 1 ]]
+[[ $(grep -c '^          ./repo.sh test$' "$workflow") == 1 ]]
+[[ $(grep -c 'unshare -rn sh -c .*./repo.sh exec buck2 clean && ./repo.sh build && ./repo.sh test' "$workflow") == 1 ]]
+
+tag_gate_line=$(grep -n './repo.sh package-target-check "\$package"' "$workflow" | cut -d: -f1)
+package_line=$(grep -n './repo.sh package "\$package" opt' "$workflow" | cut -d: -f1)
+((tag_gate_line < package_line))
+if sed -n '/^  package)/,/^  package-smoke)/p' "$root/repo.sh" | grep -Fq 'package_release.py'; then
+  echo "repo package command still falls through to the raw-build assembler" >&2
+  exit 1
+fi
 
 help=$($root/repo.sh help)
 for command in shell exec buck2 format lint build test cpp-build cpp-run cpp-test python-build python-test \
-  ts-build ts-test tsweb-build tsweb-test go-build go-test package package-smoke; do
+  ts-build ts-test tsweb-build tsweb-test go-build go-test package-list package package-smoke; do
   grep -Eq "^  ${command}( |$)" <<<"$help"
 done
 for removed in _job-budget cpp-configure cpp-reflection-probe; do
@@ -58,7 +86,8 @@ done
 assert_absent 'moon in repo.sh' grep -qi 'moon' "$root/repo.sh"
 
 grep -Fq '"$POLYGLOT_BUCK2" build' "$root/repo.sh"
-grep -Fq '"$POLYGLOT_BUCK2" test //...' "$root/repo.sh"
+grep -Fq 'mapfile -t plat < <(target_platform_args "$profile")' "$root/repo.sh"
+grep -Fq '"$POLYGLOT_BUCK2" test "${plat[@]}" //...' "$root/repo.sh"
 grep -Fq '"$POLYGLOT_BUCK2" test //... --labels lint' "$root/repo.sh"
 
 environment=$($root/repo.sh exec bash -c 'printf "%s|%s|%s|%s|%s|%s\n" "$POLYGLOT_ROOT" "$POLYGLOT_TARGET" "$CXX" "$GOROOT" "$DENO_DIR" "$PYTHONPATH"')

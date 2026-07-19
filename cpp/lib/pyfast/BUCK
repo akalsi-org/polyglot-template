@@ -1,31 +1,11 @@
 # pyfast: single-header pure-C scaffolding for zero-overhead CPython
 # extensions (METH_FASTCALL / PEP 590 vectorcall / cleanup-attr RAII).
-# Header-only - consumers compile against it; demo.c is the future test
-# fixture (not yet wired: py_extension needs C-mode + cxx_library header
-# deps first - see AGENTS.md in this directory).
+# Header-only - consumers compile against it. python/test owns the small
+# pyfast_test_extension fixture.
 load("//rules:cxx.bzl", "cxx_library")
-load("//rules:python.bzl", "py_extension", "py_test")
 
 cxx_library(
   name = "pyfast",
   hdrs = ["pyfast.h"],
   visibility = ["PUBLIC"],
-)
-
-py_extension(
-  name = "demo",
-  language = "c",
-  cxx_deps = [":pyfast"],
-  package = "vcall_demo",
-  init_src = "__init__.py",
-  srcs = ["demo.c"],
-  extra_link_flags = ["-lm"],
-)
-
-py_test(
-  name = "demo_test",
-  start = "cpp/lib/pyfast",
-  pattern = "test_pyfast_unittest.py",
-  srcs = ["test_pyfast.py", "test_pyfast_unittest.py"],
-  deps = [":demo"],
 )

@@ -31,9 +31,9 @@ transitively underneath one) - and:
      had (sorted entries, uid/gid 0, mtime 0, mode normalization, gzip
      mtime 0 - see _ARCHIVE_PY below, byte-for-byte the same as before this
      rewrite) and a metadata step (package.json/closure.json/runtime-ref.json
-     via the embedded package_model metadata step - see _METADATA_PY below)
-     that additionally asserts the `version` attr matches package.toml's own
-     recorded version for this package.
+     via the embedded catalog metadata step - see _METADATA_PY below)
+     that additionally asserts the `version` attr matches the canonical
+     packages/catalog.bzl record for this package.
 
 package_smoke and package_manifest_test are unchanged from before this
 rewrite (package_smoke only ever consumed `package()`'s DefaultInfo output
@@ -104,15 +104,12 @@ def _check_version(ctx, version):
 def _resolve_musl_loader(ctx):
   gcc_dir = ctx.attrs._gcc[DefaultInfo].default_outputs[0]
   loader = gcc_dir.project(_GCC["loader"])
-  libc = gcc_dir.project(_LOADER_DIR + "/libc.so")
   owner = "//toolchains:gcc-musl-" + _NATIVE_TARGET
   return [
-    # "loader-lib", not "tree": every "loader-bin"/"py-app-launcher"
-    # launcher script `exec`s this file directly, so it must land 0755 (see
-    # _EXECUTABLE_KINDS above) - libc.so is only ever dlopen'd/linked
-    # against, never exec'd, so it stays a plain "tree" entry at 0644.
+    # musl's loader is also its libc implementation. _stage_lines creates
+    # lib/libc.so as a relative symlink to this one staged payload, avoiding a
+    # second identical 800 KiB copy in every dynamically linked package.
     PackageEntry(dest = "lib/" + _LOADER_NAME, artifact = loader, kind = "loader-lib", owner = owner),
-    PackageEntry(dest = "lib/libc.so", artifact = libc, kind = "tree", owner = owner),
   ]
 
 def _resolve_python_runtime(ctx):
@@ -305,6 +302,12 @@ def _stage_lines(ctx, entries, needs):
       ),
     )
 
+  if "musl-loader" in needs:
+    lines += [
+      "ln -s {} \"$OUT/lib/libc.so\"".format(_LOADER_NAME),
+      "test -L \"$OUT/lib/libc.so\"",
+    ]
+
   # "loader-bin": bin/<name> launcher exec'ing the staged libexec/<name>
   # binary through the staged lib/<loader>. Byte-for-byte
   # write_launcher()'s shape.
@@ -479,12 +482,11 @@ def _package_impl(ctx: AnalysisContext) -> list[Provider]:
     # _METADATA_PY below.
     cmd_args("METADATA_SCRIPT=\"$(pwd)/", metadata_script, "\"", delimiter = ""),
     cmd_args("PACKAGE_MODEL=\"$(pwd)/", ctx.attrs._package_model, "\"", delimiter = ""),
-    cmd_args("MANIFEST=\"$(pwd)/", ctx.attrs.manifest, "\"", delimiter = ""),
-    cmd_args("LOCK=\"$(pwd)/", ctx.attrs.lock, "\"", delimiter = ""),
+    cmd_args("CATALOG=\"$(pwd)/", ctx.attrs.catalog, "\"", delimiter = ""),
     cmd_args("TOOLS_LOCK=\"$(pwd)/", ctx.attrs.tools_lock, "\"", delimiter = ""),
-    "python3 -B \"$METADATA_SCRIPT\" \"$PACKAGE_MODEL\" \"$MANIFEST\" \"$LOCK\" \"$TOOLS_LOCK\" %s %s %s %s \"$OUT\"" % (ctx.attrs.name, _NATIVE_TARGET, ctx.attrs.profile, ctx.attrs.version),
+    "python3 -B \"$METADATA_SCRIPT\" \"$PACKAGE_MODEL\" \"$CATALOG\" \"$TOOLS_LOCK\" %s %s %s %s \"$OUT\"" % (ctx.attrs.name, _NATIVE_TARGET, ctx.attrs.profile, ctx.attrs.version),
   ]
-  metadata_inputs = [ctx.attrs._package_model, ctx.attrs.manifest, ctx.attrs.lock, ctx.attrs.tools_lock]
+  metadata_inputs = [ctx.attrs._package_model, ctx.attrs.catalog, ctx.attrs.tools_lock]
   stage_inputs = stage_hidden + [metadata_script] + metadata_inputs
   stage_script, stage_written = ctx.actions.write(ctx.attrs.name + "-stage.sh", lines, is_executable = True, allow_args = True)
   ctx.actions.run(
@@ -565,27 +567,27 @@ _METADATA_PY = [
   "sys.path.insert(0, str(package_model_path.parent))",
   "import package_model",
   "",
-  "manifest = Path(sys.argv[2])",
-  "lock = Path(sys.argv[3])",
-  "tools_lock = Path(sys.argv[4])",
-  "package_name = sys.argv[5]",
-  "target = sys.argv[6]",
-  "profile = sys.argv[7]",
-  "attr_version = sys.argv[8]",
-  "stage = Path(sys.argv[9])",
+  "catalog_path = Path(sys.argv[2])",
+  "tools_lock = Path(sys.argv[3])",
+  "package_name = sys.argv[4]",
+  "target = sys.argv[5]",
+  "profile = sys.argv[6]",
+  "attr_version = sys.argv[7]",
+  "stage = Path(sys.argv[8])",
   "",
-  "model = package_model.load(manifest)",
+  "model = package_model.load(catalog_path)",
   "catalog = package_model.packages(model)",
   "entry = catalog[package_name]",
-  "closure, runtime_ref = package_model.resolve(model, package_model.load(lock), package_model.load(tools_lock), package_name, target)",
+  "import tomllib",
+  "closure, runtime_ref = package_model.resolve(model, tomllib.load(tools_lock.open('rb')), package_name, target)",
   "",
   # package()'s `version` attr is validated independently (rules/package.bzl's
   # _check_version) and passed through here so it can never silently drift
-  # from what package.toml's manifest itself says for this package - a
+  # from what the catalog itself says for this package - a
   # mismatch means someone edited one without the other.
   "if attr_version != entry['version']:",
   "    sys.exit(",
-  "        'package(): version attr %r does not match package.toml version %r for package %r'",
+  "        'package(): version attr %r does not match catalog version %r for package %r'",
   "        % (attr_version, entry['version'], package_name)",
   "    )",
   "",
@@ -613,8 +615,7 @@ _package_rule = rule(
   impl = _package_impl,
   attrs = {
     "deps": attrs.list(attrs.dep(), default = []),
-    "lock": attrs.source(default = "//:runtime-resolution.lock.toml"),
-    "manifest": attrs.source(default = "//:package.toml"),
+    "catalog": attrs.source(default = "//packages:catalog.bzl"),
     "profile": attrs.string(default = select({"//config:opt": "opt", "DEFAULT": "dbg"})),
     "tools_lock": attrs.source(default = "//:tools.lock.toml"),
     "version": attrs.string(),
@@ -712,24 +713,20 @@ def package_smoke(**kwargs):
   kwargs.setdefault("default_target_platform", _DEFAULT_PLATFORM)
   _package_smoke_rule(**kwargs)
 
-# --- package_manifest_test: `python3 package_model.py validate`, repo.sh's
-# package-validate lane, taking the root-exported //:package_model.py itself
-# as a real tracked attrs.source() input alongside the root-exported
-# manifest/lock/tools-lock files, so an edit to any of the four invalidates
-# this test's buck2 cache entry. Unchanged from before this rewrite.
+# --- package_manifest_test: historical name retained for target compatibility;
+# validates the canonical Starlark catalog against the bootstrap trust lock.
 
 def _package_manifest_test_impl(ctx: AnalysisContext) -> list[Provider]:
   lines = [
     "#!/bin/sh",
     "set -eu",
     cmd_args("PACKAGE_MODEL=\"$(pwd)/", ctx.attrs.package_model, "\"", delimiter = ""),
-    cmd_args("MANIFEST=\"$(pwd)/", ctx.attrs.manifest, "\"", delimiter = ""),
-    cmd_args("LOCK=\"$(pwd)/", ctx.attrs.lock, "\"", delimiter = ""),
+    cmd_args("CATALOG=\"$(pwd)/", ctx.attrs.catalog, "\"", delimiter = ""),
     cmd_args("TOOLS_LOCK=\"$(pwd)/", ctx.attrs.tools_lock, "\"", delimiter = ""),
-    "exec python3 -B \"$PACKAGE_MODEL\" --manifest \"$MANIFEST\" --lock \"$LOCK\" --tools-lock \"$TOOLS_LOCK\" validate",
+    "exec python3 -B \"$PACKAGE_MODEL\" --catalog \"$CATALOG\" --tools-lock \"$TOOLS_LOCK\" validate",
   ]
   script, written = ctx.actions.write(ctx.attrs.name + ".sh", lines, is_executable = True, allow_args = True)
-  command = cmd_args(script, hidden = [ctx.attrs.package_model, ctx.attrs.manifest, ctx.attrs.lock, ctx.attrs.tools_lock] + written)
+  command = cmd_args(script, hidden = [ctx.attrs.package_model, ctx.attrs.catalog, ctx.attrs.tools_lock] + written)
   return [
     DefaultInfo(default_output = script, other_outputs = written),
     RunInfo(args = command),
@@ -743,8 +740,7 @@ def _package_manifest_test_impl(ctx: AnalysisContext) -> list[Provider]:
 _package_manifest_test_rule = rule(
   impl = _package_manifest_test_impl,
   attrs = {
-    "lock": attrs.source(),
-    "manifest": attrs.source(),
+    "catalog": attrs.source(default = "//packages:catalog.bzl"),
     "package_model": attrs.source(default = "//:package_model.py"),
     "tools_lock": attrs.source(),
   },

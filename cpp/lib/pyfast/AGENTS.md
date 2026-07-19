@@ -3,9 +3,9 @@
 Single-header pure-C library (`pyfast.h`) of macro scaffolding for
 zero-overhead CPython C extensions: METH_FASTCALL / METH_FASTCALL|KEYWORDS,
 PEP 590 vectorcall, Py_TPFLAGS_METHOD_DESCRIPTOR, and
-`__attribute__((cleanup))` auto-release. `demo.c` is a demonstration
-extension module and the intended test fixture. Formerly `python/lib/vcall`
-(renamed and relocated 2026-07-19).
+`__attribute__((cleanup))` auto-release. `python/test:pyfast_test_extension`
+is the small in-graph test fixture. Formerly `python/lib/vcall` (renamed and
+relocated 2026-07-19).
 
 ## Ground rules
 
@@ -24,8 +24,8 @@ extension module and the intended test fixture. Formerly `python/lib/vcall`
 Two independent gpt-5.6-sol passes converged on the same list;
 best-of-both merged.
 
-Five triaged by external review, four more found by actually compiling
-demo.c against the pinned toolchain (the code had never been built):
+Five triaged by external review, four more found by compiling an exploratory
+extension against the pinned toolchain:
 
 1. `VA(i)` was unchecked `_a[i]` -> now `_va_checked()`, raises
    TypeError on OOB; folds away at -O2 after a matching `VEXPECT(n)`
@@ -42,28 +42,13 @@ demo.c against the pinned toolchain (the code had never been built):
    macro was void-typed, every call site failed to compile. Ternaries.
 7. `VMETHOD_SIG`/`VMETHOD_KW_SIG` self-parenthesized -> `fn((...))` is
    invalid C. Macros now carry no parens; call site supplies them.
-8. demo passed `int*` where unpackers need `long*` (VINT yields long).
+8. Unpackers require `long*` for VINT output, not `int*`.
 9. `PyUnicode_FromFormat` has NO %f/%g -> runtime SystemError; also
    naming tp_methods entries "__repr__"/"__str__" does NOT wire
    tp_repr/tp_str on a STATIC PyTypeObject (heap-type-only slot sync)
    - set `.tp_repr`/`.tp_str` directly.
 
-`test_pyfast.py` (24+ checks, every macro family + error paths) and
-`leak_check.py` in this directory run against a hand-built demo .so
-until buck2 wiring lands; both must stay green in dbg AND opt.
-
-## Wiring gaps (build machinery, separate from header work)
-
-- rules/python.bzl `py_extension` compiles C++ only; needs a C mode
-  (gcc, C std flags) before demo.c can build as an extension.
-- `py_extension` does not yet consume cxx_library include-tree deps
-  (rules/cxx.bzl IncludeTreeSet) - needed to depend on `:pyfast`.
-
-## Test plan (when wired)
-
-1. Build demo as py_extension in dbg AND opt (macro bugs surface at -O2).
-2. Python unittest importing the built demo: every macro family,
-   positional/keyword paths, the error-message contract ("argument 0:
-   expected int, got str"), exception state after failures, refcount
-   neutrality via sys.getrefcount deltas.
-3. Lint-labeled strict-compile probe (-Wall -Werror) of demo.c.
+`python/test:pyfast_test_extension` is a C-mode `py_extension` that consumes
+this header through `cxx_deps`. Its top-level function tests run via
+`py_tests()` and prove normal and error calls through the pinned interpreter.
+Add new pyfast behavior there, keeping tests plain `test_*` functions.

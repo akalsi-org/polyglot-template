@@ -1,6 +1,12 @@
 # Application Deployment And Edge Routing
 
-Status: proposed application-deployment contract and edge-routing baseline. Execution requires the inventory, enrollment, trust, and readiness substrate defined in [FLEET.md](FLEET.md).
+Status: the architecture below remains proposed. Its first executable slice is
+now a Buck-owned, read-only deployment-plan contract: `buck2 run
+//infra/deploy:example-plan` materializes and prints a deterministic plan, and
+`buck2 test //infra/deploy:readonly-contract` proves that matching observed
+state is ready while route drift fails verification. Execution still requires
+the inventory, enrollment, trust, and readiness substrate defined in
+[FLEET.md](FLEET.md).
 
 ## Target Outcome
 
@@ -236,10 +242,30 @@ NYC and EWR reduce normal quorum latency but share meaningful regional risks. As
 
 Do not synchronously replicate large blobs between VPS hosts. Use R2 or another declared object store. Database replication policy is database-specific and must not be inferred from host count.
 
-## Proposed Command Surface (Not Implemented)
+## Current Read-Only Command Surface
+
+The initial implementation intentionally has no remote transport and no
+mutation commands. Deployment intent is declared by `deployment_plan()` BUCK
+attributes (`group`, `environment`, native target, package version vector,
+eligible hosts, and route ownership). Buck emits the normalized JSON artifact;
+the read-only tool accepts only `plan`, `status`, and `verify` operations.
 
 ```text
-./repo.sh deploy plan <group> --env <environment>
+./repo.sh buck2 run //infra/deploy:example-plan
+./repo.sh buck2 test //infra/deploy:readonly-contract
+python3 infra/deploy/readonly.py status --plan <plan.json> --observation <observed.json>
+python3 infra/deploy/readonly.py verify --plan <plan.json> --observation <observed.json>
+```
+
+`verify` fails closed when group/environment/target/digest differ, an expected
+unit is not active, or any declared route does not resolve to the plan digest.
+The observation JSON is an external read-only projection, not desired-state
+configuration. There is deliberately no `apply`, `rollback`, certificate, or
+SSH command yet.
+
+## Future Mutation Surface (Not Implemented)
+
+```text
 ./repo.sh deploy apply <group> --env <environment>
 ./repo.sh deploy status [<group>] --env <environment>
 ./repo.sh deploy rollback <group> --to <digest> --env <environment>

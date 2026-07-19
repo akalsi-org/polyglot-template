@@ -380,9 +380,7 @@ _v_buffer(PyObject *obj, Py_buffer *buf, const char *ctx)
  * other kind of statement last within the braces, the construct has type
  * void"), that made every VKWOPT_* macro evaluate to void — a previously
  * undocumented defect that fails to compile the moment a caller writes
- * `if (!VKWOPT_INT(...))`, which is the only way these macros are ever
- * used (vcall_greet, vcall_prefix_join, vcall_repeat in demo.c all did
- * this — the header as shipped did not compile against its own demo).
+ * `if (!VKWOPT_INT(...))`.
  * Rewritten so the last thing in the braces is a ternary expression.
  */
 
@@ -414,18 +412,19 @@ _v_buffer(PyObject *obj, Py_buffer *buf, const char *ctx)
 
 /* ── Module Definition ─────────────────────────────────────────────
  *
- *   VMOD_BEGIN
+ *   VMOD_BEGIN(module_name)
  *     VMOD_FUNC("name", fn, "doc"),
  *     VMOD_FUNC_KW("name", fn, "doc"),
- *   VMOD_OBJ(module_name, "Module doc string.");
- *   VMOD_INIT(module_name)          // only if no types
+ *   VMOD_END(module_name, "Module doc string.", VMOD_NO_INIT);
  *
- * For modules with types, write your own PyInit_* that calls
- * PyModule_Create(&_vmd) + VTYPE_READY(T, m) for each type.
+ * VMOD_END always supplies PyInit_<module_name>. Its third argument is a
+ * hook with signature `PyObject *hook(PyObject *module)`: use VMOD_NO_INIT
+ * for an ordinary module, or register types in a hook before returning the
+ * module.
  */
 
-#define VMOD_BEGIN \
-  static PyMethodDef _vmt[] = {
+#define VMOD_BEGIN(mod) \
+  static PyMethodDef _vmt_##mod[] = {
 
 #define VMOD_FUNC(name, fn, doc) \
   {name, (PyCFunction)(void(*)(void))fn, METH_FASTCALL, doc}
@@ -433,15 +432,20 @@ _v_buffer(PyObject *obj, Py_buffer *buf, const char *ctx)
 #define VMOD_FUNC_KW(name, fn, doc) \
   {name, (PyCFunction)(void(*)(void))fn, METH_FASTCALL | METH_KEYWORDS, doc}
 
-#define VMOD_OBJ(mod, doc) \
-  {NULL, NULL, 0, NULL} }; \
-  static struct PyModuleDef _vmd = { \
-    PyModuleDef_HEAD_INIT, #mod, doc, -1, _vmt, \
-    NULL, NULL, NULL, NULL \
-  };
+#define VMOD_NO_INIT _vmod_no_init
 
-#define VMOD_INIT(mod) \
-  PyMODINIT_FUNC PyInit_##mod(void) { return PyModule_Create(&_vmd); }
+static inline PyObject *_vmod_no_init(PyObject *module) { return module; }
+
+#define VMOD_END(mod, doc, init_hook) \
+  {NULL, NULL, 0, NULL} }; \
+  static struct PyModuleDef _vmd_##mod = { \
+    PyModuleDef_HEAD_INIT, #mod, doc, -1, _vmt_##mod, \
+    NULL, NULL, NULL, NULL \
+  }; \
+  PyMODINIT_FUNC PyInit_##mod(void) { \
+    PyObject *_module = PyModule_Create(&_vmd_##mod); \
+    return _module ? init_hook(_module) : NULL; \
+  }
 
 /* ── Types with Vectorcall ─────────────────────────────────────────
  *

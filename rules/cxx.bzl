@@ -256,7 +256,10 @@ def _compile_one(ctx, tools, src, include_args, hdrs, compile_flags, extra_args,
   ctx.actions.run(
     cmd_args(args, hidden = hdrs + ([gcno.as_output()] if gcno else [])),
     category = "cxx_compile",
-    identifier = identifier,
+    # Stable machine-readable source metadata for bxl/compdb.bxl. Buck's
+    # aquery surface renders command arguments as display text, so compdb
+    # must not infer the source position from a command-line convention.
+    identifier = "source={}/{};{}".format(ctx.label.package, src.short_path, identifier),
   )
   return obj, gcno
 

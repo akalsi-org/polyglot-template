@@ -16,6 +16,7 @@
     "./tsweb"
   ],
   "deno.config": "${workspaceFolder}/deno.json",
+  "deno.cache": "${workspaceFolder}/.local/cache/deno",
   "go.alternateTools": {
     "go": "${workspaceFolder}/.vscode/go"
   },
@@ -28,7 +29,9 @@
     "${workspaceFolder}/python/lib",
     "${workspaceFolder}/python/app"
   ],
+  "python.defaultInterpreterPath": "${workspaceFolder}/.local/bin/python",
   "python.envFile": "${workspaceFolder}/.vscode/python.env",
+  "python.terminal.useEnvFile": true,
   "python.testing.pytestEnabled": false,
   "python.testing.unittestEnabled": true,
   "python.testing.unittestArgs": [
@@ -49,13 +52,7 @@
     "**/dist": true,
     "**/__pycache__": true
   },
-  "buck.projectConfig": {
-    "projectPath": "${workspaceFolder}",
-    "flavor": [],
-    "target": "",
-    "platform": "linux-x86_64"
-  },
-  "deno.path": "./.local/toolchain/x86_64-linux-musl/deno-2.9.2/deno",
+  "deno.path": "${workspaceFolder}/.local/bin/deno",
   "deno.lint": true,
-  "buck2-lsp-adapter.buck2Path": "./.local/toolchain/x86_64-linux-musl/buck2-2026-07-15/buck2"
+  "buck2-lsp-adapter.buck2Path": "${workspaceFolder}/.local/bin/buck2"
 }
