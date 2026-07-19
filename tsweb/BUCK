@@ -34,11 +34,15 @@ _ALL_DEPS = [
 # rules/deno.bzl's DenoSourcesInfo doc comment) - `entries` stays a small
 # explicit list of representative entrypoints (deno cache only needs to walk
 # far enough to resolve every REMOTE/npm dependency; local file imports never
-# require pre-caching - see rules/deno.bzl's module docstring).
+# require pre-caching - see rules/deno.bzl's module docstring). No app main
+# is restated here: //ts/app/hello:hello's and //ts/app/server:server's own
+# DenoAppInfo.entry fold in automatically via _ALL_DEPS (see rules/deno.bzl's
+# _resolve_entries) - the remaining explicit entries below are all
+# non-app deno_library sources (test files, the site's own main.tsx, the
+# vite config), which carry no DenoAppInfo of their own.
 deno_cache(
   name = "cache",
   entries = [
-    "ts/app/hello/main.ts",
     "ts/test/greeting_test.ts",
     "tsweb/app/site/main.tsx",
     "tsweb/test/app_test.tsx",

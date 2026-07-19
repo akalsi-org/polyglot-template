@@ -23,20 +23,23 @@ deno_test(
 )
 
 # ts-test parity, part 2: `deno run --cached-only --frozen ts/app/hello/main.ts`.
+# entries derives from //ts/app/hello:hello's own DenoAppInfo (see
+# rules/deno.bzl's _resolve_entries) - the entrypoint path is declared once,
+# at deno_app itself, not restated here.
 deno_run_check(
   name = "run_check",
-  entries = ["ts/app/hello/main.ts"],
   deps = ["//ts/app/hello:hello"],
   visibility = ["PUBLIC"],
 )
 
 # Drift check: every LOCAL file `deno info` resolves from each entrypoint
-# below must already be part of the declared srcs/deps graph above.
+# below must already be part of the declared srcs/deps graph above. entries
+# here only lists the two test files (deno_library sources, no DenoAppInfo of
+# their own) - //ts/app/hello:hello and //ts/app/server:server's own
+# entrypoints fold in automatically from their DenoAppInfo via deps.
 deno_graph_check(
   name = "graph_check",
   entries = [
-    "ts/app/hello/main.ts",
-    "ts/app/server/main.ts",
     "ts/test/greeting_test.ts",
     "ts/test/server_test.ts",
   ],

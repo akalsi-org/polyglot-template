@@ -105,7 +105,42 @@ _GO = TOOLCHAINS["go"][_NATIVE_TARGET]
 _GO_BIN_DIR = _GO["expected"].rsplit("/", 1)[0]  # "go/bin"
 _GOROOT_REL = _GO_BIN_DIR.rsplit("/", 1)[0]  # "go"
 
-GoInfo = provider(fields = ["srcs"])
+# GoSourceSet: a transitive_set of Artifact lists, mirroring rules/deno.bzl's
+# DenoSourceSet / rules/pkg.bzl's PackageEntrySet convention repo-wide - see
+# their own doc comments for the general rule this repeats. GoInfo.srcs used
+# to be a plain flat list, rebuilt by simple `+=` concatenation
+# (_merge_dep_srcs) at every level of the dep graph; that duplicates a
+# diamond-shared dep's sources once per path that reaches it (e.g. two
+# targets both depending on the same go_library each re-flatten and
+# re-concatenate its sources into their own GoInfo.srcs, and a third target
+# depending on both would then see that shared library's sources twice).
+# Using a tset instead makes buck2's own DAG dedupe the work: two tsets that
+# share a descendant node point at the SAME node rather than copying its
+# contents, so a single traverse() over a merged node visits it exactly once
+# no matter how many parents reach it.
+GoSourceSet = transitive_set()
+GoInfo = provider(fields = ["srcs"])  # `srcs`: a GoSourceSet transitive_set
+
+def _go_srcs(ctx: AnalysisContext, own_srcs: list, deps: list):
+  """Builds this target's own GoSourceSet tset (own_srcs as this node's own
+  value, each dep's GoInfo.srcs tset as a child) and flattens it via a
+  SINGLE traverse() into an order-stable, deduped Artifact list - diamond-
+  safe, since traverse() visits each DAG node exactly once regardless of how
+  many parents reach it. Returns (flattened_list, tset): the flattened list
+  is for this target's own local use (hidden inputs, gofmt's file list); the
+  tset is what this target's own GoInfo(srcs=...) should carry forward, so a
+  further consumer's own traversal stays a single pass too instead of
+  re-flattening an already-flat list at every level of the graph."""
+  tset = ctx.actions.tset(GoSourceSet, value = list(own_srcs), children = [d[GoInfo].srcs for d in deps])
+  seen = {}
+  flattened = []
+  for value in tset.traverse():
+    for src in value:
+      key = str(src)
+      if key not in seen:
+        seen[key] = True
+        flattened.append(src)
+  return flattened, tset
 
 _TOOLCHAIN_ATTRS = {
   "_go": attrs.dep(default = "//toolchains:go-" + _NATIVE_TARGET, providers = [DefaultInfo]),
@@ -121,12 +156,6 @@ def _toolchain_tools(ctx):
   # comment on why embedding it as script text via cmd_args() is not
   # sufficient on its own for buck2 to track/materialize it correctly.
   return struct(go_dir = go_dir, goroot = go_dir.project(_GOROOT_REL))
-
-def _merge_dep_srcs(deps):
-  srcs = []
-  for dep in deps:
-    srcs += dep[GoInfo].srcs
-  return srcs
 
 # Common preamble shared by build/test/lint scripts: point GOCACHE at the
 # persistent shared cache and GOPATH/GOMODCACHE/TMPDIR at this action's
@@ -201,12 +230,12 @@ def _write_go_script(ctx, name, tools, tail_lines):
 # exists purely for buck2's own input tracking, not for the Go toolchain.
 
 def _go_library_impl(ctx: AnalysisContext) -> list[Provider]:
-  srcs = list(ctx.attrs.srcs) + _merge_dep_srcs(ctx.attrs.deps)
+  _flattened, tset = _go_srcs(ctx, ctx.attrs.srcs, ctx.attrs.deps)
   # No emission of its own (mirrors rules/cxx.bzl's cxx_library) - still
   # folds deps' PackageInfo transitively for uniformity.
   return [
     DefaultInfo(default_outputs = list(ctx.attrs.srcs)),
-    GoInfo(srcs = srcs),
+    GoInfo(srcs = tset),
     package_info(ctx, deps = ctx.attrs.deps),
   ]
 
@@ -223,7 +252,7 @@ go_library = rule(
 
 def _go_binary_impl(ctx: AnalysisContext) -> list[Provider]:
   tools = _toolchain_tools(ctx)
-  own_srcs = list(ctx.attrs.srcs) + _merge_dep_srcs(ctx.attrs.deps)
+  own_srcs, srcs_tset = _go_srcs(ctx, ctx.attrs.srcs, ctx.attrs.deps)
   all_srcs = own_srcs + [ctx.attrs._gomod]
   binary = ctx.actions.declare_output(ctx.attrs.name)
   tail = [
@@ -254,8 +283,10 @@ def _go_binary_impl(ctx: AnalysisContext) -> list[Provider]:
     # split means glob(["**/*.go"]) from go/BUCK's own package can no longer
     # see files that moved into go/app/*/BUCK's own package boundary.
     # Deliberately excludes ctx.attrs._gomod (go.mod is not a .go file;
-    # go_lint's fmt mode would otherwise hand it to `gofmt -l`).
-    GoInfo(srcs = own_srcs),
+    # go_lint's fmt mode would otherwise hand it to `gofmt -l`). Carries the
+    # tset forward (not the flattened own_srcs list) so a further consumer's
+    # own traversal stays diamond-safe - see _go_srcs' doc comment.
+    GoInfo(srcs = srcs_tset),
     info,
   ]
 
@@ -302,7 +333,7 @@ def _go_test_coverage_action(ctx, tools, all_srcs):
 
 def _go_test_impl(ctx: AnalysisContext) -> list[Provider]:
   tools = _toolchain_tools(ctx)
-  own_srcs = list(ctx.attrs.srcs) + _merge_dep_srcs(ctx.attrs.deps)
+  own_srcs, srcs_tset = _go_srcs(ctx, ctx.attrs.srcs, ctx.attrs.deps)
   all_srcs = own_srcs + [ctx.attrs._gomod]
   tail = [
     "exec \"$GOROOT/bin/go\" test -trimpath " + " ".join(ctx.attrs.packages),
@@ -317,8 +348,9 @@ def _go_test_impl(ctx: AnalysisContext) -> list[Provider]:
       command = [command],
       run_from_project_root = True,
     ),
-    # See go_binary's identical GoInfo addition above for why.
-    GoInfo(srcs = own_srcs),
+    # See go_binary's identical GoInfo addition above for why (tset, not the
+    # flattened list - diamond-safe forwarding).
+    GoInfo(srcs = srcs_tset),
   ]
   if ctx.attrs._coverage_enabled:
     cov_file = _go_test_coverage_action(ctx, tools, all_srcs)
@@ -374,7 +406,10 @@ def _go_lint_impl(ctx: AnalysisContext) -> list[Provider]:
   tools = _toolchain_tools(ctx)
   # gofmt itself doesn't read go.mod, but go vet does, and keeping the
   # hidden-input set uniform across both modes is simpler than splitting it.
-  own_srcs = list(ctx.attrs.srcs) + _merge_dep_srcs(ctx.attrs.deps)
+  # go_lint is a leaf consumer (nothing depends on ITS GoInfo), so only the
+  # flattened list from _go_srcs is needed here - the tset it also returns
+  # is discarded.
+  own_srcs, _tset = _go_srcs(ctx, ctx.attrs.srcs, ctx.attrs.deps)
   all_srcs = own_srcs + [ctx.attrs._gomod]
   if ctx.attrs.mode == "fmt":
     # own_srcs (not ctx.attrs.srcs alone): after the per-component split,

@@ -22,7 +22,12 @@ deno_test(
 )
 
 # Drift check: every LOCAL file `deno info` resolves from each entrypoint
-# below must already be part of the declared srcs/deps graph above.
+# below must already be part of the declared srcs/deps graph above. All three
+# entries stay explicit: none of this target's deps carry DenoAppInfo -
+# tsweb/app/site:site is a deno_library (main.tsx is built by vite, never run
+# directly by the deno CLI, so it was never declared a deno_app - see
+# tsweb/app/site/BUCK) and test_srcs is a deno_library too - so there is no
+# app entrypoint here for rules/deno.bzl's _resolve_entries to fold in.
 deno_graph_check(
   name = "graph_check",
   entries = [

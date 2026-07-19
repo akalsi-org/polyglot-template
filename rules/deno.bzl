@@ -99,6 +99,22 @@ def _own_deno_sources(ctx: AnalysisContext, srcs: list) -> list:
 def _deno_sources_children(deps: list) -> list:
   return [d[DenoSourcesInfo].sources for d in deps if DenoSourcesInfo in d]
 
+# Makes DenoAppInfo load-bearing: every consumer below resolves its effective
+# `deno` CLI entry-arg list as explicit `entries` (still needed for
+# directory-scoped cases like deno_test's "ts/test/" or deno_lint's "ts/")
+# PLUS the DenoAppInfo.entry of every dep that is a deno_app - deduped,
+# order-stable (explicit entries first, then deps in dep-list order) - so an
+# app's own entrypoint path is declared exactly once, at the deno_app itself,
+# never re-typed as a string at every consumer that already depends on it.
+def _resolve_entries(ctx: AnalysisContext) -> list:
+  seen = {}
+  out = []
+  for entry in list(ctx.attrs.entries) + [d[DenoAppInfo].entry for d in ctx.attrs.deps if DenoAppInfo in d]:
+    if entry not in seen:
+      seen[entry] = True
+      out.append(entry)
+  return out
+
 def _flatten_deno_sources(ctx: AnalysisContext, deps: list) -> dict:
   """Folds every `deps` DenoSourcesInfo target's transitive sources into one
   staged_path -> Artifact layout dict, diamond-safe (single traverse() over
@@ -229,7 +245,7 @@ def _deno_cache_impl(ctx: AnalysisContext) -> list[Provider]:
   )
 
   ctx.actions.run(
-    cmd_args(["/bin/sh", script, staged, deno, deno_dir_out.as_output(), node_modules_out.as_output()] + ctx.attrs.entries),
+    cmd_args(["/bin/sh", script, staged, deno, deno_dir_out.as_output(), node_modules_out.as_output()] + _resolve_entries(ctx)),
     category = "deno_cache",
     identifier = ctx.label.name,
     local_only = True,
@@ -252,7 +268,11 @@ _deno_cache_rule = rule(
     # bulk of the staged tree without a hand-written path dict; `srcs` stays
     # available for the rare direct addition/override.
     "deps": attrs.list(attrs.dep(providers = [DenoSourcesInfo]), default = []),
-    "entries": attrs.list(attrs.string()),
+    # Optional (default []): every deno_app dep's own DenoAppInfo.entry is
+    # folded in automatically (see _resolve_entries) - `entries` here is only
+    # for cache-warming a path that isn't any dep's own recorded entrypoint
+    # (e.g. tsweb/vite.config.ts, a plain deno_library source, not an app).
+    "entries": attrs.list(attrs.string(), default = []),
     "srcs": attrs.dict(attrs.string(), attrs.source(), default = {}),
   },
 )
@@ -364,12 +384,15 @@ def _consumer_defaults(kwargs):
 # (no --cached-only: `deno check` has no such flag, but is network-free once
 # the cache is warm and --frozen is set).
 def _deno_check_impl(ctx: AnalysisContext) -> list[Provider]:
-  stamp, _ = _stage_and_run(ctx, {}, ["check", "--frozen"] + ctx.attrs.entries, "deno_check")
+  stamp, _ = _stage_and_run(ctx, {}, ["check", "--frozen"] + _resolve_entries(ctx), "deno_check")
   return [DefaultInfo(default_output = stamp)]
 
 _deno_check_rule = rule(
   impl = _deno_check_impl,
-  attrs = _CONSUMER_ATTRS | {"entries": attrs.list(attrs.string())},
+  # Optional (default []): every deno_app dep's DenoAppInfo.entry is folded
+  # in automatically - see _resolve_entries. Only needed explicitly for an
+  # entry that isn't a dep's own recorded entrypoint.
+  attrs = _CONSUMER_ATTRS | {"entries": attrs.list(attrs.string(), default = [])},
 )
 
 def deno_check(**kwargs):
@@ -378,7 +401,7 @@ def deno_check(**kwargs):
 # --- deno_run_check: `deno run --cached-only --frozen <entry>`, ts-test's
 # "run the app" parity, wired up as a buck2 test.
 def _deno_run_check_impl(ctx: AnalysisContext) -> list[Provider]:
-  stamp, _ = _stage_and_run(ctx, {}, ["run", "--cached-only", "--frozen"] + ctx.attrs.extra_flags + ctx.attrs.entries, "deno_run_check")
+  stamp, _ = _stage_and_run(ctx, {}, ["run", "--cached-only", "--frozen"] + ctx.attrs.extra_flags + _resolve_entries(ctx), "deno_run_check")
   command = cmd_args(["/bin/sh", "-c", "exit 0"], hidden = [stamp])
   return [
     DefaultInfo(default_output = stamp),
@@ -388,7 +411,8 @@ def _deno_run_check_impl(ctx: AnalysisContext) -> list[Provider]:
 _deno_run_check_rule = rule(
   impl = _deno_run_check_impl,
   attrs = _CONSUMER_ATTRS | {
-    "entries": attrs.list(attrs.string()),
+    # Optional (default []) - see deno_check's identical comment above.
+    "entries": attrs.list(attrs.string(), default = []),
     "extra_flags": attrs.list(attrs.string(), default = []),
   },
 )
@@ -399,7 +423,14 @@ def deno_run_check(**kwargs):
 # --- deno_test: `deno test --frozen [flags] <paths>`, one buck2 test target
 # per lane's test/ directory.
 def _deno_test_impl(ctx: AnalysisContext) -> list[Provider]:
-  stamp, _ = _stage_and_run(ctx, {}, ["test", "--cached-only", "--frozen"] + ctx.attrs.extra_flags + ctx.attrs.entries, "deno_test")
+  # Deliberately NOT _resolve_entries(ctx): deno_test's entries are always
+  # directory-scoped ("ts/test/") - see _resolve_entries' doc comment -
+  # unlike deno_check/deno_run_check/deno_graph_check/deno_cache, a
+  # deno_app dep here exists purely for source availability (e.g. test code
+  # importing an app's exported function), not to be run as an extra test
+  # entry, so its DenoAppInfo.entry should NOT be folded in automatically.
+  entries = ctx.attrs.entries
+  stamp, _ = _stage_and_run(ctx, {}, ["test", "--cached-only", "--frozen"] + ctx.attrs.extra_flags + entries, "deno_test")
   command = cmd_args(["/bin/sh", "-c", "exit 0"], hidden = [stamp])
   providers = [
     DefaultInfo(default_output = stamp),
@@ -415,7 +446,7 @@ def _deno_test_impl(ctx: AnalysisContext) -> list[Provider]:
     _, out_dir = _stage_and_run(
       ctx,
       {},
-      ["test", "--cached-only", "--frozen"] + ctx.attrs.extra_flags + ["--coverage=coverage_raw"] + ctx.attrs.entries,
+      ["test", "--cached-only", "--frozen"] + ctx.attrs.extra_flags + ["--coverage=coverage_raw"] + entries,
       "deno_test_coverage",
       out_dir_name = "coverage_raw",
       name_suffix = "-cov",
@@ -426,7 +457,11 @@ def _deno_test_impl(ctx: AnalysisContext) -> list[Provider]:
 _deno_test_rule = rule(
   impl = _deno_test_impl,
   attrs = _CONSUMER_ATTRS | {
-    "entries": attrs.list(attrs.string()),
+    # Directory-scoped ("ts/test/") entries stay explicit - see
+    # _resolve_entries' doc comment - deno_app deps still fold their own
+    # entrypoint in additionally (harmless: `deno test` treats an extra file
+    # arg with no Deno.test() calls as zero additional tests, not an error).
+    "entries": attrs.list(attrs.string(), default = []),
     "extra_flags": attrs.list(attrs.string(), default = []),
     "_coverage_enabled": attrs.bool(default = coverage_enabled_flag()),
   },
@@ -734,7 +769,7 @@ def _deno_graph_check_impl(ctx: AnalysisContext) -> list[Provider]:
     is_executable = True,
   )
   ctx.actions.run(
-    cmd_args(["/bin/sh", script, staged, deno_dir, node_modules, deno, declared, checker, stamp.as_output()] + ctx.attrs.entries),
+    cmd_args(["/bin/sh", script, staged, deno_dir, node_modules, deno, declared, checker, stamp.as_output()] + _resolve_entries(ctx)),
     category = "deno_graph_check",
     identifier = ctx.label.name,
   )
@@ -746,7 +781,8 @@ def _deno_graph_check_impl(ctx: AnalysisContext) -> list[Provider]:
 
 _deno_graph_check_rule = rule(
   impl = _deno_graph_check_impl,
-  attrs = _CONSUMER_ATTRS | {"entries": attrs.list(attrs.string())},
+  # Optional (default []) - see deno_check's identical comment above.
+  attrs = _CONSUMER_ATTRS | {"entries": attrs.list(attrs.string(), default = [])},
 )
 
 def deno_graph_check(**kwargs):

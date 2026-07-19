@@ -9,9 +9,11 @@ deno_app(
 )
 
 # ts-build parity, this app's slice: `deno check --frozen ts/app/hello/main.ts`.
+# entries derives from :hello's own DenoAppInfo (see rules/deno.bzl's
+# _resolve_entries) - the entrypoint path is declared once, at deno_app
+# itself, not restated here.
 deno_check(
   name = "check",
-  entries = ["ts/app/hello/main.ts"],
   deps = [":hello"],
   visibility = ["PUBLIC"],
 )
