@@ -1,27 +1,14 @@
-# Header-only pgt::core library (types.hh, platform.hh). Additive to the
-# moon-owned cpp lane, which has no library abstraction of its own: moon's
-# tools/cpp_graph.py compiles cpp/test/core_test.cc directly against
-# include_dirs = ["//lib"] (see cpp/test/build.toml); this cxx_library exists
-# so buck2 targets can depend on the headers instead of repeating the
-# include-dir string everywhere.
+# Header-only pgt::core library (types.hh, platform.hh). hdrs stage into
+# this library's own include-tree node (see rules/cxx.bzl's IncludeTreeSet
+# doc comment) at the logical path this package's location implies relative
+# to cpp/lib (pgt/core/types.hh, pgt/core/platform.hh) - any consumer that
+# lists this target in `deps` gets that tree folded into its own -I flags
+# automatically, no include_dirs or export_file needed here.
 
 load("//rules:cxx.bzl", "cxx_library")
-load("//rules:file.bzl", "export_file")
-
-export_file(
-  name = "types.hh",
-  src = "types.hh",
-  visibility = ["//cpp/..."],
-)
-
-export_file(
-  name = "platform.hh",
-  src = "platform.hh",
-  visibility = ["//cpp/..."],
-)
 
 cxx_library(
   name = "pgt_core",
-  hdrs = [":types.hh", ":platform.hh"],
+  hdrs = ["types.hh", "platform.hh"],
   visibility = ["//cpp/..."],
 )

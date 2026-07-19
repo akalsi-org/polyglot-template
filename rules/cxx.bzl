@@ -35,7 +35,76 @@ _GCC_BIN_DIR = _GCC["expected"].rsplit("/", 1)[0]
 _LOADER_DIR = _GCC["loader"].rsplit("/", 1)[0]
 _DOCTEST_INCLUDE_DIR = _DOCTEST["expected"].rsplit("/", 2)[0]
 
-CxxInfo = provider(fields = ["include_dirs", "hdrs", "objects", "gcnos"])
+CxxInfo = provider(fields = ["include_dirs", "hdrs", "objects", "gcnos", "include_trees"])
+
+# --- include-tree staging: gives cxx_library a one-BUCK-file UX (hdrs/srcs/
+# deps only, no hand-written include_dirs, no export_file for headers that
+# cross a package boundary). Each cxx_library stages its own `hdrs` into a
+# per-target symlinked_dir artifact at their LOGICAL path - this project's
+# include doctrine is logical paths rooted at cpp/lib (e.g. a header
+# physically at cpp/lib/pgt/core/types.hh is always included as
+# "pgt/core/types.hh") - derived below from the staging target's own package
+# path relative to cpp/lib. CxxInfo carries this as one node of a transitive
+# set (IncludeTreeSet) of staged-tree artifacts; consumers fold their deps'
+# tsets into ONE merged tset and traverse it ONCE (mirrors
+# rules/pkg.bzl's flatten_merged_package_entries()/rules/deno.bzl's
+# DenoSourceSet doc comments: diamond-safe by construction, since a shared
+# descendant node is only visited once no matter how many parents reach it),
+# turning each resulting artifact into a real `-I<artifact>` compiler arg -
+# a genuine Artifact reference in the action's command, not a literal string,
+# so it is a tracked input per this project's artifact-tracking law (see
+# rules/pkg.bzl's module docstring) - unlike a bare "-Icpp/lib" string, which
+# would make every header under cpp/lib reachable regardless of whether the
+# consuming target actually declared a dep on it.
+IncludeTreeSet = transitive_set()
+
+_LIB_ROOT = "cpp/lib"
+
+def _logical_prefix(ctx: AnalysisContext) -> str:
+  pkg = ctx.label.package
+  if pkg == _LIB_ROOT:
+    return ""
+  if pkg.startswith(_LIB_ROOT + "/"):
+    return pkg[len(_LIB_ROOT) + 1:]
+
+  # Targets outside cpp/lib (cpp/app, cpp/test, cpp/adapters, ...) have no
+  # cpp/lib-relative logical path of their own; falling back to the full
+  # package path still gives a stable, collision-free logical prefix for any
+  # cxx_library that might someday live outside cpp/lib, without special-
+  # casing this function's caller.
+  return pkg
+
+def _stage_include_tree(ctx: AnalysisContext, hdrs: list) -> [Artifact, None]:
+  if not hdrs:
+    return None
+  prefix = _logical_prefix(ctx)
+  layout = {}
+  for hdr in hdrs:
+    logical = "{}/{}".format(prefix, hdr.short_path) if prefix else hdr.short_path
+    layout[logical] = hdr
+  return ctx.actions.symlinked_dir(ctx.attrs.name + "__include_tree__", layout)
+
+def _own_include_tree_tset(ctx: AnalysisContext, own_hdrs: list, tree_children: list):
+  own = _stage_include_tree(ctx, own_hdrs)
+  if own == None and not tree_children:
+    return None
+  return ctx.actions.tset(IncludeTreeSet, value = [own] if own != None else [], children = tree_children)
+
+def _flatten_include_trees(ctx: AnalysisContext, tsets: list) -> list:
+  tsets = [t for t in tsets if t != None]
+  if not tsets:
+    return []
+  merged = ctx.actions.tset(IncludeTreeSet, children = tsets)
+  out = []
+  for value in merged.traverse():
+    out += value
+  return out
+
+def _include_args(ctx: AnalysisContext, tsets: list, include_dirs: list) -> list:
+  return (
+    [cmd_args(tree, format = "-I{}") for tree in _flatten_include_trees(ctx, tsets)] +
+    [cmd_args(d, format = "-I{}") for d in include_dirs]
+  )
 
 def _check_flags(flags):
   for flag in flags:
@@ -71,13 +140,16 @@ def _merge_deps(deps):
   hdrs = []
   objects = []
   gcnos = []
+  tree_children = []
   for dep in deps:
     info = dep[CxxInfo]
     include_dirs += info.include_dirs
     hdrs += info.hdrs
     objects += info.objects
     gcnos += info.gcnos
-  return include_dirs, hdrs, objects, gcnos
+    if info.include_trees != None:
+      tree_children.append(info.include_trees)
+  return include_dirs, hdrs, objects, gcnos, tree_children
 
 def _dedupe_artifacts(artifacts):
   seen = {}
@@ -89,7 +161,7 @@ def _dedupe_artifacts(artifacts):
       ordered.append(artifact)
   return ordered
 
-def _compile_one(ctx, tools, src, include_dirs, hdrs, compile_flags, extra_args, doctest, identifier):
+def _compile_one(ctx, tools, src, include_args, hdrs, compile_flags, extra_args, doctest, identifier):
   _check_flags(compile_flags)
   obj = ctx.actions.declare_output("__objects__/{}/{}.o".format(ctx.attrs.name, identifier))
   args = [
@@ -99,7 +171,7 @@ def _compile_one(ctx, tools, src, include_dirs, hdrs, compile_flags, extra_args,
   ]
   if doctest:
     args.append(cmd_args(_doctest_include(ctx), format = "-I{}"))
-  args += [cmd_args(d, format = "-I{}") for d in include_dirs]
+  args += include_args
   args += extra_args
   args += compile_flags
   args += ["-c", src, "-o", obj.as_output()]
@@ -167,11 +239,18 @@ _PROFILE_ATTRS = {
 
 def _cxx_library_impl(ctx: AnalysisContext) -> list[Provider]:
   tools = _toolchain_tools(ctx)
-  dep_include_dirs, dep_hdrs, dep_objects, dep_gcnos = _merge_deps(ctx.attrs.deps)
+  dep_include_dirs, dep_hdrs, dep_objects, dep_gcnos, tree_children = _merge_deps(ctx.attrs.deps)
   include_dirs = list(ctx.attrs.include_dirs) + dep_include_dirs
   hdrs = list(ctx.attrs.hdrs) + dep_hdrs
+  # Own hdrs are staged into this library's own include-tree node (logical
+  # path rooted at cpp/lib - see IncludeTreeSet's doc comment above); the
+  # resulting tset already folds in every dep's own tree, so compiling this
+  # library's own srcs (including a self-include of its own header at its
+  # logical path) needs only ONE flatten of this single node.
+  own_tree_tset = _own_include_tree_tset(ctx, ctx.attrs.hdrs, tree_children)
+  include_args = _include_args(ctx, [own_tree_tset], include_dirs)
   compiled = [
-    _compile_one(ctx, tools, src, include_dirs, hdrs, ctx.attrs.compile_flags, [], False, src.short_path)
+    _compile_one(ctx, tools, src, include_args, hdrs, ctx.attrs.compile_flags, [], False, src.short_path)
     for src in ctx.attrs.srcs
   ]
   own_objects = [obj for obj, _gcno in compiled]
@@ -185,7 +264,7 @@ def _cxx_library_impl(ctx: AnalysisContext) -> list[Provider]:
   # chain uniformly - see rules/pkg.bzl's module docstring.
   return [
     DefaultInfo(default_outputs = outputs),
-    CxxInfo(include_dirs = include_dirs, hdrs = hdrs, objects = objects, gcnos = gcnos),
+    CxxInfo(include_dirs = include_dirs, hdrs = hdrs, objects = objects, gcnos = gcnos, include_trees = own_tree_tset),
     package_info(ctx, deps = ctx.attrs.deps),
   ]
 
@@ -207,12 +286,18 @@ _cxx_library_rule = rule(
 
 def _cxx_adapter_impl(ctx: AnalysisContext) -> list[Provider]:
   tools = _toolchain_tools(ctx)
-  include_dirs, hdrs, _objects, _gcnos = _merge_deps(ctx.attrs.deps)
+  include_dirs, hdrs, _objects, _gcnos, tree_children = _merge_deps(ctx.attrs.deps)
   hdrs = list(ctx.attrs.hdrs) + hdrs
-  obj, gcno = _compile_one(ctx, tools, ctx.attrs.src, include_dirs, hdrs, ctx.attrs.compile_flags, ctx.attrs.extra_args, ctx.attrs.doctest, ctx.attrs.name)
+  # cxx_adapter mirrors a hand-declared vendor action (see this rule's own
+  # module doc comment below) - it doesn't stage its own hdrs into an
+  # include-tree node the way cxx_library does, but still folds any deps'
+  # trees forward so a future cxx_adapter with cxx_library deps works.
+  include_args = _include_args(ctx, tree_children, include_dirs)
+  obj, gcno = _compile_one(ctx, tools, ctx.attrs.src, include_args, hdrs, ctx.attrs.compile_flags, ctx.attrs.extra_args, ctx.attrs.doctest, ctx.attrs.name)
+  adapter_tree_tset = ctx.actions.tset(IncludeTreeSet, children = tree_children) if tree_children else None
   return [
     DefaultInfo(default_outputs = [obj]),
-    CxxInfo(include_dirs = [], hdrs = hdrs, objects = [obj], gcnos = [gcno] if gcno != None else []),
+    CxxInfo(include_dirs = [], hdrs = hdrs, objects = [obj], gcnos = [gcno] if gcno != None else [], include_trees = adapter_tree_tset),
   ]
 
 # Also used for the shared doctest runner object (cpp/test/BUCK,
@@ -233,11 +318,12 @@ _cxx_adapter_rule = rule(
 
 def _cxx_binary_impl(ctx: AnalysisContext) -> list[Provider]:
   tools = _toolchain_tools(ctx)
-  dep_include_dirs, dep_hdrs, dep_objects, _dep_gcnos = _merge_deps(ctx.attrs.deps)
+  dep_include_dirs, dep_hdrs, dep_objects, _dep_gcnos, tree_children = _merge_deps(ctx.attrs.deps)
   include_dirs = list(ctx.attrs.include_dirs) + dep_include_dirs
   hdrs = list(ctx.attrs.hdrs) + dep_hdrs
+  include_args = _include_args(ctx, tree_children, include_dirs)
   compiled = [
-    _compile_one(ctx, tools, src, include_dirs, hdrs, ctx.attrs.compile_flags, [], False, src.short_path)
+    _compile_one(ctx, tools, src, include_args, hdrs, ctx.attrs.compile_flags, [], False, src.short_path)
     for src in ctx.attrs.srcs
   ]
   own_objects = [obj for obj, _gcno in compiled]
@@ -333,13 +419,14 @@ def _coverage_collect_action(ctx, tools, binary, gcnos):
 
 def _cxx_test_impl(ctx: AnalysisContext) -> list[Provider]:
   tools = _toolchain_tools(ctx)
-  dep_include_dirs, dep_hdrs, dep_objects, dep_gcnos = _merge_deps(ctx.attrs.deps)
+  dep_include_dirs, dep_hdrs, dep_objects, dep_gcnos, tree_children = _merge_deps(ctx.attrs.deps)
   runner_objects = ctx.attrs._runner[CxxInfo].objects
   runner_gcnos = ctx.attrs._runner[CxxInfo].gcnos
   include_dirs = list(ctx.attrs.include_dirs) + dep_include_dirs
   hdrs = list(ctx.attrs.hdrs) + dep_hdrs
+  include_args = _include_args(ctx, tree_children, include_dirs)
   compiled = [
-    _compile_one(ctx, tools, src, include_dirs, hdrs, ctx.attrs.compile_flags, [], True, src.short_path)
+    _compile_one(ctx, tools, src, include_args, hdrs, ctx.attrs.compile_flags, [], True, src.short_path)
     for src in ctx.attrs.srcs
   ]
   own_objects = [obj for obj, _gcno in compiled]

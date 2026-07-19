@@ -38,6 +38,5 @@ cxx_test(
 cxx_test(
   name = "pgt_core_test",
   srcs = ["core_test.cc"],
-  include_dirs = ["cpp/lib"],
   deps = ["//cpp/lib/pgt/core:pgt_core"],
 )
