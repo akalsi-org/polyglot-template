@@ -9,7 +9,7 @@ Need one repository UX?
   -> one public entrypoint
 
 Need cross-project ordering/caching?
-  -> moon at coarse project/task granularity
+  -> one in-graph scheduler at fine target granularity
 
 Need language-specific correctness?
   -> native ecosystem retains semantic ownership
@@ -50,10 +50,10 @@ Need cheap co-located services?
 ```text
 principle: one stable entrypoint presents the product workflow; specialized tools retain semantic ownership below it
 evidence: command runners simplify UX but cannot correctly replace C dependency graphs, Go modules, Python ABI metadata, or Deno resolution
-boundary: repo.sh owns dispatch; moon owns coarse ordering; lane tools own language semantics
+boundary: repo.sh owns dispatch; Buck2 owns build/test graph ordering and caching; lane tools own language semantics
 validate: help lists every canonical command and each executes through the same environment
 falsifier: a single lower-level tool genuinely and maintainably owns all required language/package semantics
-avoid: copying build logic into repo.sh or moon YAML
+avoid: copying build logic into repo.sh or first-party Buck2 rules
 ```
 
 ## P2. One Truth Per Artifact Class
@@ -247,7 +247,7 @@ avoid: installing a DNS-edit token on every reverse proxy
 
 ### MR1. Extract The Boundary, Not The Proper Noun
 
-`repo.sh`, moon, Ninja, Deno, and zstd are current anchors. Durable guidance states what they own and the validation they enable. Replace an anchor when another tool satisfies the same boundary with less liability.
+`repo.sh`, Buck2, Ninja, Deno, and zstd are current anchors. Durable guidance states what they own and the validation they enable. Replace an anchor when another tool satisfies the same boundary with less liability.
 
 ### MR2. Add Abstraction Only For Two Consumers Or One Safety Invariant
 

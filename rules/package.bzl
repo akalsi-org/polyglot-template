@@ -158,8 +158,8 @@ def _resolve_needs(ctx, needs):
 # chmod decision in _stage_lines and the nesting check in _check_collisions
 # below. "tree" is deliberately excluded from both: several lanes
 # intentionally merge multiple entries under one shared tree dest (e.g.
-# py_extension's "app/python/lib" tree entry plus py_library's individual
-# "app/python/lib/<path>" file entries - both copy INTO that directory
+# py_extension's "python/lib" tree entry plus py_library's individual
+# "python/lib/<path>" file entries - both copy INTO that directory
 # rather than clobbering a leaf - see rules/python.bzl's _py_library_impl /
 # _py_extension_impl docstrings), and a plain "tree" entry's own artifact
 # may itself be either a file or a directory (only known at stage-script RUN
@@ -322,12 +322,12 @@ def _stage_lines(ctx, entries, needs):
     ]
 
   # "py-app-launcher": bin/<name> (execing this same target's own
-  # app/python/app/* source entry, paired by `owner`) plus the shared
+  # python/app/* source entry, paired by `owner`) plus the shared
   # bin/python + bin/python3 loader-wrapped interpreter launchers (written
   # once total, byte-for-byte write_python_runtime_launcher()'s shape).
   main_by_owner = {}
   for entry in entries:
-    if entry.kind == "tree" and entry.dest.startswith("app/python/app/"):
+    if entry.kind == "tree" and entry.dest.startswith("python/app/"):
       main_by_owner[entry.owner] = entry.dest
 
   wrote_python_launchers = False
@@ -337,13 +337,13 @@ def _stage_lines(ctx, entries, needs):
     name = entry.dest.rsplit("/", 1)[-1]
     main_dest = main_by_owner.get(entry.owner)
     if main_dest == None:
-      fail("package({}): py-app-launcher entry for dest {!r} (target {}) has no matching app/python/app/* source entry from the same target".format(ctx.attrs.name, entry.dest, entry.owner))
+      fail("package({}): py-app-launcher entry for dest {!r} (target {}) has no matching python/app/* source entry from the same target".format(ctx.attrs.name, entry.dest, entry.owner))
     lines += [
       "cat > \"$OUT/bin/{name}\" <<'PKGEOF'".format(name = name),
       "#!/bin/sh",
       "set -eu",
       "ROOT=$(CDPATH= cd -- \"$(dirname -- \"$0\")/..\" && pwd -P)",
-      "export PYTHONPATH=\"$ROOT/app/python/lib:$ROOT/app/python/app\"",
+      "export PYTHONPATH=\"$ROOT/python/lib:$ROOT/python/app\"",
       "exec \"$ROOT/bin/python\" \"$ROOT/{main_dest}\" \"$@\"".format(main_dest = main_dest),
       "PKGEOF",
       "chmod 0755 \"$OUT/bin/{name}\"".format(name = name),
@@ -362,21 +362,21 @@ def _stage_lines(ctx, entries, needs):
         ]
 
   # "deno-app-launcher": a small generated per-package deno.json (staged at
-  # app/ts/deno.json - written ONCE, before any launcher below references
-  # it) that maps this project's "@/" import scope onto the staged
-  # "ts/lib/" root, mirroring the repo's own root deno.json scope
-  # (`"./ts/": {"@/": "./ts/lib/"}`) but rooted at app/ts/ itself since
-  # that's where deno_app's own staged closure lands. Deliberately NOT the
-  # repo's real deno.json: that file declares npm: imports (react/vite/...)
-  # this packaging path refuses to ship - see the npm-closure guard below -
-  # and has no reason to carry deno.lock/fmt/lint/test config into a
-  # packaged app at all.
+  # ts/deno.json - written ONCE, before any launcher below references it)
+  # that maps this project's "@/" import scope onto the staged "lib/" root,
+  # mirroring the repo's own root deno.json scope (`"./ts/": {"@/":
+  # "./ts/lib/"}`) but rooted at ts/ itself since that's where deno_app's
+  # own staged closure lands (a root-level sibling of bin/lib/libexec/
+  # runtime/share). Deliberately NOT the repo's real deno.json: that file
+  # declares npm: imports (react/vite/...) this packaging path refuses to
+  # ship - see the npm-closure guard below - and has no reason to carry
+  # deno.lock/fmt/lint/test config into a packaged app at all.
   #
   # npm-closure guard: package() only supports zero-npm-dep deno apps today
   # - rather than silently shipping the whole npm store (deno vendors real
   # package copies, not symlinks - see rules/deno.bzl's module docstring),
   # this fails the BUILD loudly the moment any deno-app-launcher entry's
-  # own staged app/ts/ closure contains an "npm:" specifier anywhere, before
+  # own staged ts/ closure contains an "npm:" specifier anywhere, before
   # any launcher is ever run.
   has_deno_app = False
   for entry in entries:
@@ -385,11 +385,11 @@ def _stage_lines(ctx, entries, needs):
       break
   if has_deno_app:
     lines += [
-      "if grep -rl 'npm:' \"$OUT/app/ts\" >/dev/null 2>&1; then",
-      "  echo \"package({}): npm-dependent deno apps not yet supported by packaging (found npm: specifier under app/ts)\" >&2".format(ctx.attrs.name),
+      "if grep -rl 'npm:' \"$OUT/ts\" >/dev/null 2>&1; then",
+      "  echo \"package({}): npm-dependent deno apps not yet supported by packaging (found npm: specifier under ts)\" >&2".format(ctx.attrs.name),
       "  exit 1",
       "fi",
-      "cat > \"$OUT/app/ts/deno.json\" <<'PKGEOF'",
+      "cat > \"$OUT/ts/deno.json\" <<'PKGEOF'",
       "{",
       "  \"scopes\": {",
       "    \"./\": { \"@/\": \"./lib/\" }",
@@ -403,7 +403,7 @@ def _stage_lines(ctx, entries, needs):
       continue
     name = entry.dest.rsplit("/", 1)[-1]
     main_dest = entry.meta
-    if main_dest == None or not main_dest.startswith("app/ts/"):
+    if main_dest == None or not main_dest.startswith("ts/"):
       fail("package({}): deno-app-launcher entry for dest {!r} (target {}) has an invalid entry path {!r} - packaging only supports ts/ deno apps today".format(ctx.attrs.name, entry.dest, entry.owner, main_dest))
     lines += [
       "cat > \"$OUT/bin/{name}\" <<'PKGEOF'".format(name = name),
@@ -413,9 +413,9 @@ def _stage_lines(ctx, entries, needs):
       # --no-remote: fail-closed on any non-local import (the key offline
       # guarantee - deno never even attempts a network fetch, cached or
       # not). --allow-net: this app calls Deno.serve(). --config: the
-      # generated app/ts/deno.json above, so "@/" resolves inside the
-      # staged layout exactly like it does in the repo's own deno.json.
-      "exec \"$ROOT/runtime/deno/deno\" run --no-remote --allow-net --config \"$ROOT/app/ts/deno.json\" \"$ROOT/{main_dest}\" \"$@\"".format(main_dest = main_dest),
+      # generated ts/deno.json above, so "@/" resolves inside the staged
+      # layout exactly like it does in the repo's own deno.json.
+      "exec \"$ROOT/runtime/deno/deno\" run --no-remote --allow-net --config \"$ROOT/ts/deno.json\" \"$ROOT/{main_dest}\" \"$@\"".format(main_dest = main_dest),
       "PKGEOF",
       "chmod 0755 \"$OUT/bin/{name}\"".format(name = name),
     ]
@@ -423,14 +423,14 @@ def _stage_lines(ctx, entries, needs):
   # __pycache__/*.pyc exclusion (mirrors tools/package_release.py's
   # copy_tree(..., ignore=(...))): run ONCE at the end over the two roots
   # that can ever carry probe/build-time bytecode cache files
-  # (runtime/python and app/python), rather than once per staged entry -
-  # entries under app/python/ number in the dozens for a real py_library
+  # (runtime/python and python), rather than once per staged entry -
+  # entries under python/ number in the dozens for a real py_library
   # fan-out, and re-walking the same shared subtree that many times bought
   # nothing. `2>/dev/null || true` also makes each find tolerant of either
   # root not existing at all (a pure cxx/go/deno package stages neither).
   lines += [
-    "find \"$OUT/runtime/python\" \"$OUT/app/python\" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true",
-    "find \"$OUT/runtime/python\" \"$OUT/app/python\" -name '*.pyc' -delete 2>/dev/null || true",
+    "find \"$OUT/runtime/python\" \"$OUT/python\" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true",
+    "find \"$OUT/runtime/python\" \"$OUT/python\" -name '*.pyc' -delete 2>/dev/null || true",
   ]
 
   return lines, hidden
@@ -669,7 +669,7 @@ def _package_smoke_impl(ctx: AnalysisContext) -> list[Provider]:
     "tar -xzf \"$ARCHIVE\" -C \"$WORK\"",
   ] + list(ctx.attrs.checks)
   if smoke_script != None:
-    lines.append("python3 \"$SMOKE_SCRIPT\" --root \"$WORK/app/web\"")
+    lines.append("python3 \"$SMOKE_SCRIPT\" --root \"$WORK/web\"")
 
   script, written = ctx.actions.write(ctx.attrs.name + ".sh", lines, is_executable = True, allow_args = True)
   command = cmd_args(script, hidden = hidden + written)

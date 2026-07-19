@@ -314,22 +314,26 @@ case "$command" in
     profile=${2:-opt}
     [[ $profile == dbg || $profile == opt ]] || { printf 'error: profile must be dbg or opt\n' >&2; exit 2; }
     target=$("$ROOT/toolchain/target.sh")
-    if [[ $1 == polyglot-demo ]]; then
-      # polyglot-demo is assembled entirely in-graph by //packages:polyglot-demo
-      # (rules/package.bzl), a byte-for-byte mirror of the layout
-      # tools/package_release.py's now-removed assemble_polyglot_demo() used
-      # to stage. Build it, then copy the archive to dist/ under the same
-      # <package>-<version>-<target>.tar.gz naming package_release.py's
-      # assemble() uses, so release-check/package-smoke/the release workflow
-      # stay naming-compatible regardless of which path built the archive.
-      setup_environment
+    setup_environment
+    # Any package with its own //packages:<name> buck2 target (rules/package.bzl's
+    # package() rule - currently polyglot-demo, polyglot-server) is assembled
+    # entirely in-graph; `buck2 targets` is the generic, name-list-free way to
+    # detect that without special-casing individual package names here. Build
+    # it, then copy the archive to dist/ under the same
+    # <package>-<version>-<target>.tar.gz naming tools/package_release.py's
+    # assemble() uses, so release-check/package-smoke/the release workflow stay
+    # naming-compatible regardless of which path built the archive. Everything
+    # else (gateway, schema-cli: manifest-declared packages with no buck2
+    # target) falls through to tools/package_release.py's assemble(), which
+    # requires a pre-populated --build-dir.
+    if "$POLYGLOT_BUCK2" targets "//packages:$1" >/dev/null 2>&1; then
       version=$(python3 "$ROOT/tools/package_model.py" --manifest "$ROOT/package.toml" \
         --lock "$ROOT/runtime-resolution.lock.toml" --tools-lock "$ROOT/tools.lock.toml" resolve \
-        --package polyglot-demo --target "$target" | python3 -c 'import json, sys; print(json.load(sys.stdin)["version"])')
+        --package "$1" --target "$target" | python3 -c 'import json, sys; print(json.load(sys.stdin)["version"])')
       mapfile -t plat < <(target_platform_args "$profile")
-      out=$("$POLYGLOT_BUCK2" build "${plat[@]}" --show-output //packages:polyglot-demo 2>/dev/null | awk '{ print $2 }')
+      out=$("$POLYGLOT_BUCK2" build "${plat[@]}" --show-output "//packages:$1" 2>/dev/null | awk '{ print $2 }')
       mkdir -p "$ROOT/dist"
-      archive="$ROOT/dist/polyglot-demo-$version-$target.tar.gz"
+      archive="$ROOT/dist/$1-$version-$target.tar.gz"
       tmp="$archive.tmp.$$"
       cp -- "$ROOT/$out" "$tmp"
       mv -- "$tmp" "$archive"

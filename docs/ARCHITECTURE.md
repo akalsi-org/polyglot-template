@@ -125,16 +125,20 @@ closure. `./repo.sh package-validate` validates these contracts before package
 assembly.
 
 `./repo.sh package <name> [dbg|opt]` creates a deterministic gzip tar archive
-at `dist/<name>-<version>-<target>.tar.gz`. For `polyglot-demo`, the archive is
-built entirely in-graph by `//packages:polyglot-demo` (`rules/package.bzl`),
-which stages the same layout `tools/package_release.py` used to assemble by
-hand and produces byte-for-byte the same deterministic tar.gz; `repo.sh` then
-copies Buck2's output archive to `dist/` under the release naming convention.
-Other packages still assemble through `tools/package_release.py` from raw
+at `dist/<name>-<version>-<target>.tar.gz`. Any package with its own
+`//packages:<name>` Buck2 target (`rules/package.bzl`'s `package()` rule -
+currently `polyglot-demo` and `polyglot-server`) is detected via `buck2
+targets` and built entirely in-graph, folding every dep's staged
+`PackageEntry` list into one deterministic tar.gz; `repo.sh` then copies
+Buck2's output archive to `dist/` under the release naming convention. Every
+other package (`gateway`, `schema-cli`: manifest-declared, no Buck2 target)
+falls through to `tools/package_release.py`, which assembles from raw
 build-directory executables. Package smoke extracts an archive into a clean
-temporary location and runs the declared consumer checks. `release-check`
-verifies a package name and tag against the root `CHANGELOG.md`;
-`release-notes` prints that tag's changelog section.
+temporary location and runs the declared consumer checks - the in-graph
+packages' own per-package checks live as `package_smoke` Buck2 targets
+alongside their `package()` target. `release-check` verifies a package name
+and tag against the root `CHANGELOG.md`; `release-notes` prints that tag's
+changelog section.
 
 The GitHub workflow runs the normal quality gates on native x64 and ARM64
 runners. A `packages/<name>/v<version>` tag additionally packages that named

@@ -40,11 +40,18 @@ def packages(model: dict) -> dict[str, dict]:
     require(name not in result, f"duplicate package: {name}")
     require(bool(VERSION.fullmatch(item.get("version", ""))), f"{name}: version must be exact SemVer")
     require(item.get("kind") in {"application", "runtime"}, f"{name}: invalid kind")
-    layout = item.get("layout", "executables")
-    require(layout in {"executables", "polyglot-demo"}, f"{name}: invalid package layout")
     targets = item.get("supported_targets", [])
     require(bool(targets) and len(targets) == len(set(targets)), f"{name}: supported_targets must be nonempty and unique")
     require(all(TARGET.fullmatch(x) for x in targets), f"{name}: invalid supported target")
+    executables = item.get("executables", [])
+    smoke_args = item.get("smoke_args")
+    if smoke_args is not None:
+      require(item["kind"] == "application" and isinstance(smoke_args, dict), f"{name}: smoke_args must be an application executable-argument map")
+      require(set(smoke_args.keys()) <= set(executables), f"{name}: smoke_args keys must be members of executables")
+      require(
+        all(isinstance(value, list) and all(isinstance(arg, str) for arg in value) for value in smoke_args.values()),
+        f"{name}: smoke_args values must be string arrays",
+      )
     runtime = item.get("runtime")
     if runtime is not None:
       require(item["kind"] == "application" and isinstance(runtime, dict), f"{name}: runtime must be an application requirement object")

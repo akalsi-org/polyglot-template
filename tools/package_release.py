@@ -18,6 +18,14 @@ from typing import Any
 
 import package_model
 
+# Hard ceiling on any single smoke execution (defense-in-depth): a smoke
+# that can hang forever is a broken smoke regardless of whether the
+# executable was given the right args (e.g. a manifest typo, or a future
+# long-running executable nobody remembered to add smoke_args for). 60s is
+# generous for every executable in this repo's packages today (all exit in
+# well under a second).
+SMOKE_EXECUTE_TIMEOUT_SECONDS = 60
+
 
 class ReleaseError(ValueError):
   pass
@@ -103,14 +111,15 @@ def assemble(args: argparse.Namespace) -> int:
   target = args.target
   require(target in entry["supported_targets"], f"{args.package}: target is not supported: {target}")
   closure, runtime_ref = resolve_closure(args, args.package, target)
-  # There is no default build directory anymore: moon-era packages assumed
-  # `build/cpp/<target>/<profile>` was populated by the moon lane's own
-  # cpp-build step, but buck2 (this repo's sole build system - see
-  # rules/package.bzl) never writes there, and no package in package.toml
-  # was ever actually buildable through this fallback (aspirational,
-  # pre-migration). --build-dir is required so a missing/empty directory
-  # fails with an honest message instead of silently resolving to a path
-  # nothing populates.
+  # assemble() is for manifest-declared packages with no buck2 package()
+  # target (e.g. gateway, schema-cli) - a package with a buck2 target (e.g.
+  # polyglot-demo, polyglot-server) is built and archived entirely in-graph
+  # by //packages:<name> (see rules/package.bzl); repo.sh's `package`
+  # command routes to that path instead of here for those names. There is
+  # no default build directory: this tool never invokes a build itself, so
+  # --build-dir is required and a missing/empty directory fails with an
+  # honest message instead of silently resolving to a path nothing
+  # populates.
   build_dir = args.build_dir
   require(build_dir is not None, f"{args.package}: --build-dir was not given; this package has no build target in this repository yet")
   require(build_dir.is_dir() and any(build_dir.iterdir()), f"{args.package}: no built executables at {build_dir}; this package has no build target in this repository yet")
@@ -121,7 +130,6 @@ def assemble(args: argparse.Namespace) -> int:
   if stage.exists():
     shutil.rmtree(stage)
   stage.mkdir(parents=True)
-  require(entry.get("layout", "executables") != "polyglot-demo", f"{args.package}: polyglot-demo is assembled by //packages:polyglot-demo (buck2), not this tool")
   for executable in entry["executables"]:
     copy_executable(build_dir / "bin" / executable, stage / "bin" / executable)
   metadata = {
@@ -177,21 +185,29 @@ def smoke(args: argparse.Namespace) -> int:
     require(metadata.get("closure_sha256") == closure["closure_sha256"], "package metadata closure digest mismatch")
     if runtime_ref:
       require(read_json(scratch / "runtime-ref.json") == runtime_ref, "runtime reference mismatch")
+    smoke_args = entry.get("smoke_args") or {}
     for executable in entry["executables"]:
       path = scratch / "bin" / executable
       require(path.is_file(), f"packaged executable is missing: {executable}")
       require(os.access(path, os.X_OK), f"packaged executable is not executable: {executable}")
       if args.execute:
-        subprocess.run([str(path)], cwd=scratch, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    if entry.get("layout") == "polyglot-demo":
-      require((scratch / "app/web/index.html").is_file(), "packaged React index is missing")
-      require((scratch / "bin/python").is_file(), "packaged Python launcher is missing")
-      require((scratch / "bin/python3").is_file(), "packaged Python3 launcher is missing")
-      subprocess.run(
-        [sys.executable, str(args.root / "tools/tsweb_smoke.py"), "--root", str(scratch / "app/web")],
-        check=True,
-        stdout=subprocess.DEVNULL,
-      )
+        command = [str(path)] + list(smoke_args.get(executable, []))
+        try:
+          subprocess.run(
+            command,
+            cwd=scratch,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=SMOKE_EXECUTE_TIMEOUT_SECONDS,
+          )
+        except subprocess.TimeoutExpired:
+          raise ReleaseError(
+            f"{args.package}: smoke execution of {executable!r} did not exit within "
+            f"{SMOKE_EXECUTE_TIMEOUT_SECONDS}s (command: {command!r}) - if this executable "
+            f"legitimately needs different arguments to exit on its own, declare them via "
+            f"package.toml's smoke_args"
+          ) from None
   print("package smoke: ok")
   return 0
 

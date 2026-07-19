@@ -168,21 +168,24 @@ def _deno_app_impl(ctx: AnalysisContext) -> list[Provider]:
   # Packaging: stage this app's own transitive DenoSourcesInfo closure - own
   # `srcs` plus every deno_library/deno_app dep's sources, diamond-safe via
   # the same shared-tset-merge _flatten_deno_sources already uses for every
-  # other consumer in this file - one "tree" PackageEntry per source file,
-  # under "app/" + its own staged_path (e.g. app/ts/app/server/main.ts,
-  # app/ts/lib/greeting/greeting.ts), plus a "deno-app-launcher" marker entry
-  # (no artifact of its own) at bin/<pkg_name> whose `meta` records this
-  # app's own entrypoint dest so rules/package.bzl's kind handler can pair
-  # the launcher back to the right file even though several of this app's
-  # own staged "app/" entries share the same owner. needs "deno-runtime" so
-  # package() also stages the pinned deno binary.
+  # other consumer in this file - one "tree" PackageEntry per source file, at
+  # its own staged_path directly (e.g. ts/app/server/main.ts,
+  # ts/lib/greeting/greeting.ts) - the package root mirrors the repo's own
+  # top-level layout, so a deno_app's ts/ closure lands as a root-level
+  # sibling of bin/lib/libexec/runtime/share, not nested under an "app/"
+  # prefix - plus a "deno-app-launcher" marker entry (no artifact of its
+  # own) at bin/<pkg_name> whose `meta` records this app's own entrypoint
+  # dest so rules/package.bzl's kind handler can pair the launcher back to
+  # the right file even though several of this app's own staged entries
+  # share the same owner. needs "deno-runtime" so package() also stages the
+  # pinned deno binary.
   closure = dict(own)
   closure.update(_flatten_deno_sources(ctx, ctx.attrs.deps))
   pkg_name = check_pkg_name(ctx, ctx.attrs.pkg_name or ctx.attrs.name)
   owner = str(ctx.label.raw_target())
-  main_dest = "app/" + _staged_path(ctx, ctx.attrs.main)
+  main_dest = _staged_path(ctx, ctx.attrs.main)
   pkg_entries = [
-    PackageEntry(dest = "app/" + staged_path, artifact = artifact, kind = "tree", owner = owner)
+    PackageEntry(dest = staged_path, artifact = artifact, kind = "tree", owner = owner)
     for staged_path, artifact in closure.items()
   ]
   pkg_entries.append(PackageEntry(dest = "bin/" + pkg_name, artifact = None, kind = "deno-app-launcher", owner = owner, meta = main_dest))
@@ -542,10 +545,10 @@ def _vite_build_impl(ctx: AnalysisContext) -> list[Provider]:
     "vite_build",
     out_dir_name = ctx.attrs.out_dir,
   )
-  # Packaging: the whole built site directory stages as one tree entry under
-  # app/web, mirroring the old polyglot_package rule's `cp -R $WEB
-  # $OUT/app/web/`.
-  info = package_info(ctx, entries = [PackageEntry(dest = "app/web", artifact = out_dir, kind = "tree", owner = str(ctx.label.raw_target()))])
+  # Packaging: the whole built site directory stages as one tree entry at
+  # "web", a root-level sibling of bin/lib/libexec/runtime/share (the
+  # package root mirrors the repo's own top-level layout).
+  info = package_info(ctx, entries = [PackageEntry(dest = "web", artifact = out_dir, kind = "tree", owner = str(ctx.label.raw_target()))])
   return [DefaultInfo(default_output = out_dir), info]
 
 _vite_build_rule = rule(

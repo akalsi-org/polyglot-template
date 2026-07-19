@@ -19,24 +19,24 @@ This document set defines a cloneable, non-JVM, AI-ready monorepo template for C
 
 ```text
 repo.sh
-  -> moon                         coarse cross-project scheduling
-      -> native manifest + Ninja  C/C++ semantic graph
-      -> Go toolchain             Go modules/build/test
-      -> Python backend           wheels/native extensions
-      -> Deno + Vite              TypeScript/React
+  -> Buck2                        one in-graph scheduler, build/test/cache
+      -> first-party cxx rules    C/C++ semantic graph (in-graph gcc-musl + mold)
+      -> first-party go rules     Go modules/build/test
+      -> first-party python rules wheels/native extensions
+      -> first-party deno rules   TypeScript/React (Deno + Vite)
       -> schema compiler          proposed shared generated contracts
-      -> package staging          one independently versioned package at a time
+      -> first-party package()    one independently versioned package at a time
 ```
 
-The repository owns tool provenance, lifecycle policy, packaging, benchmarks, and verification. Language-native tools retain their language semantics. moon never replaces those tools.
+The repository owns tool provenance, lifecycle policy, packaging, benchmarks, and verification. Language-native tools retain their language semantics. Buck2 never replaces those tools; it schedules and caches first-party rules that call them.
 
 ## Accepted Decisions
 
 1. `repo.sh` is the stable human and CI interface.
 2. All tools are pinned in a committed lock and installed transactionally under ignored `.local/`.
 3. Normal bootstrap consumes exact committed pins; toolchain-update commands are not implemented in this checkout.
-4. moon schedules coarse project tasks and optionally caches declared final outputs.
-5. Every C/C++ consumer emits a language-owned compile-action fragment on build; native actions derive from the Ninja model, Python extension actions capture the exact pinned-ABI command, and both merge into one complete root `compile_commands.json`.
+4. Buck2 is the sole scheduler: one in-graph build/test/cache pass over every first-party rule (`rules/cxx.bzl`, `rules/go.bzl`, `rules/python.bzl`, `rules/deno.bzl`, `rules/package.bzl`), with in-graph toolchains (`toolchains/lock.bzl`, generated from `tools.lock.toml`) rather than a coarse task runner shelling out to per-language build tools.
+5. A BXL compilation-database query (`bxl/compdb.bxl`) over the Buck2-built cpp/python actions materializes one complete root `compile_commands.json` on demand (`./repo.sh compile-commands`), rather than each consumer emitting its own fragment for a separate merge step.
 6. The root compilation database currently merges C++ and Python native-extension fragments; third-party and generated-source import is proposed.
 7. Upstream CMake, Meson, Autotools, or custom builds are optional dependency adapters, not the repository build system.
 8. Go produces native binaries; Green Tea GC is the Go 1.26 default. The current wrapper enables `jsonv2` for every Go command.

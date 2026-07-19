@@ -36,7 +36,7 @@ reference is not enough for buck2 to track/materialize it correctly.
 
 PackageEntry = record(
   # Package-relative destination path, e.g. "bin/cpp-hello",
-  # "app/python/lib/example/example.py", "app/web".
+  # "python/lib/example/example.py", "web".
   dest = field(str),
   # The staged artifact (a single file OR a whole directory - kind handlers
   # decide how to copy it). None for entries that carry no artifact of their
@@ -54,18 +54,18 @@ PackageEntry = record(
   kind = field(str),
   # str(ctx.label.raw_target()) of the target that emitted this entry - used
   # for dest-collision error messages and to pair a py_binary's
-  # "py-app-launcher" marker entry back to its own app/python/app/* source
+  # "py-app-launcher" marker entry back to its own python/app/* source
   # entry (see rules/package.bzl's kind-handler dispatch).
   owner = field(str),
   # Free-form small string a kind handler may stash on an artifact-less
   # marker entry to carry data that doesn't fit `dest`/`owner` - e.g.
   # "deno-app-launcher"'s own bin/<name> marker uses this to record its
-  # app's staged entrypoint path (the "app/..." dest deno_app's own tree
-  # entries already staged), since pairing that marker back to the right
+  # app's staged entrypoint path (the dest deno_app's own tree entries
+  # already staged), since pairing that marker back to the right
   # entrypoint file by dest-prefix convention alone (the way
-  # "py-app-launcher" pairs itself to its app/python/app/* source entry)
+  # "py-app-launcher" pairs itself to its python/app/* source entry)
   # isn't reliable when several of a deno_app's own transitive dep sources
-  # share the same "app/" prefix. None for every other kind.
+  # share the same "ts/" prefix. None for every other kind.
   meta = field([str, None], None),
 )
 

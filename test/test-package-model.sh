@@ -50,4 +50,17 @@ if python3 "$tool" --manifest "$root/package.toml" --lock "$tmp/unresolved.toml"
   exit 1
 fi
 
+grep -q 'smoke_args = { server = \["--smoke"\] }' "$root/package.toml"
+sed 's/smoke_args = { server = \["--smoke"\] }/smoke_args = { nonexistent = ["--smoke"] }/' "$root/package.toml" >"$tmp/bad-smoke-args-key.toml"
+if python3 "$tool" --manifest "$tmp/bad-smoke-args-key.toml" --lock "$resolved_lock" --tools-lock "$resolved_tools" validate >/dev/null 2>&1; then
+  echo "smoke_args referencing a nonexistent executable unexpectedly validated" >&2
+  exit 1
+fi
+
+sed 's/smoke_args = { server = \["--smoke"\] }/smoke_args = { server = "--smoke" }/' "$root/package.toml" >"$tmp/bad-smoke-args-shape.toml"
+if python3 "$tool" --manifest "$tmp/bad-smoke-args-shape.toml" --lock "$resolved_lock" --tools-lock "$resolved_tools" validate >/dev/null 2>&1; then
+  echo "smoke_args with a non-array value unexpectedly validated" >&2
+  exit 1
+fi
+
 echo "package model tests passed"

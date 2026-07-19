@@ -7,7 +7,7 @@
 # Unlike the old polyglot_package rule (which took one dep attr per staged
 # piece by name), the generic package() rule just takes `deps` - every
 # staged entry (libexec/cpp-hello, bin/go-hello, bin/python-hello,
-# app/python/lib/*, app/web, ...) is folded in transitively off these four
+# python/lib/*, web, ...) is folded in transitively off these four
 # app-level targets' own PackageInfo (see rules/pkg.bzl), including
 # //python/app/hello:hello's own python/lib deps. bin/ names come from each
 # producing target's own `pkg_name` attr (cpp/app/hello:hello,
@@ -44,9 +44,10 @@ package_smoke(
 
 # Deno server-app packaging lane: ts/app/server:server's own transitive
 # DenoSourcesInfo closure (main.ts + //ts/lib/greeting:greeting) staged
-# under app/ts/, plus the pinned deno binary and a generated launcher - see
-# rules/deno.bzl's deno_app and rules/package.bzl's "deno-app-launcher" kind
-# handler for the full design (zero-npm-dep apps only, for now).
+# under ts/ (a root-level sibling of bin/lib/libexec/runtime/share), plus
+# the pinned deno binary and a generated launcher - see rules/deno.bzl's
+# deno_app and rules/package.bzl's "deno-app-launcher" kind handler for the
+# full design (zero-npm-dep apps only, for now).
 package(
   name = "polyglot-server",
   version = "0.1.0",

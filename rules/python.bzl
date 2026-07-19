@@ -175,21 +175,22 @@ def _py_library_impl(ctx: AnalysisContext) -> list[Provider]:
   roots = [ctx.attrs.root] + [r for r in dep_roots if str(r) != ctx.attrs.root]
   # Packaging: one tree entry per OWN source file (not dep_srcs - deps'
   # entries are already folded in transitively via package_info(deps=...)
-  # below), staged under "app/" + this target's own buck2 package path +
-  # the src's own package-relative short_path - e.g. a py_library declared
-  # in python/lib/example/BUCK (ctx.label.package == "python/lib/example")
+  # below), staged under this target's own buck2 package path + the src's
+  # own package-relative short_path - e.g. a py_library declared in
+  # python/lib/example/BUCK (ctx.label.package == "python/lib/example")
   # with srcs = ["example.py"] (short_path == "example.py") stages at
-  # app/python/lib/example/example.py, mirroring the old polyglot_package
-  # rule's hand-written layout for python/lib/example. Deliberately keyed on
-  # ctx.label.package rather than short_path alone (which by itself would
-  # stage at app/python/lib/example.py, losing the "example/" nesting
+  # python/lib/example/example.py - the package root mirrors the repo's own
+  # top-level layout (python/, ts/, web/, ... as siblings of bin/lib/
+  # libexec/runtime/share). Deliberately keyed on ctx.label.package rather
+  # than short_path alone (which by itself would stage at
+  # python/lib/example.py, losing the "example/" nesting
   # `import example.example`'s namespace-package resolution depends on) -
   # this is the same staged_path convention rules/deno.bzl's DenoSourcesInfo
   # uses (ctx.label.package + short_path), so the destination stays correct
   # regardless of which BUCK file a py_library is declared in.
   info = package_info(
     ctx,
-    entries = [PackageEntry(dest = "app/" + ctx.label.package + "/" + src.short_path, artifact = src, kind = "tree", owner = str(ctx.label.raw_target())) for src in ctx.attrs.srcs],
+    entries = [PackageEntry(dest = ctx.label.package + "/" + src.short_path, artifact = src, kind = "tree", owner = str(ctx.label.raw_target())) for src in ctx.attrs.srcs],
     deps = ctx.attrs.deps,
   )
   return [
@@ -279,14 +280,13 @@ def _py_extension_impl(ctx: AnalysisContext) -> list[Provider]:
 
   # Packaging: pkg_dir's OWN top level already contains a "<package>/"
   # subdirectory (this rule's own stage_script above: `mkdir -p
-  # "$1/%s"`), so the entry's dest is the PARENT app/python/lib, not
-  # app/python/lib/<package> - staging copies pkg_dir's contents (the
-  # "<package>/" folder itself) straight into it, mirroring the old
-  # polyglot_package rule's `cp -R $PYFB/. $OUT/app/python/lib/`. A
-  # py_extension always needs the pinned interpreter present at runtime.
+  # "$1/%s"`), so the entry's dest is the PARENT python/lib, not
+  # python/lib/<package> - staging copies pkg_dir's contents (the
+  # "<package>/" folder itself) straight into it. A py_extension always
+  # needs the pinned interpreter present at runtime.
   info = package_info(
     ctx,
-    entries = [PackageEntry(dest = "app/python/lib", artifact = pkg_dir, kind = "tree", owner = str(ctx.label.raw_target()))],
+    entries = [PackageEntry(dest = "python/lib", artifact = pkg_dir, kind = "tree", owner = str(ctx.label.raw_target()))],
     needs = ["python-runtime"],
   )
   return [
@@ -317,24 +317,22 @@ def _py_binary_impl(ctx: AnalysisContext) -> list[Provider]:
   ]
   launcher, written = ctx.actions.write(ctx.attrs.name + ".sh", lines, is_executable = True, allow_args = True)
   command = cmd_args(launcher, hidden = srcs + written + roots + [gcc.gcc_dir, py.py_dir])
-  # Packaging: this rule's own source (`main`) stages under "app/" + this
-  # target's own buck2 package path + main's own package-relative short_path
-  # (e.g. a py_binary declared in python/app/hello/BUCK with main =
-  # "main.py" stages at app/python/app/hello/main.py, mirroring the old
-  # polyglot_package rule's hand-written layout) - see py_library's identical
-  # dest formula above for why ctx.label.package (not short_path alone) is
-  # load-bearing here now that a py_binary may be declared several
-  # directories below python/app/ - plus a "py-app-launcher" marker entry (no
-  # artifact of its own) at bin/<pkg_name> - rules/package.bzl's kind handler
-  # generates bin/<pkg_name> + bin/python + bin/python3 from it, with
-  # PYTHONPATH assembled from every folded app/python/* tree entry (this
-  # target's own deps' py_library/py_extension entries, folded in
-  # transitively below).
+  # Packaging: this rule's own source (`main`) stages under this target's own
+  # buck2 package path + main's own package-relative short_path (e.g. a
+  # py_binary declared in python/app/hello/BUCK with main = "main.py" stages
+  # at python/app/hello/main.py) - see py_library's identical dest formula
+  # above for why ctx.label.package (not short_path alone) is load-bearing
+  # here now that a py_binary may be declared several directories below
+  # python/app/ - plus a "py-app-launcher" marker entry (no artifact of its
+  # own) at bin/<pkg_name> - rules/package.bzl's kind handler generates
+  # bin/<pkg_name> + bin/python + bin/python3 from it, with PYTHONPATH
+  # assembled from every folded python/* tree entry (this target's own deps'
+  # py_library/py_extension entries, folded in transitively below).
   pkg_name = check_pkg_name(ctx, ctx.attrs.pkg_name or ctx.attrs.name)
   info = package_info(
     ctx,
     entries = [
-      PackageEntry(dest = "app/" + ctx.label.package + "/" + ctx.attrs.main.short_path, artifact = ctx.attrs.main, kind = "tree", owner = str(ctx.label.raw_target())),
+      PackageEntry(dest = ctx.label.package + "/" + ctx.attrs.main.short_path, artifact = ctx.attrs.main, kind = "tree", owner = str(ctx.label.raw_target())),
       PackageEntry(dest = "bin/" + pkg_name, artifact = None, kind = "py-app-launcher", owner = str(ctx.label.raw_target())),
     ],
     # bin/python + bin/python3 (the loader-wrapped interpreter launchers
