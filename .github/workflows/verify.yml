@@ -8,13 +8,9 @@ name: verify
 on:
   workflow_call:
 
-permissions:
-  contents: read
-  # The caller grants these only for immutable package-tag runs. The action
-  # below signs the exact archive built in each native matrix leg.
-  attestations: write
-  artifact-metadata: write
-  id-token: write
+# Token permissions are inherited from the caller. Normal CI grants only
+# contents: read, while immutable package-tag runs additionally grant the
+# write permissions required by actions/attest below.
 
 env:
   CI: "1"
