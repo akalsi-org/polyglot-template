@@ -13,22 +13,45 @@ own content-addressed build cache under GOCACHE (see
 https://go.dev/cmd/go/#hdr-Build_and_test_caching). Left at its default
 location that cache is process-global and would leak state across buck2
 actions (and across repo.sh's own `go`/`go-build`/`go-test` passthroughs'
-GOCACHE under .local/cache/go) if reused here. Every action below instead
-points GOCACHE/GOPATH/GOMODCACHE at
-a `mktemp -d` scratch directory private to that one invocation, torn down
-via an EXIT trap - never the repo's shared .local/cache/go and never the
-invoking user's ~/.cache. ($BUCK_SCRATCH_PATH, buck2's own per-build-action
-scratch dir, would give the same exclusivity guarantee for go_binary's
-ctx.actions.run, but go_test/go_lint run their command directly as
+GOCACHE under .local/cache/go) if reused here - but unlike GOPATH/GOMODCACHE
+below, GOCACHE is *safe* to share across concurrent buck2 actions: it is
+itself content-addressed (keyed by action ID, a hash of inputs+toolchain
+version), so two actions writing the same key write the same bytes, and two
+actions writing different keys never collide. Every action below therefore
+points GOCACHE at a stable, shared directory under
+buck-out/go-build-cache/<target-triple> (see _GOCACHE_DIR below) -
+deliberately a sibling of buck-out/v2, not a path inside it. buck2 owns
+buck-out/v2 end-to-end (content-addressed gen/ outputs, its own tmp/
+scratch dirs) and materializes/tracks exactly what it put there; a path
+buck2 never wrote to and never lists as a declared output or hidden input
+is invisible to it, so buck-out/go-build-cache survives untouched across
+buck2's own action-cache bookkeeping while still being a `buck-out` path
+that `buck2 clean` and repo cleanup conventions expect to be safe to
+delete. This is the same doctrine rules/deno.bzl uses for its sqlite
+scratch: the directory is DELIBERATELY outside buck2's input/output
+tracking, which is sound here because GOCACHE only ever affects how fast a
+`go build`/`go test`/`go vet` invocation runs (cache hit vs. miss), never
+what it *produces* - buck2's own declared outputs (the binary, the test
+result, the coverage profile) are unaffected by GOCACHE's contents, so
+buck2 not tracking this directory cannot make a build produce stale or
+incorrect artifacts, only a slower one on a cold cache. GOPATH/GOMODCACHE
+(module downloads/extraction - this repo has no external modules today,
+but the mechanism is generic) and Go's $WORK compile/vet intermediates
+(via TMPDIR) remain per-action `mktemp -d` scratch as before: those are
+small, and unlike GOCACHE are not documented by `go help cache` as safe for
+concurrent multi-process sharing, so they keep the private/EXIT-trap
+lifecycle. ($BUCK_SCRATCH_PATH, buck2's own per-build-action scratch dir,
+would give the same exclusivity guarantee for go_binary's ctx.actions.run,
+but go_test/go_lint run their command directly as
 ExternalRunnerTestInfo/RunInfo outside that action context, where
 $BUCK_SCRATCH_PATH is unset; mktemp -d works identically in both, so it is
-used everywhere for consistency.) Go's own cache therefore never survives
-past one invocation and never collides with a concurrent one. buck2 then
-layers its own action-level cache on top, keyed on the declared inputs (the
-go/ source files passed as hidden cmd_args below); unchanged inputs mean
-buck2 skips re-invoking
+used everywhere for consistency.) buck2 then layers its own action-level
+cache on top, keyed on the declared inputs (the go/ source files passed as
+hidden cmd_args below); unchanged inputs mean buck2 skips re-invoking
 `go build`/`go test`/`gofmt`/`go vet` entirely on a cache hit, and a change
-to any declared input invalidates only the actions that read it.
+to any declared input invalidates only the actions that read it - GOCACHE
+sharing only matters on the remaining case, an actual buck2 cache miss,
+where it turns a cold Go recompile into a warm one.
 
 go.mod lives at the repo root, outside go/'s own package; it is tracked here
 via the root //BUCK's `export_file(name = "go.mod")` (see _TOOLCHAIN_ATTRS'
@@ -70,6 +93,14 @@ def _native_target() -> str:
   fail("unsupported native CPU architecture")
 
 _NATIVE_TARGET = _native_target()
+
+# Persistent, shared GOCACHE - see module docstring's "Determinism / caching
+# note" for why this is sound outside buck2's own input/output tracking.
+# Segmented per _NATIVE_TARGET so a hypothetical future multi-configuration
+# build (see fail_if_cross_arch's cross-arch guard) never has two different
+# target triples' object code landing in the same GOCACHE.
+_GOCACHE_DIR = "buck-out/go-build-cache/" + _NATIVE_TARGET
+
 _GO = TOOLCHAINS["go"][_NATIVE_TARGET]
 _GO_BIN_DIR = _GO["expected"].rsplit("/", 1)[0]  # "go/bin"
 _GOROOT_REL = _GO_BIN_DIR.rsplit("/", 1)[0]  # "go"
@@ -97,11 +128,11 @@ def _merge_dep_srcs(deps):
     srcs += dep[GoInfo].srcs
   return srcs
 
-# Common preamble shared by build/test/lint scripts: point Go's own caches
-# at this action's exclusive scratch dir (see module docstring), pin the
-# same env repo.sh's `go`/go-build/go-test set, and put the pinned go/gofmt
-# on PATH. `tail_lines` is the mode-specific command(s) appended after the
-# preamble.
+# Common preamble shared by build/test/lint scripts: point GOCACHE at the
+# persistent shared cache and GOPATH/GOMODCACHE/TMPDIR at this action's
+# exclusive scratch dir (see module docstring), pin the same env repo.sh's
+# `go`/go-build/go-test set, and put the pinned go/gofmt on PATH.
+# `tail_lines` is the mode-specific command(s) appended after the preamble.
 #
 # tools.goroot is embedded here as literal path TEXT (via cmd_args(...,
 # delimiter = "")), not as a standalone cmd_args element, purely so the
@@ -145,7 +176,11 @@ def _write_go_script(ctx, name, tools, tail_lines):
     "mkdir -p \"$SCRATCH_BASE\"",
     "SCRATCH=$(mktemp -d \"$SCRATCH_BASE/tmp.XXXXXX\")",
     "trap 'rm -rf \"$SCRATCH\"' EXIT",
-    "export GOCACHE=\"$SCRATCH/gocache\"",
+    # GOCACHE is deliberately NOT under $SCRATCH: it is a stable, shared
+    # directory outside buck2's own tracking (buck-out/v2), reused across
+    # every invocation and every concurrent action - see module docstring's
+    # "Determinism / caching note" for why sharing it is safe.
+    "export GOCACHE=\"$(pwd)/" + _GOCACHE_DIR + "\"",
     "export GOPATH=\"$SCRATCH/gopath\"",
     "export GOMODCACHE=\"$SCRATCH/gomodcache\"",
     # `go`'s own $WORK build directory (compile/vet intermediates) is
