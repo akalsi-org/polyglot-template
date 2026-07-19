@@ -5,9 +5,9 @@ cxx_compile ones (rules/python.bzl's py_extension reuses the same
 "cxx_compile" category/action shape as rules/cxx.bzl's cxx_library/cxx_test,
 so the fastbytes compile action is picked up here without any extra
 filtering logic), and re-renders each as a standard {directory, file,
-arguments} compdb entry. Does NOT write to the repo-root
-compile_commands.json: moon (tools/compdb.py) owns that file until the moon
-lane is retired. Invoke with:
+arguments} compdb entry. `./repo.sh compile-commands` invokes this and
+copies the result to the repo-root compile_commands.json (this bxl owns
+that file's content; there is no other generator). Invoke directly with:
 
   buck2 bxl //bxl:compdb.bxl:compdb
 

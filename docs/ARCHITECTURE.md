@@ -48,6 +48,7 @@ target
 lint
 build [dbg|opt]
 test
+coverage
 compile-commands [dbg|opt]
 cpp-build [dbg|opt] | cpp-run [dbg|opt] | cpp-test
 python [args...] | python-build | python-test
@@ -161,7 +162,7 @@ caches, build products, and releases remain ignored.
 ## Deliberately Unimplemented
 
 This checkout does not currently provide toolchain-update commands, schema
-generation, benchmark/coverage commands, third-party dependency adapters,
+generation, benchmark commands, third-party dependency adapters,
 fleet management, deployment, certificate automation, Zstandard packaging, or
 attestation generation. Documents describing those capabilities retain their
 proposal or research status and must not be treated as executable contracts.

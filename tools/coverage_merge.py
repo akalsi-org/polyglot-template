@@ -167,8 +167,13 @@ def _merge_lcov_file(path, counts, rewrite_proj_prefix):
       if line.startswith("SF:"):
         current_file = line[len("SF:"):]
         if rewrite_proj_prefix:
+          # FIRST match, not rfind: the staged layout is
+          # <mktemp-dir>/proj/<repo-relative-path>, and mktemp's dir name
+          # never contains "/proj/" - but the repo-relative tail could
+          # (a source dir literally named proj/), and slicing at the LAST
+          # marker would then attribute coverage to a nonexistent file.
           marker = "/proj/"
-          idx = current_file.rfind(marker)
+          idx = current_file.find(marker)
           if idx != -1:
             current_file = current_file[idx + len(marker):]
       elif line.startswith("DA:") and current_file:
@@ -179,9 +184,17 @@ def _merge_lcov_file(path, counts, rewrite_proj_prefix):
 
 
 def _process_deno(entry, counts):
+  # Fail CLOSED on a missing lcov.info: the deno lane relies on `deno test
+  # --coverage=<dir>` auto-writing it (see rules/deno.bzl); if a future
+  # deno bump stops doing that, silently skipping here would zero out the
+  # whole lane's coverage with every report still "green".
   lcov_path = os.path.join(entry["primary"], "lcov.info")
-  if os.path.exists(lcov_path):
-    _merge_lcov_file(lcov_path, counts, rewrite_proj_prefix = True)
+  if not os.path.exists(lcov_path):
+    raise SystemExit(
+      f"coverage merge: {entry['name']}: expected {lcov_path} to exist - "
+      "deno stopped emitting lcov.info; update the deno coverage collection"
+    )
+  _merge_lcov_file(lcov_path, counts, rewrite_proj_prefix = True)
 
 
 def _process_python_lcov(entry, counts):

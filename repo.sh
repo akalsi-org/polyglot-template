@@ -169,10 +169,13 @@ case "$command" in
     # every deno_library/deno_app in the graph must be inside its dep
     # closure, or `deno run --cached-only` in that component fails later
     # with a far-away resolution error instead of a red lint.
+    _deno_err=$(mktemp)
     mapfile -t _deno_all < <("$POLYGLOT_BUCK2" uquery \
-      "kind('^_deno_(library|app)_rule$', '//...')" 2>/dev/null | grep '^root//' | sort)
+      "kind('^_deno_(library|app)_rule$', '//...')" 2>"$_deno_err" | grep '^root//' | sort)
+    ((${#_deno_all[@]} > 0)) || { cat "$_deno_err" >&2; rm -f "$_deno_err"; printf 'error: deno-cache-coverage query found no deno components (query failure?)\n' >&2; exit 1; }
     mapfile -t _deno_covered < <("$POLYGLOT_BUCK2" uquery \
-      "kind('^_deno_(library|app)_rule$', deps('//:deno-cache'))" 2>/dev/null | grep '^root//' | sort)
+      "kind('^_deno_(library|app)_rule$', deps('//:deno-cache'))" 2>"$_deno_err" | grep '^root//' | sort)
+    rm -f "$_deno_err"
     _deno_missing=$(comm -23 <(printf '%s\n' "${_deno_all[@]}") <(printf '%s\n' "${_deno_covered[@]}"))
     if [[ -n $_deno_missing ]]; then
       printf 'error: deno components not covered by //:deno-cache deps (add them so `deno run --cached-only` can resolve their imports):\n%s\n' "$_deno_missing" >&2
@@ -189,9 +192,15 @@ case "$command" in
     # No hand-listed //:build group: the graph is the list. Discover every
     # lane's primary build output by rule kind, so a new app/site target
     # participates by existing (see the root BUCK file's header comment).
+    # buck2's stderr goes to a file, surfaced only on failure: uquery's
+    # progress noise would otherwise pollute every build, but swallowing
+    # it outright turns a real Starlark/daemon error into an unexplained
+    # "no buildable targets discovered".
+    uquery_err=$(mktemp)
     mapfile -t buildables < <("$POLYGLOT_BUCK2" uquery \
-      "kind('^_(cxx_binary|go_binary|py_binary|deno_check|vite_build)_rule$', '//...')" 2>/dev/null | grep '^root//')
-    ((${#buildables[@]} > 0)) || { printf 'error: no buildable targets discovered\n' >&2; exit 1; }
+      "kind('^_(cxx_binary|go_binary|py_binary|deno_check|vite_build)_rule$', '//...')" 2>"$uquery_err" | grep '^root//')
+    ((${#buildables[@]} > 0)) || { cat "$uquery_err" >&2; rm -f "$uquery_err"; printf 'error: no buildable targets discovered\n' >&2; exit 1; }
+    rm -f "$uquery_err"
     "$POLYGLOT_BUCK2" build "${plat[@]}" "${buildables[@]}"
     ;;
   coverage)
@@ -209,7 +218,12 @@ case "$command" in
     [[ $profile == dbg || $profile == opt ]] || { printf 'error: profile must be dbg or opt\n' >&2; exit 2; }
     setup_environment
     mapfile -t plat < <(target_platform_args "$profile")
-    out=$("$POLYGLOT_BUCK2" bxl "${plat[@]}" //bxl:compdb.bxl:compdb 2>/dev/null)
+    bxl_err=$(mktemp)
+    if ! out=$("$POLYGLOT_BUCK2" bxl "${plat[@]}" //bxl:compdb.bxl:compdb 2>"$bxl_err"); then
+      cat "$bxl_err" >&2; rm -f "$bxl_err"
+      printf 'error: compdb bxl failed\n' >&2; exit 1
+    fi
+    rm -f "$bxl_err"
     tmp="$ROOT/.compile_commands.json.tmp.$$"
     cp -- "$out" "$tmp"
     mv -- "$tmp" "$ROOT/compile_commands.json"

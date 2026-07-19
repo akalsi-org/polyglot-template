@@ -1,6 +1,8 @@
-# Buck2 mirror of package.toml's polyglot-demo application package (moon
-# owns tools/package_release.py / `./repo.sh package polyglot-demo`; see
-# rules/package.bzl for the full mirroring rationale). dbg is the default
+# In-graph assembly of package.toml's polyglot-demo application package
+# (`./repo.sh package polyglot-demo` builds the //packages target below;
+# tools/package_release.py remains only the fallback for manifest-only
+# packages with no buck2 target - see repo.sh's package dispatch comment).
+# dbg is the default
 # profile, like every other already-ported lane's macros; override with
 # `-m //config:opt` to match repo.sh's own `[dbg|opt]` opt-in.
 #

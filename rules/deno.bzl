@@ -42,9 +42,12 @@ writes an lcov + html report at the end unless
 this action's own ephemeral `$WORK/proj` staging directory (torn down by
 this same script's EXIT trap, same as every other _stage_and_run consumer)
 - tools/coverage_merge.py fixes this up by slicing each SF: path at its
-last "/proj/" segment, which is safe because `_stage_and_run` always names
-the staging directory exactly "proj" and stages sources at their real
-repo-relative paths (e.g. "ts/lib/greeting/greeting.ts") underneath it.
+FIRST "/proj/" segment: `_stage_and_run` always names the staging
+directory exactly "proj" (under an mktemp dir whose own name never
+contains "/proj/") and stages sources at their real repo-relative paths
+(e.g. "ts/lib/greeting/greeting.ts") underneath it - first-match is what
+keeps a future repo source directory literally named "proj/" from being
+sliced at the wrong segment.
 """
 
 load("//config:flags.bzl", "coverage_enabled_flag")

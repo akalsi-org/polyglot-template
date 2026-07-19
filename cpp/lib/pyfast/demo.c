@@ -140,7 +140,18 @@ VFUNC_KW(vcall_repeat) {
   VEXPECT(1);
   if (!(src = VBYTES(0, &len))) return NULL;
   if (!VKWOPT_INT("times", &times, 1)) return NULL;
-  PyObject *out = VNEW_BYTES(NULL, len * times);
+  /* len * times must be validated BEFORE the allocation: a huge `times`
+   * wraps the signed product into a small positive size, and the copy
+   * loop below would then write `times` copies past the tiny buffer. */
+  if (times < 0) {
+    PyErr_SetString(PyExc_ValueError, "times must be non-negative");
+    return NULL;
+  }
+  if (len > 0 && (unsigned long)times > (unsigned long)(PY_SSIZE_T_MAX / len)) {
+    PyErr_SetString(PyExc_OverflowError, "repeat: result too large");
+    return NULL;
+  }
+  PyObject *out = VNEW_BYTES(NULL, len * (Py_ssize_t)times);
   if (!out) return NULL;
   char *dst = PyBytes_AS_STRING(out);
   for (long t = 0; t < times; t++)

@@ -133,3 +133,15 @@ try:
 except TypeError as e:
   assert "keyword" in str(e), str(e)
 print("[OK] instance call rejects keywords:", "TypeError")
+
+# repeat() overflow/negative guards (Terra whole-repo review finding)
+try:
+  m.repeat(b"abc", times=6148914691236517206)
+  raise SystemExit("FAIL: huge times did not raise")
+except OverflowError:
+  print("[OK] repeat huge times -> OverflowError")
+try:
+  m.repeat(b"abc", times=-1)
+  raise SystemExit("FAIL: negative times did not raise")
+except ValueError:
+  print("[OK] repeat negative times -> ValueError")
