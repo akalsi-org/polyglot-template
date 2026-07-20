@@ -18,37 +18,45 @@ delivery risk, and dependency.
 
 ## Phase 0 — Correctness and user feedback
 
-These independent items run in parallel and must complete before calling the
-current repository slice release-ready.
+Status: partly complete. The profile contract is complete; the remaining editor
+and pyfast work continues independently before calling the repository slice
+fully release-ready.
 
 | Item | Outcome | Evidence |
 | --- | --- | --- |
 | Keyword-only pyfast APIs | `xor_kwb`, `xor_kwb_buf`, and `greet` reject positional arguments with `TypeError`, not silent argument loss. | Targeted native-extension tests. |
 | Native Python editor path | The editor sees only the current host's staged extension root, after a build, and explains missing state. | Editor/environment smoke. |
 | Deno editor cache | The language server uses the frozen repository cache and resolves locked npm types. | Pinned `deno check` plus editor contract. |
-| Profile contract | All docs, wrappers, and package builds use `--target-platforms` for `opt`. | Opt artifact/configuration test. |
+| Profile contract | Complete: docs, wrappers, and package builds use `--target-platforms` for `opt`. | Opt artifact/configuration test. |
 
 ## Phase 1 — Package and release truth
 
-These items share the package contract but can be developed in parallel once
-that contract is written down.
+Status: the canonical catalog, in-graph target gate, target-native package and
+smoke path, idempotent publication, checksums, and GitHub artifact attestations
+are complete. SBOM publication and a broader release-provenance policy remain.
 
-1. Define one `PackageSpec` lifecycle: declaration, build inputs, runtime
-   closure, archive, smoke, provenance, and release.
-2. Migrate every shippable application to an in-graph `package()` target. Until
-   migration is complete, reject a manifest-only application before CI accepts
-   its release tag; never fall through to an assembler missing its build dir.
-3. Add an exact-command package matrix: each manifest application × supported
-   target runs the same package and smoke commands used by release CI.
-4. Make immutable tag publication idempotent: no auto-cancel, reconcile an
-   existing release, and upload only verified missing assets.
-5. Bind checksums, SBOM, and provenance to the tag commit and archive digest.
+1. Complete: `packages/catalog.bzl` defines the package lifecycle inputs,
+   runtime closure, archive identity, smoke contract, and release tag.
+2. Complete as a release safety gate: tagged CI requires an in-graph
+   `package()` target and rejects catalog-only applications; there is no raw
+   build-directory fallback. Migrating a catalog-only declaration is separate
+   application work.
+3. Complete for releasable packages: the tag workflow runs package and smoke
+   commands on each supported native target.
+4. Complete: immutable tag publication does not auto-cancel, reconciles an
+   existing release, and uploads only verified missing assets.
+5. Partial: checksums and GitHub artifact attestations bind each target archive
+   to the workflow; SBOM publication and a separate release-provenance policy
+   are still required.
 
 ## Phase 2 — Developer and agent workflow
 
-These can proceed independently after Phase 0's editor path contract settles.
+Status: the bootstrap-first README Quick Start and capability matrix are
+complete. The remaining editor diagnostics and generated command reference can
+proceed independently after Phase 0's editor-path contract settles.
 
-1. Put a bootstrap-first Quick Start and current-capability matrix in README.
+1. Complete: README has a bootstrap-first Quick Start and points to the current
+   capability matrix, including Linux host scope and raw Go/Deno network bounds.
 2. Add VS Code tasks and launch configurations for bootstrap, doctor, each lane
    build/test, compdb refresh, and Python extension staging.
 3. Provide `editor-sync` and `doctor --editor` with actionable diagnostics for

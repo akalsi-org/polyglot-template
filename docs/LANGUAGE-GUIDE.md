@@ -64,8 +64,12 @@ with the repository's readable stdlib-only runner.
 | Run Deno | `./repo.sh deno <args...>` |
 
 Keep TypeScript strict and use Deno's configured formatter and linter through
-`./repo.sh lint`. Normal lane commands use the frozen dependency graph; do not
-introduce an ad hoc npm or Node workflow.
+`./repo.sh lint`. Normal Buck-backed lane commands use the frozen dependency
+graph and do not fetch after bootstrap; do not introduce an ad hoc npm or Node
+workflow. `./repo.sh deno <args...>` is a raw Deno passthrough, not an offline
+sandbox: a caller can supply a network-capable Deno subcommand or flags. Use the
+named `ts-*` and `tsweb-*` commands when the offline-after-bootstrap guarantee
+matters.
 
 ## Browser TypeScript
 
@@ -94,8 +98,10 @@ component behavior, while `tsweb-test` also checks emitted asset integrity.
 The wrapper pins Go, isolates all Go caches under `.local/`, sets
 `GOTOOLCHAIN=local`, and enforces `CGO_ENABLED=0`. Do not use the system `go`
 command or add CGO dependencies without revisiting the native toolchain
-contract. Keep Go formatting canonical with `gofmt`; `./repo.sh lint` runs it
-and `go vet` through the pinned setup.
+contract. `./repo.sh go <args...>` intentionally passes its arguments to Go, so
+commands such as module download or installation can use the network; it is not
+part of the offline guarantee. Keep Go formatting canonical with `gofmt`;
+`./repo.sh lint` runs it and `go vet` through the pinned setup.
 
 ## Cross-Lane Work
 
@@ -105,8 +111,10 @@ which build and test every lane's targets in one graph. Use `./repo.sh ci`
 before a release-oriented handoff; it adds package validation to lint, build,
 and test.
 
-Bootstrap is the only operation permitted to fetch dependencies:
-`./repo.sh bootstrap`. For an already provisioned checkout, use
-`./repo.sh bootstrap --offline` to prove that normal work does not require
-network access. `./repo.sh doctor --deep` validates the installed toolchain and
-target closure when environment problems are suspected.
+`./repo.sh bootstrap` is the repository operation that installs toolchain
+artifacts and seeds the locked Deno dependency cache. For an already provisioned
+checkout, use `./repo.sh bootstrap --offline` to prove that normal Buck-backed
+work does not require network access. The raw `go` and `deno` passthroughs remain
+caller-controlled and may use the network; they do not weaken the named lane
+commands' contract. `./repo.sh doctor --deep` validates the installed toolchain
+and target closure when environment problems are suspected.

@@ -6,7 +6,7 @@ This repository is a pinned, offline-after-bootstrap polyglot workspace. Use `./
 
 - The current CPU architecture selects the build architecture. Native artifacts use the pinned GCC+musl ABI and never cross CPU architectures.
 - `tools.lock.toml` owns tool provenance. Missing or placeholder digests fail closed.
-- `package.toml` and `runtime-resolution.lock.toml` own package declarations and exact runtime closure resolution.
+- `packages/catalog.bzl` is the sole source of package declarations and exact runtime closure resolution.
 - Buck2 is the sole scheduler; there is no separate task runner. `BUCK` files plus `config/flags.bzl` own C++ targets and profile (`dbg`/`opt`) flags — `cpp/cpp.toml` no longer exists. Every first-party rule lives under `rules/` (no prelude in this repo). `compile_commands.json` is materialized by `./repo.sh compile-commands` from a BXL compdb query (`bxl/compdb.bxl`) over the buck2 action graph, not hand-generated.
 - Each language owns `lib/<name>/`, `app/<name>/`, and `test/`; its `lib/` directory is an import/include root.
 - `.vscode/settings.json` mirrors repository discovery: clangd uses the root compdb, Deno owns `ts/` and `tsweb/`, and Python analysis includes `python/lib` plus `python/app`.
@@ -21,15 +21,18 @@ Run `./repo.sh help` for the canonical command list. Start with:
 ```bash
 ./repo.sh target
 ./repo.sh bootstrap --dry-run
-./repo.sh doctor
+./repo.sh bootstrap
+./repo.sh doctor --deep
 ./repo.sh test
 ```
+
+This checkout supports Linux x86-64 and Linux ARM64 hosts only, producing the corresponding CPU-native musl target. Bootstrap must complete before normal development commands; afterward the named Buck-backed commands are offline. The raw `./repo.sh go <args...>` and `./repo.sh deno <args...>` passthroughs deliberately preserve the underlying tool's behavior, so caller-supplied commands may use the network. Use `go-*`, `ts-*`, and `tsweb-*` for the repository's offline-after-bootstrap contract.
 
 Lane commands are thin wrappers over Buck2: `build [dbg|opt]` builds every lane's primary outputs discovered by rule kind (no hand-listed //:build group), `coverage` merges dbg coverage via bxl/coverage.bxl's same rule-kind discovery, `test` runs `buck2 test //...`, `lint` runs `buck2 test //... --labels lint` plus shell/Python infra checks (`infra-lint`). `cpp-build`/`cpp-run`/`cpp-test`, `python-build`/`python-test`, `ts-build`/`ts-test`, `tsweb-build`/`tsweb-test`, and `go-build`/`go-test` each drive their lane's Buck2 targets and only ever use the pinned toolchain, never host compilers or runtimes. `./repo.sh buck2 [args...]` runs the pinned Buck2 binary directly for anything not covered by a named lane command. CI performs real cached bootstrap, deep doctor, language-lane verification, and a cold-buck-out full-graph offline replay inside a no-network namespace, on x64 and ARM64.
 
 ## TL;DR: Effective Daily Workflow And Style
 
-1. Start with `./repo.sh bootstrap --dry-run`, then `./repo.sh doctor`; bootstrap is the only command allowed to fetch.
+1. Start with `./repo.sh bootstrap --dry-run`, then `./repo.sh bootstrap` and `./repo.sh doctor --deep`. Bootstrap installs the pinned closure; named Buck-backed commands do not fetch afterward. Do not treat raw `go` or `deno` passthrough commands as a network restriction.
 2. Use `./repo.sh format` to apply formatting and `./repo.sh format --check` before handoff. `./repo.sh lint` includes the non-mutating format check.
 3. Use the lane test while iterating (`cpp-test`, `python-test`, `ts-test`, `tsweb-test`, or `go-test`), then `./repo.sh test` for a cross-lane change. Run `./repo.sh coverage` when changing executed behavior.
 4. Use `./repo.sh build [dbg|opt]` rather than hand-maintaining aggregate build lists; it discovers primary rule kinds automatically. For an ad hoc graph question, use `./repo.sh buck2 ...`.
@@ -51,11 +54,11 @@ After adding a target, run its lane command, `./repo.sh lint`, and `./repo.sh te
 
 ## Packaging
 
-`package.toml` declares package identity/version/executables/runtime; `package()` targets in `packages/BUCK` (`rules/package.bzl`) assemble packages with their own Buck2 target (currently `polyglot-demo`, `polyglot-server`) entirely in-graph from a generic `PackageInfo` contract each lane's rules emit, staging a flattened sibling layout (`bin/`, `lib/`, `runtime/`, plus per-lane roots like `python/`, `ts/`, `web/`) at the package root. `./repo.sh package <name> [dbg|opt]` dispatches generically: it detects a `//packages:<name>` Buck2 target via `buck2 targets` and builds it in-graph, or falls through to `tools/package_release.py` for manifest-only packages (`gateway`, `schema-cli`) with no Buck2 target. Each in-graph package's `package_smoke` target (`checks` + optional `smoke_script`) verifies the assembled archive.
+`packages/catalog.bzl` declares package identity/version/executables/runtime and resolved runtime closure. `package()` targets in `packages/BUCK` (`rules/package.bzl`) assemble packages with their own Buck2 target (currently `polyglot-demo`, `polyglot-server`) entirely in-graph from a generic `PackageInfo` contract each lane's rules emit, staging a flattened sibling layout (`bin/`, `lib/`, `runtime/`, plus per-lane roots like `python/`, `ts/`, `web/`) at the package root. `./repo.sh package <name> [dbg|opt]` requires a matching `//packages:<name>` Buck2 target and fails closed for catalog-only declarations (`gateway`, `schema-cli`); it has no raw-build assembly fallback. Each in-graph package's `package_smoke` target (`checks` + optional `smoke_script`) verifies the assembled archive. The current Deno application package support is limited to zero-npm-dependency closures.
 
 ### Adding An In-Graph Package
 
-1. Add or update the package record in `package.toml`: name, semantic version, kind, executable names, supported native targets, and runtime requirement when needed. Keep `runtime-resolution.lock.toml` consistent with that declaration; both are validated inputs, not generated build output.
+1. Add or update the literal record in `packages/catalog.bzl`: name, semantic version, kind, executable names, supported native targets, runtime requirement when needed, and every required runtime-resolution entry. The catalog is a validated source input, not generated build output.
 2. Add `package(name = "<name>", version = "<same version>", deps = [...])` to `packages/BUCK`. Depend on the app/binary/site targets that should stage themselves through their transitive `PackageInfo`; never duplicate file lists in the package rule.
 3. Add `package_smoke(name = "<name>-smoke", package = ":<name>", commands = {...})`. Prefer structured `commands` (`"bin/program": ["arg"]`) over legacy raw-shell `checks`. Add `smoke_script` only for packaged web asset validation.
 4. A Deno app package currently supports only a zero-npm-dependency closure. Package Python applications through `py_binary` so the package rule can stage the matching runtime and launchers.

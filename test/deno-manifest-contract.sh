@@ -14,12 +14,14 @@ root = Path(sys.argv[1])
 entries = json.loads(Path(sys.argv[2]).read_text())
 assert isinstance(entries, list) and entries, "Deno manifest is empty"
 assert entries == sorted(set(entries)), "Deno manifest is not stable and deduplicated"
-expected = sorted(
+source_entries = [
     path.relative_to(root).as_posix()
     for lane in (root / "ts", root / "tsweb")
     for path in lane.rglob("*")
     if path.suffix in {".ts", ".tsx"}
-)
-assert entries == expected, ("manifest/source mismatch", sorted(set(expected) ^ set(entries)))
+]
+deno_config = json.loads((root / "deno.json").read_text())
+expected = sorted(source_entries + [deno_config["imports"]["pyright"]])
+assert entries == expected, ("manifest/source-or-tool mismatch", sorted(set(expected) ^ set(entries)))
 print(f"Deno graph manifest: ok ({len(entries)} entries)")
 PY

@@ -30,20 +30,20 @@ PyObject* xor_bytes(PyObject*, PyObject* args) {
 }
 
 PyMethodDef methods[] = {
-    {"xor_bytes", xor_bytes, METH_VARARGS, "XOR every byte with an 8-bit key."},
-    {nullptr, nullptr, 0, nullptr},
+  {"xor_bytes", xor_bytes, METH_VARARGS, "XOR every byte with an 8-bit key."},
+  {nullptr, nullptr, 0, nullptr},
 };
 
 PyModuleDef module = {
-    PyModuleDef_HEAD_INIT,
-    "_native",
-    "Pinned-musl byte helpers.",
-    -1,
-    methods,
-    nullptr,
-    nullptr,
-    nullptr,
-    nullptr,
+  PyModuleDef_HEAD_INIT,
+  "_native",
+  "Pinned-musl byte helpers.",
+  -1,
+  methods,
+  nullptr,
+  nullptr,
+  nullptr,
+  nullptr,
 };
 
 }  // namespace

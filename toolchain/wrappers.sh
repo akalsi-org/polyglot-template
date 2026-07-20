@@ -37,9 +37,22 @@ exec \"\$ROOT/$loader_rel\" --library-path \"\$ROOT/$loader_dir_rel:\$ROOT/$pyth
 "
 }
 
+write_clang_format_tool_wrapper() {
+  local local_dir=$1 output=$2 clang_format=$3 loader=$4 clang_rel loader_rel loader_dir_rel clang_lib_rel
+  clang_rel=$(wrapper_relative_path "$local_dir" "$clang_format")
+  loader_rel=$(wrapper_relative_path "$local_dir" "$loader")
+  loader_dir_rel=$(wrapper_relative_path "$local_dir" "$(dirname -- "$loader")")
+  clang_lib_rel=$(wrapper_relative_path "$local_dir" "$(dirname -- "$(dirname -- "$(dirname -- "$clang_format")")")/../clang_format.libs")
+  install_tool_wrapper "$output" "#!/bin/sh
+set -eu
+ROOT=\$(CDPATH= cd -- \"\$(dirname -- \"\$0\")/..\" && pwd -P)
+exec \"\$ROOT/$loader_rel\" --library-path \"\$ROOT/$loader_dir_rel:\$ROOT/$clang_lib_rel\" \"\$ROOT/$clang_rel\" \"\$@\"
+"
+}
+
 write_repo_tool_wrappers() {
-  local local_dir=$1 cc=$2 cxx=$3 python=$4 loader=$5 deno=$6 go=$7 buck2=$8
-  local gcc_install=$9 target=${10} env_bin binutil binutil_rel
+  local local_dir=$1 cc=$2 cxx=$3 python=$4 loader=$5 deno=$6 go=$7 buck2=$8 clang_format=$9
+  local gcc_install=${10} target=${11} env_bin binutil binutil_rel
   env_bin="$local_dir/bin"
   mkdir -p "$env_bin"
   write_python_tool_wrapper "$local_dir" "$env_bin/python" "$python" "$loader"
@@ -49,6 +62,7 @@ write_repo_tool_wrappers() {
   write_direct_tool_wrapper "$local_dir" "$env_bin/go" "$go"
   write_direct_tool_wrapper "$local_dir" "$env_bin/deno" "$deno"
   write_direct_tool_wrapper "$local_dir" "$env_bin/buck2" "$buck2"
+  write_clang_format_tool_wrapper "$local_dir" "$env_bin/clang-format" "$clang_format" "$loader"
   for binutil in ar ranlib nm strip objcopy ld; do
     binutil_rel=$(lock_value gcc-musl "$target" "$binutil")
     write_direct_tool_wrapper "$local_dir" "$env_bin/$binutil" "$gcc_install/$binutil_rel"

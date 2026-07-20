@@ -26,8 +26,7 @@ VFUNC_KW(xor_bytes) {
   PyObject *out = VNEW_BYTES(NULL, len);
   if (!out) return NULL;
   unsigned char *dst = (unsigned char *)PyBytes_AS_STRING(out);
-  for (Py_ssize_t i = 0; i < len; i++)
-    dst[i] = (unsigned char)(src[i] ^ (unsigned char)key);
+  for (Py_ssize_t i = 0; i < len; i++) dst[i] = (unsigned char)(src[i] ^ (unsigned char)key);
   return out;
 }
 
@@ -45,8 +44,7 @@ VFUNC_KW(xor_kwb) {
   PyObject *out = VNEW_BYTES(NULL, len);
   if (!out) return NULL;
   unsigned char *dst = (unsigned char *)PyBytes_AS_STRING(out);
-  for (Py_ssize_t i = 0; i < len; i++)
-    dst[i] = (unsigned char)(src[i] ^ (unsigned char)key);
+  for (Py_ssize_t i = 0; i < len; i++) dst[i] = (unsigned char)(src[i] ^ (unsigned char)key);
   return out;
 }
 
@@ -64,8 +62,7 @@ VFUNC_KW(xor_kwb_buf) {
   if (!out) return NULL;
   unsigned char *dst = (unsigned char *)PyBytes_AS_STRING(out);
   const unsigned char *src = (const unsigned char *)buf.buf;
-  for (Py_ssize_t i = 0; i < buf.len; i++)
-    dst[i] = (unsigned char)(src[i] ^ (unsigned char)key);
+  for (Py_ssize_t i = 0; i < buf.len; i++) dst[i] = (unsigned char)(src[i] ^ (unsigned char)key);
   return out;
 }
 
@@ -77,8 +74,8 @@ VFUNC_KW(greet) {
   if (!(name = VKWSTR("name", &name_len))) return NULL;
   if (!VKWOPT_BOOL("excited", &excited, 0)) return NULL;
   char buf[256];
-  int written = snprintf(buf, sizeof buf, "Hello, %.*s%s",
-                         (int)name_len, name, excited ? "!!" : ".");
+  int written =
+    snprintf(buf, sizeof buf, "Hello, %.*s%s", (int)name_len, name, excited ? "!!" : ".");
   if (written < 0 || (size_t)written >= sizeof buf) {
     PyErr_SetString(PyExc_OverflowError, "name is too long");
     return NULL;
@@ -124,8 +121,7 @@ VFUNC_KW(xor_buffer) {
   if (!out) return NULL;
   unsigned char *dst = (unsigned char *)PyBytes_AS_STRING(out);
   const unsigned char *src = (const unsigned char *)buf.buf;
-  for (Py_ssize_t i = 0; i < buf.len; i++)
-    dst[i] = (unsigned char)(src[i] ^ (unsigned char)key);
+  for (Py_ssize_t i = 0; i < buf.len; i++) dst[i] = (unsigned char)(src[i] ^ (unsigned char)key);
   return out;
 }
 
@@ -140,16 +136,14 @@ VFUNC_KW(repeat) {
     PyErr_SetString(PyExc_ValueError, "times must be non-negative");
     return NULL;
   }
-  if (len > 0 && (unsigned long)times >
-                    (unsigned long)(PY_SSIZE_T_MAX / len)) {
+  if (len > 0 && (unsigned long)times > (unsigned long)(PY_SSIZE_T_MAX / len)) {
     PyErr_SetString(PyExc_OverflowError, "repeat: result too large");
     return NULL;
   }
   PyObject *out = VNEW_BYTES(NULL, len * (Py_ssize_t)times);
   if (!out) return NULL;
   char *dst = PyBytes_AS_STRING(out);
-  for (long i = 0; i < times; i++)
-    memcpy(dst + (Py_ssize_t)i * len, src, (size_t)len);
+  for (long i = 0; i < times; i++) memcpy(dst + (Py_ssize_t)i * len, src, (size_t)len);
   return out;
 }
 
@@ -167,8 +161,8 @@ VFUNC(range_values) {
 }
 
 VTYPE_HEAD(Point)
-  double x;
-  double y;
+double x;
+double y;
 VTYPE_END(Point);
 
 static PyTypeObject Point_type;
@@ -200,9 +194,7 @@ static PyObject *Point_new(PyTypeObject *type, PyObject *args, PyObject *kwds) {
   return (PyObject *)self;
 }
 
-static void Point_dealloc(PyObject *self) {
-  Py_TYPE(self)->tp_free(self);
-}
+static void Point_dealloc(PyObject *self) { Py_TYPE(self)->tp_free(self); }
 
 static PyObject *Point_dist(VMETHOD_SIG) {
   VSELF(Point);
@@ -223,8 +215,7 @@ static PyObject *Point_move(VMETHOD_KW_SIG) {
   VSELF(Point);
   double dx;
   double dy;
-  VALL(VKWOPT_DOUBLE("dx", &dx, 0.0) &&
-       VKWOPT_DOUBLE("dy", &dy, 0.0));
+  VALL(VKWOPT_DOUBLE("dx", &dx, 0.0) && VKWOPT_DOUBLE("dy", &dy, 0.0));
   self->x += dx;
   self->y += dy;
   VRETURN_NONE;
@@ -251,17 +242,10 @@ static PyMethodDef Point_methods[] = {
   {NULL, NULL, 0, NULL},
 };
 
-VTOBJ_DEF(Point,
-  .tp_name = "pyfast_test_ext.Point",
-  .tp_flags = VTYPE_FLAGS,
-  .tp_methods = Point_methods,
-  .tp_new = Point_new,
-  .tp_dealloc = Point_dealloc,
-  .tp_call = PyVectorcall_Call,
-  .tp_repr = Point_tp_repr,
-  .tp_str = Point_tp_str,
-  .tp_doc = "Point(x, y), with callable translated copies.",
-);
+VTOBJ_DEF(Point, .tp_name = "pyfast_test_ext.Point", .tp_flags = VTYPE_FLAGS,
+          .tp_methods = Point_methods, .tp_new = Point_new, .tp_dealloc = Point_dealloc,
+          .tp_call = PyVectorcall_Call, .tp_repr = Point_tp_repr, .tp_str = Point_tp_str,
+          .tp_doc = "Point(x, y), with callable translated copies.", );
 
 static PyObject *module_init(PyObject *module) {
   VTYPE_READY(Point, module);
@@ -269,7 +253,7 @@ static PyObject *module_init(PyObject *module) {
 }
 
 VMOD_BEGIN(_native)
-  VMOD_FUNC("add", add, "add(left, right) -> int"),
+VMOD_FUNC("add", add, "add(left, right) -> int"),
   VMOD_FUNC_KW("xor_bytes", xor_bytes, "xor_bytes(data, *, key) -> bytes"),
   VMOD_FUNC_KW("xor_kwb", xor_kwb, "xor_kwb(*, data, key) -> bytes"),
   VMOD_FUNC_KW("xor_kwb_buf", xor_kwb_buf, "xor_kwb_buf(*, data, key) -> bytes"),
@@ -278,4 +262,4 @@ VMOD_BEGIN(_native)
   VMOD_FUNC_KW("xor_buffer", xor_buffer, "xor_buffer(data, *, key) -> bytes"),
   VMOD_FUNC_KW("repeat", repeat, "repeat(data, *, times=1) -> bytes"),
   VMOD_FUNC("range", range_values, "range(stop) -> list"),
-VMOD_END(_native, "Small pyfast test extension.", module_init)
+  VMOD_END(_native, "Small pyfast test extension.", module_init)

@@ -56,12 +56,9 @@
  * via Py_TYPE().
  */
 
-static inline void
-_vtype_err(const char *ctx, const char *expected, PyObject *obj)
-{
+static inline void _vtype_err(const char *ctx, const char *expected, PyObject *obj) {
   const char *got = obj ? Py_TYPE(obj)->tp_name : "NULL";
-  PyErr_Format(PyExc_TypeError, "%s: expected %s, got %s",
-               ctx, expected, got);
+  PyErr_Format(PyExc_TypeError, "%s: expected %s, got %s", ctx, expected, got);
 }
 
 /* ── Module Functions ──────────────────────────────────────────────
@@ -81,13 +78,11 @@ _vtype_err(const char *ctx, const char *expected, PyObject *obj)
  * marked maybe-unused so -Wextra doesn't force every VFUNC body to
  * `(void)_s;` for a parameter it structurally can't omit. */
 #define VFUNC(name) \
-  static PyObject *name(PyObject *_s __attribute__((unused)), \
-                        PyObject *const *_a, Py_ssize_t _n)
+  static PyObject *name(PyObject *_s __attribute__((unused)), PyObject *const *_a, Py_ssize_t _n)
 
-#define VFUNC_KW(name) \
-  static PyObject *name(PyObject *_s __attribute__((unused)), \
-                        PyObject *const *_a, \
-                        Py_ssize_t _n, PyObject *_k)
+#define VFUNC_KW(name)                                                                            \
+  static PyObject *name(PyObject *_s __attribute__((unused)), PyObject *const *_a, Py_ssize_t _n, \
+                        PyObject *_k)
 
 /* ── Bounds-Checked Argument Access ──────────────────────────────────
  *
@@ -108,74 +103,66 @@ _vtype_err(const char *ctx, const char *expected, PyObject *obj)
  * via -S; see REPORT.md). Without a preceding VEXPECT, the check is a
  * single predicted-not-taken branch per access.
  */
-static inline PyObject *
-_va_checked(PyObject *const *a, Py_ssize_t n, Py_ssize_t i, const char *func)
-{
+static inline PyObject *_va_checked(PyObject *const *a, Py_ssize_t n, Py_ssize_t i,
+                                    const char *func) {
   if (i < 0 || i >= n) {
     PyErr_Format(PyExc_TypeError,
-                 "%s: missing required positional argument (index %zd, only %zd given)",
-                 func, i, n);
+                 "%s: missing required positional argument (index %zd, only %zd given)", func, i,
+                 n);
     return NULL;
   }
   return a[i];
 }
 
-#define VA(i)  _va_checked(_a, _n, (i), __func__)
-#define VN     _n
-#define VK     _k
+#define VA(i) _va_checked(_a, _n, (i), __func__)
+#define VN _n
+#define VK _k
 
 /* ── Return Helpers ──────────────────────────────────────────────── */
 
-#define VRETURN_NONE        Py_RETURN_NONE
-#define VRETURN_BOOL(v)     return PyBool_FromLong(v)
-#define VRETURN_LONG(v)     return PyLong_FromLong(v)
+#define VRETURN_NONE Py_RETURN_NONE
+#define VRETURN_BOOL(v) return PyBool_FromLong(v)
+#define VRETURN_LONG(v) return PyLong_FromLong(v)
 #define VRETURN_UNSIGNED(v) return PyLong_FromUnsignedLong(v)
-#define VRETURN_DOUBLE(v)   return PyFloat_FromDouble(v)
-#define VRETURN_STR(s)      return PyUnicode_FromString(s)
-#define VRETURN(obj)        return (obj)
+#define VRETURN_DOUBLE(v) return PyFloat_FromDouble(v)
+#define VRETURN_STR(s) return PyUnicode_FromString(s)
+#define VRETURN(obj) return (obj)
 
 /* ── Keyword Lookup (zero-alloc, O(n) linear scan) ──────────────── */
 
-static inline PyObject *
-_vkw(const char *key, PyObject *kwnames,
-     PyObject *const *args, Py_ssize_t npos, int required)
-{
+static inline PyObject *_vkw(const char *key, PyObject *kwnames, PyObject *const *args,
+                             Py_ssize_t npos, int required) {
   if (kwnames) {
     Py_ssize_t nkw = PyTuple_GET_SIZE(kwnames);
     for (Py_ssize_t i = 0; i < nkw; i++)
-      if (!PyUnicode_CompareWithASCIIString(
-              PyTuple_GET_ITEM(kwnames, i), key))
+      if (!PyUnicode_CompareWithASCIIString(PyTuple_GET_ITEM(kwnames, i), key))
         return args[npos + i];
   }
-  if (required)
-    PyErr_Format(PyExc_TypeError,
-                 "missing required keyword argument '%s'", key);
+  if (required) PyErr_Format(PyExc_TypeError, "missing required keyword argument '%s'", key);
   return NULL;
 }
 
-#define VKW(k)     _vkw(k, _k, _a, _n, 1)
+#define VKW(k) _vkw(k, _k, _a, _n, 1)
 #define VKW_OPT(k) _vkw(k, _k, _a, _n, 0)
 
 /* ── Argument Validation ─────────────────────────────────────────── */
 
-#define VEXPECT(n) \
-  do { \
-    if (_n != (n)) { \
-      PyErr_Format(PyExc_TypeError, \
-          "%s: expected %d argument%s, got %zd", \
-          __func__, (int)(n), (n) == 1 ? "" : "s", _n); \
-      return NULL; \
-    } \
+#define VEXPECT(n)                                                                             \
+  do {                                                                                         \
+    if (_n != (n)) {                                                                           \
+      PyErr_Format(PyExc_TypeError, "%s: expected %d argument%s, got %zd", __func__, (int)(n), \
+                   (n) == 1 ? "" : "s", _n);                                                   \
+      return NULL;                                                                             \
+    }                                                                                          \
   } while (0)
 
-#define VEXPECT_MIN(n) \
-  do { \
-    if (_n < (n)) { \
-      PyErr_Format(PyExc_TypeError, \
-          "%s: expected at least %d argument%s, got %zd", \
-          __func__, (int)(n), (n) == 1 ? "" : "s", _n); \
-      return NULL; \
-    } \
+#define VEXPECT_MIN(n)                                                                        \
+  do {                                                                                        \
+    if (_n < (n)) {                                                                           \
+      PyErr_Format(PyExc_TypeError, "%s: expected at least %d argument%s, got %zd", __func__, \
+                   (int)(n), (n) == 1 ? "" : "s", _n);                                        \
+      return NULL;                                                                            \
+    }                                                                                         \
   } while (0)
 
 /* ── Scalar Unpackers ──────────────────────────────────────────────
@@ -193,9 +180,7 @@ _vkw(const char *key, PyObject *kwnames,
  * exception state a second time.
  */
 
-static inline int
-_v_long(PyObject *obj, long *out, const char *ctx)
-{
+static inline int _v_long(PyObject *obj, long *out, const char *ctx) {
   if (!obj) return 0;
   if (!PyLong_Check(obj)) {
     _vtype_err(ctx, "int", obj);
@@ -205,9 +190,7 @@ _v_long(PyObject *obj, long *out, const char *ctx)
   return !PyErr_Occurred();
 }
 
-static inline int
-_v_ulong(PyObject *obj, unsigned long *out, const char *ctx)
-{
+static inline int _v_ulong(PyObject *obj, unsigned long *out, const char *ctx) {
   if (!obj) return 0;
   if (!PyLong_Check(obj)) {
     _vtype_err(ctx, "int", obj);
@@ -217,9 +200,7 @@ _v_ulong(PyObject *obj, unsigned long *out, const char *ctx)
   return !PyErr_Occurred();
 }
 
-static inline int
-_v_double(PyObject *obj, double *out, const char *ctx)
-{
+static inline int _v_double(PyObject *obj, double *out, const char *ctx) {
   if (!obj) return 0;
   if (!PyLong_Check(obj) && !PyFloat_Check(obj)) {
     _vtype_err(ctx, "float", obj);
@@ -229,19 +210,17 @@ _v_double(PyObject *obj, double *out, const char *ctx)
   return !PyErr_Occurred();
 }
 
-static inline int
-_v_bool(PyObject *obj, int *out, const char *ctx)
-{
+static inline int _v_bool(PyObject *obj, int *out, const char *ctx) {
   (void)ctx;
   if (!obj) return 0;
   *out = PyObject_IsTrue(obj);
   return *out >= 0;
 }
 
-#define VINT(i, out)    _v_long(VA(i), out, "argument " #i)
-#define VUINT(i, out)   _v_ulong(VA(i), out, "argument " #i)
+#define VINT(i, out) _v_long(VA(i), out, "argument " #i)
+#define VUINT(i, out) _v_ulong(VA(i), out, "argument " #i)
 #define VDOUBLE(i, out) _v_double(VA(i), out, "argument " #i)
-#define VBOOL(i, out)   _v_bool(VA(i), out, "argument " #i)
+#define VBOOL(i, out) _v_bool(VA(i), out, "argument " #i)
 
 /* ── String / Bytes Accessors ──────────────────────────────────────
  *
@@ -252,9 +231,7 @@ _v_bool(PyObject *obj, int *out, const char *ctx)
  * object is alive.  NULL on error (exception set).
  */
 
-static inline const char *
-_v_str(PyObject *obj, Py_ssize_t *out_len, const char *ctx)
-{
+static inline const char *_v_str(PyObject *obj, Py_ssize_t *out_len, const char *ctx) {
   if (!obj) return NULL;
   if (!PyUnicode_Check(obj)) {
     _vtype_err(ctx, "str", obj);
@@ -263,9 +240,7 @@ _v_str(PyObject *obj, Py_ssize_t *out_len, const char *ctx)
   return PyUnicode_AsUTF8AndSize(obj, out_len);
 }
 
-static inline const char *
-_v_bytes(PyObject *obj, Py_ssize_t *out_len, const char *ctx)
-{
+static inline const char *_v_bytes(PyObject *obj, Py_ssize_t *out_len, const char *ctx) {
   if (!obj) return NULL;
   if (!PyBytes_Check(obj)) {
     _vtype_err(ctx, "bytes", obj);
@@ -275,7 +250,7 @@ _v_bytes(PyObject *obj, Py_ssize_t *out_len, const char *ctx)
   return PyBytes_AS_STRING(obj);
 }
 
-#define VSTR(i, plen)   _v_str(VA(i), plen, "argument " #i)
+#define VSTR(i, plen) _v_str(VA(i), plen, "argument " #i)
 #define VBYTES(i, plen) _v_bytes(VA(i), plen, "argument " #i)
 
 /* ── Buffer Access ─────────────────────────────────────────────────
@@ -288,9 +263,7 @@ _v_bytes(PyObject *obj, Py_ssize_t *out_len, const char *ctx)
  * This is intentional: the "which argument" context is more actionable.
  */
 
-static inline int
-_v_buffer(PyObject *obj, Py_buffer *buf, const char *ctx)
-{
+static inline int _v_buffer(PyObject *obj, Py_buffer *buf, const char *ctx) {
   if (!obj) return 0;
   if (PyObject_GetBuffer(obj, buf, PyBUF_SIMPLE) == -1) {
     PyErr_Clear();
@@ -301,7 +274,11 @@ _v_buffer(PyObject *obj, Py_buffer *buf, const char *ctx)
 }
 
 #define VBUFFER(i, bufptr) _v_buffer(VA(i), bufptr, "argument " #i)
-#define VBUF_DONE(bufptr)  do { PyBuffer_Release(bufptr); (bufptr)->obj = NULL; } while(0)
+#define VBUF_DONE(bufptr)     \
+  do {                        \
+    PyBuffer_Release(bufptr); \
+    (bufptr)->obj = NULL;     \
+  } while (0)
 
 #define VNUL(i) (VA(i) == Py_None)
 
@@ -310,13 +287,12 @@ _v_buffer(PyObject *obj, Py_buffer *buf, const char *ctx)
 /* ctx names the value being cast in the error message ("argument 2",
  * "keyword 'point'", ...) — a hardcoded "argument 0" here was simply
  * wrong for every cast of anything else. */
-#define VTYPE_CAST(obj, T, ctx) \
-  (__extension__({ \
-     PyObject *_vc_o = (PyObject *)(obj); \
-     (_vc_o && Py_TYPE(_vc_o) == &T##_type) \
-       ? (T *)_vc_o \
-       : (_vtype_err((ctx), #T, _vc_o), (T *)NULL); \
-   }))
+#define VTYPE_CAST(obj, T, ctx)                                                         \
+  (__extension__({                                                                      \
+    PyObject *_vc_o = (PyObject *)(obj);                                                \
+    (_vc_o && Py_TYPE(_vc_o) == &T##_type) ? (T *)_vc_o                                 \
+                                           : (_vtype_err((ctx), #T, _vc_o), (T *)NULL); \
+  }))
 
 /* ── Keyword Unpacker Shortcuts ────────────────────────────────────
  *
@@ -346,33 +322,47 @@ _v_buffer(PyObject *obj, Py_buffer *buf, const char *ctx)
 
 #define _VKW_CTX(k) "keyword '" k "'"
 
-#define VKWINT(k, out) \
-  ({ PyObject *_v = VKW(k); \
-     _v ? _v_long(_v, out, _VKW_CTX(k)) : 0; })
+#define VKWINT(k, out)                      \
+  ({                                        \
+    PyObject *_v = VKW(k);                  \
+    _v ? _v_long(_v, out, _VKW_CTX(k)) : 0; \
+  })
 
-#define VKWUINT(k, out) \
-  ({ PyObject *_v = VKW(k); \
-     _v ? _v_ulong(_v, out, _VKW_CTX(k)) : 0; })
+#define VKWUINT(k, out)                      \
+  ({                                         \
+    PyObject *_v = VKW(k);                   \
+    _v ? _v_ulong(_v, out, _VKW_CTX(k)) : 0; \
+  })
 
-#define VKWDOUBLE(k, out) \
-  ({ PyObject *_v = VKW(k); \
-     _v ? _v_double(_v, out, _VKW_CTX(k)) : 0; })
+#define VKWDOUBLE(k, out)                     \
+  ({                                          \
+    PyObject *_v = VKW(k);                    \
+    _v ? _v_double(_v, out, _VKW_CTX(k)) : 0; \
+  })
 
-#define VKWBOOL(k, out) \
-  ({ PyObject *_v = VKW(k); \
-     _v ? _v_bool(_v, out, _VKW_CTX(k)) : 0; })
+#define VKWBOOL(k, out)                     \
+  ({                                        \
+    PyObject *_v = VKW(k);                  \
+    _v ? _v_bool(_v, out, _VKW_CTX(k)) : 0; \
+  })
 
-#define VKWSTR(k, out_len) \
-  ({ PyObject *_v = VKW(k); \
-     _v ? _v_str(_v, out_len, _VKW_CTX(k)) : (const char *)NULL; })
+#define VKWSTR(k, out_len)                                      \
+  ({                                                            \
+    PyObject *_v = VKW(k);                                      \
+    _v ? _v_str(_v, out_len, _VKW_CTX(k)) : (const char *)NULL; \
+  })
 
-#define VKWBYTES(k, out_len) \
-  ({ PyObject *_v = VKW(k); \
-     _v ? _v_bytes(_v, out_len, _VKW_CTX(k)) : (const char *)NULL; })
+#define VKWBYTES(k, out_len)                                      \
+  ({                                                              \
+    PyObject *_v = VKW(k);                                        \
+    _v ? _v_bytes(_v, out_len, _VKW_CTX(k)) : (const char *)NULL; \
+  })
 
-#define VKWBUFFER(k, bufptr) \
-  ({ PyObject *_v = VKW(k); \
-     _v ? _v_buffer(_v, bufptr, _VKW_CTX(k)) : 0; })
+#define VKWBUFFER(k, bufptr)                     \
+  ({                                             \
+    PyObject *_v = VKW(k);                       \
+    _v ? _v_buffer(_v, bufptr, _VKW_CTX(k)) : 0; \
+  })
 
 /*
  * These used to end their GNU statement-expression with an `if (...) {...}
@@ -384,31 +374,41 @@ _v_buffer(PyObject *obj, Py_buffer *buf, const char *ctx)
  * Rewritten so the last thing in the braces is a ternary expression.
  */
 
-#define VKWOPT_INT(k, out, def) \
-  ({ PyObject *_v = VKW_OPT(k); \
-     _v ? _v_long(_v, out, _VKW_CTX(k)) : (*(out) = (def), 1); })
+#define VKWOPT_INT(k, out, def)                               \
+  ({                                                          \
+    PyObject *_v = VKW_OPT(k);                                \
+    _v ? _v_long(_v, out, _VKW_CTX(k)) : (*(out) = (def), 1); \
+  })
 
-#define VKWOPT_UINT(k, out, def) \
-  ({ PyObject *_v = VKW_OPT(k); \
-     _v ? _v_ulong(_v, out, _VKW_CTX(k)) : (*(out) = (def), 1); })
+#define VKWOPT_UINT(k, out, def)                               \
+  ({                                                           \
+    PyObject *_v = VKW_OPT(k);                                 \
+    _v ? _v_ulong(_v, out, _VKW_CTX(k)) : (*(out) = (def), 1); \
+  })
 
-#define VKWOPT_DOUBLE(k, out, def) \
-  ({ PyObject *_v = VKW_OPT(k); \
-     _v ? _v_double(_v, out, _VKW_CTX(k)) : (*(out) = (def), 1); })
+#define VKWOPT_DOUBLE(k, out, def)                              \
+  ({                                                            \
+    PyObject *_v = VKW_OPT(k);                                  \
+    _v ? _v_double(_v, out, _VKW_CTX(k)) : (*(out) = (def), 1); \
+  })
 
-#define VKWOPT_BOOL(k, out, def) \
-  ({ PyObject *_v = VKW_OPT(k); \
-     _v ? _v_bool(_v, out, _VKW_CTX(k)) : (*(out) = (def), 1); })
+#define VKWOPT_BOOL(k, out, def)                              \
+  ({                                                          \
+    PyObject *_v = VKW_OPT(k);                                \
+    _v ? _v_bool(_v, out, _VKW_CTX(k)) : (*(out) = (def), 1); \
+  })
 
-#define VKWOPT_STR(k, out_ptr, out_len) \
-  ({ PyObject *_v = VKW_OPT(k); \
-     _v ? ((*(out_ptr) = _v_str(_v, out_len, _VKW_CTX(k))) != NULL) \
-         : (*(out_ptr) = NULL, 1); })
+#define VKWOPT_STR(k, out_ptr, out_len)                                                      \
+  ({                                                                                         \
+    PyObject *_v = VKW_OPT(k);                                                               \
+    _v ? ((*(out_ptr) = _v_str(_v, out_len, _VKW_CTX(k))) != NULL) : (*(out_ptr) = NULL, 1); \
+  })
 
-#define VKWOPT_BYTES(k, out_ptr, out_len) \
-  ({ PyObject *_v = VKW_OPT(k); \
-     _v ? ((*(out_ptr) = _v_bytes(_v, out_len, _VKW_CTX(k))) != NULL) \
-         : (*(out_ptr) = NULL, 1); })
+#define VKWOPT_BYTES(k, out_ptr, out_len)                                                      \
+  ({                                                                                           \
+    PyObject *_v = VKW_OPT(k);                                                                 \
+    _v ? ((*(out_ptr) = _v_bytes(_v, out_len, _VKW_CTX(k))) != NULL) : (*(out_ptr) = NULL, 1); \
+  })
 
 /* ── Module Definition ─────────────────────────────────────────────
  *
@@ -423,28 +423,27 @@ _v_buffer(PyObject *obj, Py_buffer *buf, const char *ctx)
  * module.
  */
 
-#define VMOD_BEGIN(mod) \
-  static PyMethodDef _vmt_##mod[] = {
-
-#define VMOD_FUNC(name, fn, doc) \
-  {name, (PyCFunction)(void(*)(void))fn, METH_FASTCALL, doc}
+#define VMOD_BEGIN(mod) static PyMethodDef _vmt_##mod[] = {
+#define VMOD_FUNC(name, fn, doc) {name, (PyCFunction)(void (*)(void))fn, METH_FASTCALL, doc}
 
 #define VMOD_FUNC_KW(name, fn, doc) \
-  {name, (PyCFunction)(void(*)(void))fn, METH_FASTCALL | METH_KEYWORDS, doc}
+  {name, (PyCFunction)(void (*)(void))fn, METH_FASTCALL | METH_KEYWORDS, doc}
 
 #define VMOD_NO_INIT _vmod_no_init
 
 static inline PyObject *_vmod_no_init(PyObject *module) { return module; }
 
-#define VMOD_END(mod, doc, init_hook) \
-  {NULL, NULL, 0, NULL} }; \
-  static struct PyModuleDef _vmd_##mod = { \
-    PyModuleDef_HEAD_INIT, #mod, doc, -1, _vmt_##mod, \
-    NULL, NULL, NULL, NULL \
-  }; \
-  PyMODINIT_FUNC PyInit_##mod(void) { \
-    PyObject *_module = PyModule_Create(&_vmd_##mod); \
-    return _module ? init_hook(_module) : NULL; \
+#define VMOD_END(mod, doc, init_hook)                                          \
+  {                                                                            \
+    NULL, NULL, 0, NULL                                                        \
+  }                                                                            \
+  }                                                                            \
+  ;                                                                            \
+  static struct PyModuleDef _vmd_##mod = {                                     \
+    PyModuleDef_HEAD_INIT, #mod, doc, -1, _vmt_##mod, NULL, NULL, NULL, NULL}; \
+  PyMODINIT_FUNC PyInit_##mod(void) {                                          \
+    PyObject *_module = PyModule_Create(&_vmd_##mod);                          \
+    return _module ? init_hook(_module) : NULL;                                \
   }
 
 /* ── Types with Vectorcall ─────────────────────────────────────────
@@ -490,29 +489,28 @@ static inline PyObject *_vmod_no_init(PyObject *module) { return module; }
  */
 
 #define VTYPE_HEAD(T) \
-  typedef struct { PyObject_HEAD vectorcallfunc vc_call;
+  typedef struct {    \
+    PyObject_HEAD vectorcallfunc vc_call;
 
-#define VTYPE_END(T) } T;
+#define VTYPE_END(T) \
+  }                  \
+  T;
 
-#define VTYPE_FLAGS \
-  (Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_VECTORCALL | Py_TPFLAGS_METHOD_DESCRIPTOR)
+#define VTYPE_FLAGS (Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_VECTORCALL | Py_TPFLAGS_METHOD_DESCRIPTOR)
 
-#define VTOBJ_DEF(T, ...) \
-  static PyTypeObject T##_type = { \
-    PyVarObject_HEAD_INIT(NULL, 0) \
-    .tp_basicsize = sizeof(T), \
-    .tp_itemsize = 0, \
-    .tp_vectorcall_offset = offsetof(T, vc_call), \
-    __VA_ARGS__ };
+#define VTOBJ_DEF(T, ...)                                                                         \
+  static PyTypeObject T##_type = {PyVarObject_HEAD_INIT(NULL, 0).tp_basicsize = sizeof(T),        \
+                                  .tp_itemsize = 0, .tp_vectorcall_offset = offsetof(T, vc_call), \
+                                  __VA_ARGS__};
 
-#define VTYPE_READY(T, mod) \
-  do { \
-    if (PyType_Ready(&T##_type) < 0) return NULL; \
-    Py_INCREF(&T##_type); \
+#define VTYPE_READY(T, mod)                                       \
+  do {                                                            \
+    if (PyType_Ready(&T##_type) < 0) return NULL;                 \
+    Py_INCREF(&T##_type);                                         \
     if (PyModule_AddObject(mod, #T, (PyObject *)&T##_type) < 0) { \
-      Py_DECREF(&T##_type); \
-      return NULL; \
-    } \
+      Py_DECREF(&T##_type);                                       \
+      return NULL;                                                \
+    }                                                             \
   } while (0)
 
 #define VNEW(T) ((T *)T##_type.tp_alloc(&T##_type, 0))
@@ -521,12 +519,12 @@ static inline PyObject *_vmod_no_init(PyObject *module) { return module; }
  * (never plain VNEW) for any type whose tp_call is PyVectorcall_Call —
  * it is the single point that keeps "flags say vectorcall-capable" and
  * "vc_call actually points at a function" from drifting apart. */
-#define VNEW_CALLABLE(T, vcfn) \
-  (__extension__({ \
-     T *_vn_self = VNEW(T); \
-     if (_vn_self) _vn_self->vc_call = (vcfn); \
-     _vn_self; \
-   }))
+#define VNEW_CALLABLE(T, vcfn)                \
+  (__extension__({                            \
+    T *_vn_self = VNEW(T);                    \
+    if (_vn_self) _vn_self->vc_call = (vcfn); \
+    _vn_self;                                 \
+  }))
 
 /* ── Vectorcall-Slot Bodies (for T's own vc_call, i.e. `t(...)`) ────
  *
@@ -550,22 +548,21 @@ static inline PyObject *_vmod_no_init(PyObject *module) { return module; }
  * function definition. This was a real, previously undiscovered defect:
  * VMETHOD_SIG/VMETHOD_KW_SIG had self-enclosing parens, so every Point
  * method (dist/scale/move/repr/str) failed to compile. */
-#define VCALL_SIG \
-  PyObject *_s, PyObject *const *_a __attribute__((unused)), \
-  size_t _nf, PyObject *_k __attribute__((unused))
+#define VCALL_SIG                                                        \
+  PyObject *_s, PyObject *const *_a __attribute__((unused)), size_t _nf, \
+    PyObject *_k __attribute__((unused))
 
 /* VCALL_BEGIN rejects keyword arguments outright: a vc_call body that
  * silently ignored a non-empty kwnames tuple would drop `p(x, dy=...)`
  * keywords on the floor. The rare keyword-accepting vc_call should
  * hand-roll its prologue from PyVectorcall_NARGS + _k instead. */
-#define VCALL_BEGIN \
-  Py_ssize_t _n = PyVectorcall_NARGS(_nf); \
-  do { \
-    if (_k != NULL && PyTuple_GET_SIZE(_k) > 0) { \
-      PyErr_Format(PyExc_TypeError, \
-                   "%s: takes no keyword arguments", __func__); \
-      return NULL; \
-    } \
+#define VCALL_BEGIN                                                              \
+  Py_ssize_t _n = PyVectorcall_NARGS(_nf);                                       \
+  do {                                                                           \
+    if (_k != NULL && PyTuple_GET_SIZE(_k) > 0) {                                \
+      PyErr_Format(PyExc_TypeError, "%s: takes no keyword arguments", __func__); \
+      return NULL;                                                               \
+    }                                                                            \
   } while (0)
 
 /* ── Type Methods (METH_FASTCALL on tp_methods) ────────────────────
@@ -592,34 +589,33 @@ static inline PyObject *_vmod_no_init(PyObject *module) { return module; }
  * into every such body for an ABI-mandated parameter is friction the
  * macro should absorb instead. */
 #define VMETHOD_SIG \
-  PyObject *_s, PyObject *const *_a __attribute__((unused)), \
-  Py_ssize_t _n __attribute__((unused))
+  PyObject *_s, PyObject *const *_a __attribute__((unused)), Py_ssize_t _n __attribute__((unused))
 
-#define VMETHOD_KW_SIG \
+#define VMETHOD_KW_SIG                                       \
   PyObject *_s, PyObject *const *_a __attribute__((unused)), \
-  Py_ssize_t _n __attribute__((unused)), PyObject *_k __attribute__((unused))
+    Py_ssize_t _n __attribute__((unused)), PyObject *_k __attribute__((unused))
 
 #define VMETH_ENTRY(name, T, fn, doc) \
-  {name, (PyCFunction)(void(*)(void))T##_##fn, METH_FASTCALL, doc}
+  {name, (PyCFunction)(void (*)(void))T##_##fn, METH_FASTCALL, doc}
 
 #define VMETH_KW_ENTRY(name, T, fn, doc) \
-  {name, (PyCFunction)(void(*)(void))T##_##fn, METH_FASTCALL | METH_KEYWORDS, doc}
+  {name, (PyCFunction)(void (*)(void))T##_##fn, METH_FASTCALL | METH_KEYWORDS, doc}
 
 /* ── Type Checks ─────────────────────────────────────────────────── */
 
-#define VTYPE_IS(obj, T) \
-  (__extension__({ \
-     PyObject *_ti_o = (PyObject *)(obj); \
-     _ti_o && Py_TYPE(_ti_o) == &T##_type; \
-   }))
+#define VTYPE_IS(obj, T)                 \
+  (__extension__({                       \
+    PyObject *_ti_o = (PyObject *)(obj); \
+    _ti_o &&Py_TYPE(_ti_o) == &T##_type; \
+  }))
 
-#define VTYPE_GUARD(obj, T, arg) \
-  do { \
-    PyObject *_tg_o = (PyObject *)(obj); \
+#define VTYPE_GUARD(obj, T, arg)                   \
+  do {                                             \
+    PyObject *_tg_o = (PyObject *)(obj);           \
     if (!(_tg_o && Py_TYPE(_tg_o) == &T##_type)) { \
-      _vtype_err(arg, #T, _tg_o); \
-      return NULL; \
-    } \
+      _vtype_err(arg, #T, _tg_o);                  \
+      return NULL;                                 \
+    }                                              \
   } while (0)
 
 /* ── Method Self-Cast ────────────────────────────────────────────── */
@@ -633,7 +629,10 @@ static inline PyObject *_vmod_no_init(PyObject *module) { return module; }
  *   VALL(VINT(0, &x) && VINT(1, &y) && VDOUBLE(2, &z));
  */
 
-#define VALL(expr) do { if (!(expr)) return NULL; } while(0)
+#define VALL(expr)            \
+  do {                        \
+    if (!(expr)) return NULL; \
+  } while (0)
 
 /* ── Auto-Cleanup (GCC __attribute__((cleanup))) ───────────────────
  *
@@ -668,23 +667,27 @@ static inline void _vbuf_cleanup(Py_buffer *buf) {
   if (buf->obj) PyBuffer_Release(buf);
 }
 
-static inline void _vdecref_cleanup(PyObject **obj) {
-  Py_XDECREF(*obj);
-}
+static inline void _vdecref_cleanup(PyObject **obj) { Py_XDECREF(*obj); }
 
-#define VBUF_SCOPED(name) \
-  Py_buffer name __attribute__((cleanup(_vbuf_cleanup))) = {0}
+#define VBUF_SCOPED(name) Py_buffer name __attribute__((cleanup(_vbuf_cleanup))) = {0}
 
-#define VREF_SCOPED(name) \
-  PyObject *name __attribute__((cleanup(_vdecref_cleanup))) = NULL
+#define VREF_SCOPED(name) PyObject *name __attribute__((cleanup(_vdecref_cleanup))) = NULL
 
-#define VREF_AUTO(name, expr) \
-  PyObject *name __attribute__((cleanup(_vdecref_cleanup))) = (expr)
+#define VREF_AUTO(name, expr) PyObject *name __attribute__((cleanup(_vdecref_cleanup))) = (expr)
 
-#define VSTEAL(name) ({ PyObject *_t = (name); (name) = NULL; _t; })
+#define VSTEAL(name)       \
+  ({                       \
+    PyObject *_t = (name); \
+    (name) = NULL;         \
+    _t;                    \
+  })
 
-#define VMOVE(name, expr) \
-  do { PyObject *_vm_new = (expr); Py_XDECREF(name); (name) = _vm_new; } while (0)
+#define VMOVE(name, expr)       \
+  do {                          \
+    PyObject *_vm_new = (expr); \
+    Py_XDECREF(name);           \
+    (name) = _vm_new;           \
+  } while (0)
 
 /* ── Construction Helpers ──────────────────────────────────────────
  *
@@ -697,13 +700,13 @@ static inline void _vdecref_cleanup(PyObject **obj) {
  *   return VSTEAL(result);
  */
 
-#define VNEW_LONG(v)       PyLong_FromLong(v)
-#define VNEW_UNSIGNED(v)   PyLong_FromUnsignedLong(v)
-#define VNEW_DOUBLE(v)     PyFloat_FromDouble(v)
-#define VNEW_BOOL(v)       PyBool_FromLong(v)
-#define VNEW_STR(s)        PyUnicode_FromString(s)
-#define VNEW_STRN(s, n)    PyUnicode_FromStringAndSize((s), (n))
-#define VNEW_BYTES(s, n)   PyBytes_FromStringAndSize((s), (n))
+#define VNEW_LONG(v) PyLong_FromLong(v)
+#define VNEW_UNSIGNED(v) PyLong_FromUnsignedLong(v)
+#define VNEW_DOUBLE(v) PyFloat_FromDouble(v)
+#define VNEW_BOOL(v) PyBool_FromLong(v)
+#define VNEW_STR(s) PyUnicode_FromString(s)
+#define VNEW_STRN(s, n) PyUnicode_FromStringAndSize((s), (n))
+#define VNEW_BYTES(s, n) PyBytes_FromStringAndSize((s), (n))
 #define VNEW_EMPTY_BYTES() PyBytes_FromStringAndSize(NULL, 0)
 
 #endif /* PYFAST_H */

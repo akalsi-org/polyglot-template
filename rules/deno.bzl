@@ -219,9 +219,12 @@ def _deno_cache_impl(ctx: AnalysisContext) -> list[Provider]:
   # intentionally derived from Buck inputs, not an independently maintained
   # representative-entry list.  The same manifest is exposed to bootstrap,
   # making its seed and the graph action use exactly one contract.
-  entries = sorted([path for path in srcs.keys() if path.endswith(".ts") or path.endswith(".tsx")])
+  entry_set = {}
+  for entry in [path for path in srcs.keys() if path.endswith(".ts") or path.endswith(".tsx")] + _resolve_entries(ctx):
+    entry_set[entry] = True
+  entries = sorted(entry_set.keys())
   if not entries:
-    fail("{} has no TypeScript cache entries".format(ctx.label.raw_target()))
+    fail("{} has no TypeScript or npm cache entries".format(ctx.label.raw_target()))
   manifest = ctx.actions.write_json(ctx.label.name + "-manifest.json", entries)
 
   deno_dir_out = ctx.actions.declare_output(ctx.label.name + "-deno-dir", dir = True)

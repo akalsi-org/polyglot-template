@@ -7,6 +7,7 @@ POLYGLOT_LOCK_FILE=${POLYGLOT_LOCK_FILE:-$ROOT/tools.lock.toml}
 export POLYGLOT_LOCK_FILE
 . "$ROOT/toolchain/lock.sh"
 
+(($# <= 1)) || { printf 'usage: ./repo.sh doctor [--deep]\n' >&2; exit 2; }
 deep=0
 case ${1:-} in --deep) deep=1;; '') :;; *) printf 'error: unknown doctor option: %s\n' "$1" >&2; exit 2;; esac
 target=$($ROOT/toolchain/target.sh)
@@ -64,6 +65,15 @@ deep_validate_go() {
   }
 }
 
+deep_validate_clang_format() {
+  local install=$1 expected=$2 gcc_version loader gcc_install loader_dir
+  gcc_version=$(lock_value gcc-musl "$target" version)
+  loader=$(lock_value gcc-musl "$target" loader)
+  gcc_install="$LOCAL/toolchain/$target/gcc-musl-$gcc_version"
+  loader_dir=$(dirname -- "$gcc_install/$loader")
+  "$gcc_install/$loader" --library-path "$loader_dir:$install/clang_format.libs" "$install/$expected" --version >/dev/null
+}
+
 deep_validate_doctest() {
   local install=$1 expected=$2
   grep -q '^#define DOCTEST_VERSION_MAJOR 2$' "$install/$expected"
@@ -88,6 +98,7 @@ deep_validate() {
     gcc-musl:*) deep_validate_gcc "$install" "$expected" ;;
     deno:*) deep_validate_deno "$install" "$expected" "$version" ;;
     go:*) deep_validate_go "$install" "$expected" "$version" ;;
+    clang-format:*) deep_validate_clang_format "$install" "$expected" ;;
     doctest:*) deep_validate_doctest "$install" "$expected" ;;
     buck2:*) deep_validate_buck2 "$install" "$expected" ;;
     *:executable) "$install/$expected" --version >/dev/null ;;

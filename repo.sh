@@ -17,7 +17,7 @@ tool_path() {
 }
 
 setup_environment() {
-  local target gcc python deno go buck2 gcc_bin go_root path_prefix loader loader_path env_bin gcc_install
+  local target gcc python deno go buck2 clang_format gcc_bin go_root path_prefix loader loader_path env_bin gcc_install
   target=$("$ROOT/toolchain/target.sh")
   export POLYGLOT_TARGET=$target
   export POLYGLOT_LOCK_FILE=${POLYGLOT_LOCK_FILE:-$ROOT/tools.lock.toml}
@@ -27,7 +27,8 @@ setup_environment() {
   deno=$(tool_path deno)
   go=$(tool_path go)
   buck2=$(tool_path buck2)
-  for tool in "$gcc" "$python" "$deno" "$go" "$buck2"; do
+  clang_format=$(tool_path clang-format)
+  for tool in "$gcc" "$python" "$deno" "$go" "$buck2" "$clang_format"; do
     [[ -x $tool ]] || { printf 'error: pinned toolchain is not installed; run ./repo.sh bootstrap\n' >&2; return 1; }
   done
 
@@ -41,12 +42,13 @@ setup_environment() {
   env_bin="$POLYGLOT_LOCAL_DIR/bin"
   export CC="${gcc%g++}gcc"
   export CXX=$gcc
-  write_repo_tool_wrappers "$POLYGLOT_LOCAL_DIR" "$CC" "$CXX" "$python" "$loader_path" "$deno" "$go" "$buck2" "$gcc_install" "$target"
+  write_repo_tool_wrappers "$POLYGLOT_LOCAL_DIR" "$CC" "$CXX" "$python" "$loader_path" "$deno" "$go" "$buck2" "$clang_format" "$gcc_install" "$target"
   export POLYGLOT_CXX=$gcc
   export POLYGLOT_PYTHON=$python
   export POLYGLOT_DENO=$deno
   export POLYGLOT_GO=$go
   export POLYGLOT_BUCK2=$buck2
+  export POLYGLOT_CLANG_FORMAT=$env_bin/clang-format
   export GOROOT=$go_root
   export GOPATH="$POLYGLOT_LOCAL_DIR/cache/go/path"
   export GOMODCACHE="$POLYGLOT_LOCAL_DIR/cache/go/mod"
@@ -63,7 +65,7 @@ setup_environment() {
   export GOFLAGS="-p=$(host_jobs)"
   export DENO_DIR="$POLYGLOT_LOCAL_DIR/cache/deno"
   export XDG_CACHE_HOME="$POLYGLOT_LOCAL_DIR/cache/xdg"
-  export PYTHONPATH="$ROOT/build/python/$target/lib:$ROOT/python/lib:$ROOT/python/app${PYTHONPATH:+:$PYTHONPATH}"
+  export PYTHONPATH="$ROOT/build/python/$target/lib:$ROOT/python/lib:$ROOT/python/app"
   path_prefix="$env_bin:$gcc_bin:$go_root/bin:$(dirname -- "$deno"):$(dirname -- "$buck2")"
   export POLYGLOT_PATH_PREFIX=$path_prefix
   export PATH="$path_prefix:$PATH"
@@ -87,11 +89,12 @@ target_platform_args() {
 }
 
 stage_python_extensions() {
-  local target stage parent tmp query_out query_err output_out output_err entry output name
+  local target stage parent manifest manifest_tmp tmp query_out query_err output_out output_err entry output name rel hash
   local -a plat=("$@") extensions outputs
   target=$("$ROOT/toolchain/target.sh")
   stage="$ROOT/build/python/$target/lib"
   parent=$(dirname -- "$stage")
+  manifest="$parent/.lib.manifest"
   query_out=$(mktemp)
   query_err=$(mktemp)
   if ! "$POLYGLOT_BUCK2" uquery "kind('^_py_extension_rule$', '//...')" >"$query_out" 2>"$query_err"; then
@@ -99,10 +102,10 @@ stage_python_extensions() {
     rm -f "$query_out" "$query_err"
     return 1
   fi
-  mapfile -t extensions < <(grep '^root//' "$query_out")
+  mapfile -t extensions < <(grep '^root//' "$query_out" | sort)
   rm -f "$query_out" "$query_err"
   if ((${#extensions[@]} == 0)); then
-    rm -rf "$stage"
+    rm -rf "$stage" "$manifest"
     return 0
   fi
   output_out=$(mktemp)
@@ -112,20 +115,38 @@ stage_python_extensions() {
     rm -f "$output_out" "$output_err"
     return 1
   fi
-  mapfile -t outputs < <(awk '{ print $2 }' "$output_out")
+  mapfile -t outputs < <(awk '{ print $2 }' "$output_out" | sort -u)
   rm -f "$output_out" "$output_err"
   ((${#outputs[@]} == ${#extensions[@]})) || { printf 'error: extension output query returned an incomplete result\n' >&2; return 1; }
   mkdir -p "$parent"
+  manifest_tmp=$(mktemp "$parent/.lib.manifest.tmp.XXXXXX")
+  for output in "${outputs[@]}"; do
+    [[ -d $ROOT/$output ]] || { printf 'error: Python extension output is not a directory: %s\n' "$output" >&2; rm -f "$manifest_tmp"; return 1; }
+    while IFS= read -r -d '' entry; do
+      rel=${entry#"$ROOT/$output/"}
+      if [[ -L $entry ]]; then
+        printf 'link %s %s\n' "$rel" "$(readlink -- "$entry")"
+      else
+        hash=$(sha256sum "$entry" | awk '{ print $1 }')
+        printf 'file %s %s\n' "$rel" "$hash"
+      fi
+    done < <(find "$ROOT/$output" \( -type f -o -type l \) -print0 | sort -z)
+  done >"$manifest_tmp"
+  if [[ -d $stage ]] && cmp -s "$manifest_tmp" "$manifest"; then
+    rm -f "$manifest_tmp"
+    return 0
+  fi
   tmp=$(mktemp -d "$parent/.lib.tmp.XXXXXX")
   for output in "${outputs[@]}"; do
     for entry in "$ROOT/$output"/*; do
       name=$(basename -- "$entry")
-      [[ -e "$tmp/$name" ]] && { printf 'error: Python extension package collision at %s\n' "$name" >&2; rm -rf "$tmp"; return 1; }
+      [[ -e "$tmp/$name" ]] && { printf 'error: Python extension package collision at %s\n' "$name" >&2; rm -rf "$tmp"; rm -f "$manifest_tmp"; return 1; }
     done
     cp -R "$ROOT/$output/." "$tmp"
   done
   rm -rf "$stage"
   mv "$tmp" "$stage"
+  mv "$manifest_tmp" "$manifest"
 }
 
 # Package publication is intentionally Buck2-owned. A catalog entry is
@@ -180,12 +201,12 @@ Commands:
   python [args...]             Run the pinned Python through the pinned musl loader.
   python-build                 Build the pinned-ABI C++ extension via buck2.
   python-test                  Build and test the Python lane via buck2.
-  deno [args...]               Run the pinned Deno binary.
+  deno [args...]               Run raw pinned Deno arguments; they may access the network.
   ts-build                     Type-check TypeScript against the frozen graph via buck2.
   ts-test                      Build and test local TypeScript via buck2.
   tsweb-build                  Build the React 19 static application via buck2.
   tsweb-test                   Build and test browser TypeScript via buck2.
-  go [args...]                 Run pinned Go with isolated repository caches.
+  go [args...]                 Run raw pinned Go arguments; they may access the network.
   go-build                     Build the Go application via buck2.
   go-test                      Build, run, and test the Go lane via buck2.
   infra-test                   Run repository infrastructure tests (bootstrap/workflow/package).
@@ -208,6 +229,16 @@ EOF
 
 command=${1:-shell}
 if (($#)); then shift; fi
+
+require_no_args() {
+  local command=$1
+  (($# == 1)) || { printf 'usage: ./repo.sh %s\n' "$command" >&2; exit 2; }
+}
+
+pinned_python() {
+  "$POLYGLOT_LOCAL_DIR/bin/python3" "$@"
+}
+
 case "$command" in
   shell)
     (($# == 0)) || { printf 'usage: ./repo.sh\n' >&2; exit 2; }
@@ -219,17 +250,28 @@ case "$command" in
     setup_environment
     exec "$@"
     ;;
-  help|-h|--help) usage ;;
-  target) "$ROOT/toolchain/target.sh" "$@" ;;
-  bootstrap) "$ROOT/toolchain/bootstrap.sh" "$@" ;;
+  help|-h|--help)
+    require_no_args "$command" "$@"
+    usage
+    ;;
+  target)
+    require_no_args target "$@"
+    "$ROOT/toolchain/target.sh"
+    ;;
+  bootstrap)
+    (($# <= 2)) || { printf 'usage: ./repo.sh bootstrap [--offline] [--dry-run]\n' >&2; exit 2; }
+    "$ROOT/toolchain/bootstrap.sh" "$@"
+    ;;
   doctor) "$ROOT/toolchain/doctor.sh" "$@" ;;
   buck2)
     setup_environment
     exec "$POLYGLOT_BUCK2" "$@"
     ;;
   infra-lint)
+    require_no_args infra-lint "$@"
+    setup_environment
     bash -n "$ROOT/repo.sh" "$ROOT"/.vscode/go "$ROOT"/toolchain/*.sh "$ROOT"/test/*.sh
-    python3 "$ROOT/tools/lint.py"
+    pinned_python "$ROOT/tools/lint.py"
     ;;
   format)
     (($# <= 1)) || { printf 'usage: ./repo.sh format [--check]\n' >&2; exit 2; }
@@ -239,12 +281,12 @@ case "$command" in
       --check) format_check=1 ;;
       *) printf 'usage: ./repo.sh format [--check]\n' >&2; exit 2 ;;
     esac
-    if ((format_check)); then
-      python3 "$ROOT/tools/format.py" --check
-    else
-      python3 "$ROOT/tools/format.py"
-    fi
     setup_environment
+    if ((format_check)); then
+      pinned_python "$ROOT/tools/format.py" --check
+    else
+      pinned_python "$ROOT/tools/format.py"
+    fi
     if ((format_check)); then
       "$POLYGLOT_DENO" fmt --check ts tsweb deno.json
       mapfile -t format_go < <(find "$ROOT/go" -name '*.go' -type f -print0 | xargs -0 "$GOROOT/bin/gofmt" -l)
@@ -296,6 +338,7 @@ case "$command" in
     "$POLYGLOT_BUCK2" test "${plat[@]}" //...
     ;;
   compile-commands)
+    (($# <= 1)) || { printf 'usage: ./repo.sh compile-commands [dbg|opt]\n' >&2; exit 2; }
     profile=${1:-${POLYGLOT_CPP_PROFILE:-dbg}}
     [[ $profile == dbg || $profile == opt ]] || { printf 'error: profile must be dbg or opt\n' >&2; exit 2; }
     setup_environment
@@ -311,6 +354,7 @@ case "$command" in
     mv -- "$tmp" "$ROOT/compile_commands.json"
     ;;
   cpp-build)
+    (($# <= 1)) || { printf 'usage: ./repo.sh cpp-build [dbg|opt]\n' >&2; exit 2; }
     profile=${1:-${POLYGLOT_CPP_PROFILE:-dbg}}
     [[ $profile == dbg || $profile == opt ]] || { printf 'error: profile must be dbg or opt\n' >&2; exit 2; }
     setup_environment
@@ -319,6 +363,7 @@ case "$command" in
     [[ ${POLYGLOT_DEFER_COMPDB:-0} == 1 ]] || "$ROOT/repo.sh" compile-commands "$profile"
     ;;
   cpp-run)
+    (($# <= 1)) || { printf 'usage: ./repo.sh cpp-run [dbg|opt]\n' >&2; exit 2; }
     profile=${1:-dbg}
     [[ $profile == dbg || $profile == opt ]] || { printf 'error: profile must be dbg or opt\n' >&2; exit 2; }
     setup_environment
@@ -326,6 +371,7 @@ case "$command" in
     "$POLYGLOT_BUCK2" run "${plat[@]}" //cpp/app/hello:hello
     ;;
   cpp-test)
+    require_no_args cpp-test "$@"
     setup_environment
     "$POLYGLOT_BUCK2" test //cpp/...
     "$ROOT/repo.sh" cpp-run dbg
@@ -343,10 +389,11 @@ case "$command" in
     [[ -x $gcc_install/$loader && -x $python_install/$python_expected ]] || { printf 'error: pinned Python toolchain is not installed\n' >&2; exit 1; }
     loader_dir=$(dirname -- "$gcc_install/$loader")
     build_python="$ROOT/build/python/$target/lib"
-    export PYTHONPATH="$build_python:$ROOT/python/lib:$ROOT/python/app${PYTHONPATH:+:$PYTHONPATH}"
+    export PYTHONPATH="$build_python:$ROOT/python/lib:$ROOT/python/app"
     "$gcc_install/$loader" --library-path "$loader_dir:$python_install/python/lib" "$python_install/$python_expected" "$@"
     ;;
   python-build)
+    require_no_args python-build "$@"
     setup_environment
     "$POLYGLOT_BUCK2" build //python/app/hello:hello
     # The application target brings in its Python dependencies, while this
@@ -356,6 +403,7 @@ case "$command" in
     [[ ${POLYGLOT_DEFER_COMPDB:-0} == 1 ]] || "$ROOT/repo.sh" compile-commands "${POLYGLOT_CPP_PROFILE:-dbg}"
     ;;
   python-test)
+    require_no_args python-test "$@"
     setup_environment
     "$POLYGLOT_BUCK2" test //python/...
     ;;
@@ -366,18 +414,22 @@ case "$command" in
     exec "$deno" "$@"
     ;;
   ts-build)
+    require_no_args ts-build "$@"
     setup_environment
     "$POLYGLOT_BUCK2" build //ts/app/hello:check //ts/app/server:check
     ;;
   ts-test)
+    require_no_args ts-test "$@"
     setup_environment
     "$POLYGLOT_BUCK2" test //ts/...
     ;;
   tsweb-build)
+    require_no_args tsweb-build "$@"
     setup_environment
     "$POLYGLOT_BUCK2" build //tsweb:site
     ;;
   tsweb-test)
+    require_no_args tsweb-test "$@"
     setup_environment
     "$POLYGLOT_BUCK2" test //tsweb/...
     ;;
@@ -401,28 +453,33 @@ case "$command" in
     exec "$GOROOT/bin/go" "$@"
     ;;
   go-build)
+    require_no_args go-build "$@"
     setup_environment
     "$POLYGLOT_BUCK2" build //go/app/hello:hello
     ;;
   go-test)
+    require_no_args go-test "$@"
     setup_environment
     "$POLYGLOT_BUCK2" test //go/...
     ;;
   package-validate)
+    require_no_args package-validate "$@"
     setup_environment
     "$POLYGLOT_BUCK2" test //packages:manifest-validate
     ;;
   package-list)
     (($# == 0)) || { printf 'usage: ./repo.sh package-list\n' >&2; exit 2; }
-    python3 "$ROOT/tools/package_model.py" --catalog "$ROOT/packages/catalog.bzl" \
+    setup_environment
+    pinned_python "$ROOT/tools/package_model.py" --catalog "$ROOT/packages/catalog.bzl" \
       --tools-lock "$ROOT/tools.lock.toml" list
     ;;
   package-resolve)
     (($# >= 1 && $# <= 2)) || { printf 'usage: ./repo.sh package-resolve <name> [out-dir]\n' >&2; exit 2; }
     target=$("$ROOT/toolchain/target.sh")
+    setup_environment
     args=(--catalog "$ROOT/packages/catalog.bzl" --tools-lock "$ROOT/tools.lock.toml" resolve --package "$1" --target "$target")
     [[ ${2:-} ]] && args+=(--out-dir "$2")
-    python3 "$ROOT/tools/package_model.py" "${args[@]}"
+    pinned_python "$ROOT/tools/package_model.py" "${args[@]}"
     ;;
   package)
     (($# >= 1 && $# <= 2)) || { printf 'usage: ./repo.sh package <name> [dbg|opt]\n' >&2; exit 2; }
@@ -431,9 +488,9 @@ case "$command" in
     target=$("$ROOT/toolchain/target.sh")
     setup_environment
     require_buck_package_target "$1"
-    version=$(python3 "$ROOT/tools/package_model.py" --catalog "$ROOT/packages/catalog.bzl" \
+    version=$(pinned_python "$ROOT/tools/package_model.py" --catalog "$ROOT/packages/catalog.bzl" \
       --tools-lock "$ROOT/tools.lock.toml" resolve \
-      --package "$1" --target "$target" | python3 -c 'import json, sys; print(json.load(sys.stdin)["version"])')
+      --package "$1" --target "$target" | pinned_python -c 'import json, sys; print(json.load(sys.stdin)["version"])')
     mapfile -t plat < <(target_platform_args "$profile")
     out=$("$POLYGLOT_BUCK2" build "${plat[@]}" --show-output "//packages:$1" 2>/dev/null | awk '{ print $2 }')
     mkdir -p "$ROOT/dist"
@@ -451,9 +508,9 @@ case "$command" in
   package-explain)
     (($# == 1)) || { printf 'usage: ./repo.sh package-explain <name>\n' >&2; exit 2; }
     target=$("$ROOT/toolchain/target.sh")
-    python3 "$ROOT/tools/package_model.py" --catalog "$ROOT/packages/catalog.bzl" \
-      --tools-lock "$ROOT/tools.lock.toml" resolve --package "$1" --target "$target"
     setup_environment
+    pinned_python "$ROOT/tools/package_model.py" --catalog "$ROOT/packages/catalog.bzl" \
+      --tools-lock "$ROOT/tools.lock.toml" resolve --package "$1" --target "$target"
     if "$POLYGLOT_BUCK2" targets "//packages:$1" >/dev/null 2>&1; then
       printf 'buck_target=//packages:%s\n' "$1"
     else
@@ -463,7 +520,8 @@ case "$command" in
   package-smoke)
     (($# == 2)) || { printf 'usage: ./repo.sh package-smoke <archive> <name>\n' >&2; exit 2; }
     target=$("$ROOT/toolchain/target.sh")
-    python3 "$ROOT/tools/package_release.py" --root "$ROOT" --catalog "$ROOT/packages/catalog.bzl" \
+    setup_environment
+    pinned_python "$ROOT/tools/package_release.py" --root "$ROOT" --catalog "$ROOT/packages/catalog.bzl" \
       --tools-lock "$ROOT/tools.lock.toml" \
       --dist-dir "$ROOT/dist" --changelog "$ROOT/CHANGELOG.md" smoke \
       --archive "$1" --package "$2" --target "$target" --execute
@@ -471,22 +529,27 @@ case "$command" in
   release-check)
     (($# == 2)) || { printf 'usage: ./repo.sh release-check <name> <tag>\n' >&2; exit 2; }
     target=$("$ROOT/toolchain/target.sh")
-    python3 "$ROOT/tools/package_release.py" --root "$ROOT" --catalog "$ROOT/packages/catalog.bzl" \
+    setup_environment
+    pinned_python "$ROOT/tools/package_release.py" --root "$ROOT" --catalog "$ROOT/packages/catalog.bzl" \
       --tools-lock "$ROOT/tools.lock.toml" \
       --dist-dir "$ROOT/dist" --changelog "$ROOT/CHANGELOG.md" release-check \
       --package "$1" --target "$target" --tag "$2"
     ;;
   release-notes)
     (($# == 1)) || { printf 'usage: ./repo.sh release-notes <tag>\n' >&2; exit 2; }
-    python3 "$ROOT/tools/package_release.py" --root "$ROOT" --catalog "$ROOT/packages/catalog.bzl" \
+    setup_environment
+    pinned_python "$ROOT/tools/package_release.py" --root "$ROOT" --catalog "$ROOT/packages/catalog.bzl" \
       --tools-lock "$ROOT/tools.lock.toml" \
       --dist-dir "$ROOT/dist" --changelog "$ROOT/CHANGELOG.md" release-notes --tag "$1"
     ;;
   infra-test)
+    require_no_args infra-test "$@"
+    setup_environment
     bash "$ROOT/test/bootstrap-smoke.sh"
     bash "$ROOT/test/workflow-contract.sh"
-    python3 "$ROOT/test/editor-contract.py"
-    python3 -m unittest discover -s "$ROOT/test" -p 'test_*.py'
+    bash "$ROOT/test/docs-contract.sh"
+    pinned_python "$ROOT/test/editor-contract.py"
+    pinned_python -m unittest discover -s "$ROOT/test" -p 'test_*.py'
     bash "$ROOT/test/test-package-model.sh"
     bash "$ROOT/test/test-package-release.sh"
     ;;

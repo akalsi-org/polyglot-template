@@ -24,13 +24,27 @@ def main() -> int:
   with open(args.manifest, encoding="utf-8") as manifest_file:
     entries = json.load(manifest_file)
   if not isinstance(entries, list) or not entries or not all(
-      isinstance(entry, str) and entry and not os.path.isabs(entry)
+      isinstance(entry, str)
+      and entry
+      and (entry.startswith("npm:") or (not os.path.isabs(entry) and ".." not in entry.split("/")))
       for entry in entries
   ):
-    raise ValueError("Deno cache manifest must be a non-empty relative-path list")
+    raise ValueError("Deno cache manifest must contain npm specifiers or safe relative paths")
 
-  paths = [os.path.join(args.root, entry) for entry in entries]
-  return subprocess.run([args.deno, "cache", "--frozen", *paths], check=False).returncode
+  paths = [entry if entry.startswith("npm:") else os.path.join(args.root, entry) for entry in entries]
+  # First populate the global DENO_DIR cache without a local node_modules
+  # projection. The second, frozen pass creates the projection exclusively
+  # from that lock-keyed cache, so untracked host node_modules content cannot
+  # influence Buck's declared output.
+  if subprocess.run(
+    [args.deno, "cache", "--frozen", "--node-modules-dir=none", *paths],
+    check=False,
+  ).returncode:
+    return 1
+  return subprocess.run(
+    [args.deno, "cache", "--frozen", "--node-modules-dir=auto", *paths],
+    check=False,
+  ).returncode
 
 
 if __name__ == "__main__":

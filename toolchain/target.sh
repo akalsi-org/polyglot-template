@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+os=${POLYGLOT_TEST_OS:-$(uname -s)}
+[[ $os == Linux ]] || { printf 'error: unsupported host operating system: %s\n' "$os" >&2; exit 1; }
+
 machine=${POLYGLOT_TEST_MACHINE:-$(uname -m)}
 case "$machine" in
   x86_64|amd64) printf '%s\n' x86_64-linux-musl ;;

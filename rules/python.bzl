@@ -27,7 +27,7 @@ Toolchain artifact tracking (fixed bug, mirroring rules/go.bzl's own fix):
 py_binary/py_test/py_compileall_check/py_lock_consistency_test each write a
 loader-wrapped launcher script via ctx.actions.write() that embeds the gcc
 loader / python3 interpreter paths as literal TEXT (via _loader_exec_prefix
-+ cmd_args(..., delimiter=" ")), for a naturally readable emitted script.
+ cmd_args(..., delimiter=" ")), for a naturally readable emitted script.
 That text-only reference, plus the `written` list allow_args=True returns,
 is not reliably enough for buck2 to track/materialize the underlying
 gcc-musl/python toolchain extraction once a target is reached transitively
@@ -70,6 +70,7 @@ def _native_target() -> str:
 _NATIVE_TARGET = _native_target()
 _GCC = TOOLCHAINS["gcc-musl"][_NATIVE_TARGET]
 _PYTHON = TOOLCHAINS["python"][_NATIVE_TARGET]
+_DENO_TOOLCHAIN = "//toolchains:deno-" + _NATIVE_TARGET
 _GCC_BIN_DIR = _GCC["expected"].rsplit("/", 1)[0]
 _GCC_CC = _GCC["expected"][:-3] + "gcc"
 _LOADER_DIR = _GCC["loader"].rsplit("/", 1)[0]
@@ -534,6 +535,64 @@ _py_compileall_check_rule = rule(
   } | _TOOLCHAIN_ATTRS,
 )
 
+# --- pyright_check: runs the Deno-locked npm pyright CLI from the same
+# bootstrap-seeded cache used by the TypeScript lanes. No host pip installation
+# or network access is permitted after bootstrap.
+def _pyright_check_impl(ctx: AnalysisContext) -> list[Provider]:
+  _, roots = _merge_pyinfo(ctx.attrs.deps)
+  srcs, _ = _merge_pyinfo(ctx.attrs.deps)
+  deno_dir = ctx.attrs._deno_dir[DefaultInfo].default_outputs[0]
+  deno = ctx.attrs._deno[DefaultInfo].default_outputs[0]
+  stamp = ctx.actions.declare_output(ctx.attrs.name + ".stamp")
+  script = ctx.actions.write(
+    ctx.attrs.name + ".sh",
+    [
+      "#!/bin/sh",
+      "set -eu",
+      "DENO_DIR_SRC=$1",
+      "DENO_ROOT=$2",
+      "CONFIG=$3",
+      "STAMP=$4",
+      "DENO=\"$DENO_ROOT/deno\"",
+      "chmod +x \"$DENO\"",
+      "WORK=$(mktemp -d)",
+      "trap 'rm -rf \"$WORK\"' EXIT",
+      "mkdir -p \"$WORK/denodir\"",
+      "cp -R \"$DENO_DIR_SRC\"/. \"$WORK/denodir\"/",
+      "chmod -R u+w \"$WORK/denodir\"",
+      "export DENO_DIR=\"$WORK/denodir\"",
+      "export DENO_NO_UPDATE_CHECK=1",
+      "\"$DENO\" run --cached-only --frozen -A npm:pyright@1.1.407 --project \"$CONFIG\"",
+      "echo ok >\"$STAMP\"",
+    ],
+    is_executable = True,
+  )
+  ctx.actions.run(
+    cmd_args(["/bin/sh", script, deno_dir, deno, ctx.attrs._config, stamp.as_output()], hidden = srcs + roots),
+    category = "pyright_check",
+    identifier = ctx.attrs.name,
+  )
+  command = cmd_args(["/bin/sh", "-c", "exit 0"], hidden = [stamp])
+  return [
+    DefaultInfo(default_output = stamp),
+    ExternalRunnerTestInfo(
+      type = "pyright",
+      command = [command],
+      run_from_project_root = True,
+      labels = ["lint"],
+    ),
+  ]
+
+_pyright_check_rule = rule(
+  impl = _pyright_check_impl,
+  attrs = {
+    "deps": attrs.list(attrs.dep(providers = [PyInfo]), default = []),
+    "_config": attrs.source(default = "//:pyrightconfig.json"),
+    "_deno": attrs.dep(default = _DENO_TOOLCHAIN, providers = [DefaultInfo]),
+    "_deno_dir": attrs.dep(default = "//:deno-cache[deno-dir]", providers = [DefaultInfo]),
+  },
+)
+
 # --- py_lock_consistency_test: runs the in-graph pinned interpreter and
 # asserts sysconfig's real EXT_SUFFIX / include path still match the
 # ext_suffix / include_subpath values snapshotted into tools.lock.toml (see
@@ -622,6 +681,10 @@ def py_tests(**kwargs):
 def py_compileall_check(**kwargs):
   kwargs.setdefault("default_target_platform", _DEFAULT_PLATFORM)
   _py_compileall_check_rule(**kwargs)
+
+def pyright_check(**kwargs):
+  kwargs.setdefault("default_target_platform", _DEFAULT_PLATFORM)
+  _pyright_check_rule(**kwargs)
 
 def py_lock_consistency_test(**kwargs):
   kwargs.setdefault("default_target_platform", _DEFAULT_PLATFORM)

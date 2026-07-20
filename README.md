@@ -2,6 +2,19 @@
 
 This repository is the executable vertical slice associated with the decision package. It establishes the public command surface, native target policy, language-owned source layout, locked bootstrap model, package/runtime closure schema, and C++ build-graph generation without implementing fleet deployment.
 
+## Quick Start
+
+The supported development hosts are Linux x86-64 and Linux ARM64. Builds are CPU-native only: an x86-64 host produces `x86_64-linux-musl`, and an ARM64 host produces `aarch64-linux-musl`. Bootstrap before invoking build, test, or language commands; it is the repository operation that installs the pinned toolchain and seeds the locked dependency cache.
+
+```bash
+./repo.sh bootstrap --dry-run
+./repo.sh bootstrap
+./repo.sh doctor --deep
+./repo.sh test
+```
+
+After bootstrap, normal Buck-backed build, test, lint, package, and release commands run from the pinned local closure and do not fetch. `./repo.sh go` and `./repo.sh deno` are raw language-tool passthroughs: a command supplied to either may use the network according to that tool's own flags and cache state. Prefer the named `go-*`, `ts-*`, and `tsweb-*` commands for the repository's offline-after-bootstrap contract.
+
 Editors use two-space indentation across the repository. Go source remains `gofmt`-canonical with tabs displayed at a width of two spaces.
 
 ```bash
@@ -34,7 +47,7 @@ The committed `.vscode/` configuration mirrors those command-line roots: clangd 
 
 `tsweb/app/site` is a static React 19 application built by pinned Vite through Deno's official Vite plugin. The plugin delegates application and import-map resolution to Deno, including the scoped `#/` library root. Bootstrap resolves the frozen npm graph into the repo-local Deno cache and Deno-managed ignored `node_modules` projection; CI caches both by native target and the exact tool/lock digests; normal `tsweb-build` is cached-only; and production smoke enforces referenced-asset integrity plus a 250 KB uncompressed JavaScript budget. The output under `build/tsweb/site` needs no Deno or JavaScript runtime when served.
 
-The checked-in GitHub workflow performs a real native bootstrap on x64 and ARM64. It restores only exact target/lock/bootstrap-keyed caches, installs on a miss, proves the second bootstrap succeeds offline, runs deep capability checks, and verifies every language lane. A `packages/<name>/v<version>` tag assembles the named package independently on both native runners, executes clean-extraction consumer smoke, uploads separate target archives and checksums, and publishes one package-specific GitHub Release using its changelog section.
+The checked-in GitHub workflow performs a real native bootstrap on Linux x64 and ARM64 runners. It restores only exact target/lock/bootstrap-keyed caches, installs on a miss, proves the second bootstrap succeeds offline, runs deep capability checks, and verifies every language lane. A `packages/<name>/v<version>` tag must name an in-graph Buck package target; CI assembles it independently on both native runners, executes clean-extraction consumer smoke, uploads separate target archives and checksums, records a GitHub artifact attestation for each archive, and publishes one package-specific GitHub Release using its changelog section.
 
 `polyglot-demo` is the complete consumer proof: one target archive contains the C++ executable and musl loader, static Go executable, Python application/native extension and exactly one CPython runtime, plus the React static bundle. Its package smoke runs every executable and validates every referenced web asset from an isolated extraction without host Python, Deno, Go, compiler, or source-tree state.
 

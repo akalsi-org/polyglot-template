@@ -11,8 +11,10 @@ generated outputs by hand.
 | Deno import/type diagnostic is unresolved | `./repo.sh bootstrap`, then restart the Deno language server |
 | Package cannot be built | `./repo.sh package-list`; then `./repo.sh package-target-check <name>` |
 | Package fails outside the source tree | `./repo.sh package-smoke <archive> <name>` |
-| A normal operation appears to need a download | Stop and inspect `./repo.sh doctor --deep`; only bootstrap may fetch |
+| A named Buck-backed operation appears to need a download | Stop and inspect `./repo.sh doctor --deep`; rebuild the pinned closure with `./repo.sh bootstrap` rather than bypassing it |
 
 When an operation fails, retain its full output. If the error concerns a
 declared package with no Buck target, it is intentionally fail-closed rather
-than an invitation to run the retired raw-build assembler.
+than an invitation to use a raw-build assembler. `./repo.sh go` and
+`./repo.sh deno` pass their arguments directly to the pinned tools; use their
+native offline controls when deliberately invoking those raw interfaces.

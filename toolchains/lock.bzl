@@ -2,6 +2,22 @@
 # Do not edit by hand; run tools/gen_toolchain_lock.py to refresh.
 
 TOOLCHAINS = {
+  "clang-format": {
+    "aarch64-linux-musl": {
+      "archive": "clang_format-19.1.7-py2.py3-none-musllinux_1_2_aarch64.whl",
+      "expected": "clang_format/data/bin/clang-format",
+      "sha256": "fc011dc7bbe3ac8a32e0caa37ab8ba6c1639ceef6ecd04feea8d37360fc175e4",
+      "url": "https://files.pythonhosted.org/packages/52/04/ed8e2af6b3e29655a858b3aad145f3f0539df0dd1c77815b95f578260bd3/clang_format-19.1.7-py2.py3-none-musllinux_1_2_aarch64.whl",
+      "version": "19.1.7",
+    },
+    "x86_64-linux-musl": {
+      "archive": "clang_format-19.1.7-py2.py3-none-musllinux_1_2_x86_64.whl",
+      "expected": "clang_format/data/bin/clang-format",
+      "sha256": "d27ac1a5a8783c9271d41cd5851766ca547ea003efa4e3764f880f319b2d3ed3",
+      "url": "https://files.pythonhosted.org/packages/f5/f9/6ce7fe8ff52ded01d02a568358f2ddf993347e44202b6506b039a583b7ed/clang_format-19.1.7-py2.py3-none-musllinux_1_2_x86_64.whl",
+      "version": "19.1.7",
+    },
+  },
   "deno": {
     "aarch64-linux-musl": {
       "archive": "deno-aarch64-unknown-linux-gnu.zip",

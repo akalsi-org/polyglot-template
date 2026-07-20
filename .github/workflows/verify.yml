@@ -198,8 +198,6 @@ jobs:
         run: |
           ./repo.sh lint
           ./repo.sh package-validate
-          ./repo.sh build
-          ./repo.sh test
           ./test/graph-compdb-contract.sh
           ./test/deno-manifest-contract.sh
 

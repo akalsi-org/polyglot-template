@@ -16,7 +16,7 @@ namespace {
 
 std::uint64_t allocation_count = 0;
 
-constexpr std::uint32_t magic = 0x314B4250; // "PBK1" on little endian.
+constexpr std::uint32_t magic = 0x314B4250;  // "PBK1" on little endian.
 constexpr std::size_t header_size = 64;
 constexpr std::size_t metadata_size = 16;
 constexpr std::size_t level_size = 16;
@@ -54,7 +54,7 @@ std::uint64_t read_u64(std::span<const std::byte> in, std::size_t at) {
 }
 
 class level_view {
-public:
+ public:
   explicit level_view(std::span<const std::byte, level_size> bytes) : bytes_(bytes) {}
 
   [[nodiscard]] std::int64_t price() const {
@@ -63,12 +63,12 @@ public:
 
   [[nodiscard]] std::uint64_t quantity() const { return read_u64(bytes_, 8); }
 
-private:
+ private:
   std::span<const std::byte, level_size> bytes_;
 };
 
 class levels_view {
-public:
+ public:
   explicit levels_view(std::span<const std::byte> bytes) : bytes_(bytes) {}
 
   [[nodiscard]] std::size_t size() const { return bytes_.size() / level_size; }
@@ -78,12 +78,12 @@ public:
     return level_view{std::span<const std::byte, level_size>{bytes_.subspan(offset, level_size)}};
   }
 
-private:
+ private:
   std::span<const std::byte> bytes_;
 };
 
 class metadata_view {
-public:
+ public:
   metadata_view(std::span<const std::byte> buffer, std::size_t offset)
       : buffer_(buffer), offset_(offset) {
     if (offset > buffer.size() || metadata_size > buffer.size() - offset) {
@@ -100,13 +100,13 @@ public:
     return {reinterpret_cast<const char*>(buffer_.data() + offset), size};
   }
 
-private:
+ private:
   std::span<const std::byte> buffer_;
   std::size_t offset_;
 };
 
 class book_view {
-public:
+ public:
   explicit book_view(std::span<const std::byte> bytes) : bytes_(bytes) {
     if (bytes.size() < header_size || read_u32(bytes, 0) != magic) {
       throw std::runtime_error("invalid book buffer");
@@ -116,7 +116,9 @@ public:
   [[nodiscard]] std::uint64_t instrument_id() const { return read_u64(bytes_, 8); }
   [[nodiscard]] std::uint64_t sequence() const { return read_u64(bytes_, 16); }
 
-  [[nodiscard]] metadata_view metadata() const { return metadata_view{bytes_, read_u32(bytes_, 24)}; }
+  [[nodiscard]] metadata_view metadata() const {
+    return metadata_view{bytes_, read_u32(bytes_, 24)};
+  }
 
   [[nodiscard]] levels_view bids() const {
     return levels(read_u32(bytes_, 32), read_u32(bytes_, 36));
@@ -126,7 +128,7 @@ public:
     return levels(read_u32(bytes_, 40), read_u32(bytes_, 44));
   }
 
-private:
+ private:
   [[nodiscard]] levels_view levels(std::size_t offset, std::size_t count) const {
     if (count > (bytes_.size() / level_size)) {
       throw std::runtime_error("invalid level count");
@@ -174,7 +176,7 @@ std::vector<std::byte> make_book(std::size_t depth) {
   return out;
 }
 
-} // namespace
+}  // namespace
 
 void* operator new(std::size_t size) {
   ++allocation_count;

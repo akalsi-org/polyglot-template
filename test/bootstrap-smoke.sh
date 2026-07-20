@@ -11,6 +11,24 @@ export POLYGLOT_LOCAL_DIR="$tmp/local"
 if POLYGLOT_TEST_MACHINE=riscv64 "$ROOT/repo.sh" target >/dev/null 2>&1; then
   printf 'unsupported target unexpectedly succeeded\n' >&2; exit 1
 fi
+if POLYGLOT_TEST_OS=Darwin "$ROOT/repo.sh" target >/dev/null 2>&1; then
+  printf 'unsupported host operating system unexpectedly succeeded\n' >&2; exit 1
+fi
+
+expect_usage_failure() {
+  local status
+  set +e
+  "$@" >/dev/null 2>&1
+  status=$?
+  set -e
+  ((status == 2)) || { printf 'command did not reject invalid arity: %s\n' "$*" >&2; exit 1; }
+}
+expect_usage_failure "$ROOT/repo.sh" help extra
+expect_usage_failure "$ROOT/repo.sh" target extra
+expect_usage_failure "$ROOT/repo.sh" doctor --deep extra
+expect_usage_failure "$ROOT/repo.sh" bootstrap --offline --offline
+expect_usage_failure "$ROOT/repo.sh" compile-commands dbg extra
+expect_usage_failure "$ROOT/repo.sh" cpp-build dbg extra
 
 help_output=$("$ROOT/repo.sh" help)
 [[ $help_output == *bootstrap* ]]

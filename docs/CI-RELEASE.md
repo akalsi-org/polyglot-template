@@ -13,14 +13,16 @@ run the native x64 and ARM64 matrix. Each job:
 2. restores exact-key caches for the toolchain, Deno dependency graph, and the
    Buck2 toolchain tree (`buck-out/v2/art` + `buck-out/v2/cache`);
 3. runs live bootstrap, offline bootstrap, and `./repo.sh doctor --deep`;
-4. builds `//toolchains:native` twice to prove the second build is a zero-network
+4. enables unprivileged user and network namespaces, which the Buck Deno cache
+   action requires to enforce offline resolution;
+5. builds `//toolchains:native` twice to prove the second build is a zero-network
    cache hit, then runs `buck2 test //...` (the primary gate: every lane's
    build, test, and lint-as-test targets in one pass);
-5. runs `./repo.sh lint`, `./repo.sh package-validate`,
+6. runs `./repo.sh lint`, `./repo.sh package-validate`,
    `./repo.sh build`, and `./repo.sh test` (each buck2-backed, as a repo.sh
-   command-surface check on top of step 4's direct buck2 invocation);
-6. builds and runs both C++ profiles; and
-7. exercises the pinned Python runtime.
+   command-surface check on top of step 5's direct buck2 invocation);
+7. builds and runs both C++ profiles; and
+8. exercises the pinned Python runtime.
 
 The cache keys include the target, relevant lock files, and bootstrap or
 Buck2-graph inputs. A cache hit remains untrusted until bootstrap and doctor
@@ -43,8 +45,10 @@ dist/<name>-<version>-<target>.tar.gz
 dist/<name>-<version>-<target>.tar.gz.sha256
 ```
 
-The workflow uploads those verified files as cross-job artifacts. After both
-targets pass, the release job downloads them and runs:
+The verification matrix uploads those verified files as cross-job artifacts and
+uses GitHub's `actions/attest` action to create an artifact attestation for each
+target archive. After both targets pass, the release job downloads the archives
+and checksum sidecars, verifies each checksum, and runs:
 
 ```bash
 ./repo.sh release-notes packages/<name>/v<version>
@@ -62,9 +66,11 @@ Buck-owned catalog.
   require an annotated or signed tag, nor inspect tag-object metadata.
 - It uploads gzip tar archives and sidecar SHA-256 files. It does not publish
   Zstandard archives, static extractors, or self-extracting installers.
-- The workflow has read-only default permissions; the release job adds
-  `contents: write`. It does not currently generate provenance attestations or
-  use `id-token` or `attestations` permissions.
+- The package-release workflow grants `attestations: write`,
+  `artifact-metadata: write`, and `id-token: write` to its verification caller;
+  each tagged target archive receives a GitHub artifact attestation. The release
+  job separately adds `contents: write` to publish or reconcile release assets.
+  The release itself does not attach an SBOM or a separate provenance file.
 - `gh release create --verify-tag` confirms that the tag exists remotely. It
   does not make an existing release mutable.
 

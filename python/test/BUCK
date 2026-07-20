@@ -4,7 +4,7 @@
 # ext_suffix/include_subpath snapshot still matches the pinned interpreter's
 # own sysconfig (see rules/python.bzl's py_lock_consistency_test).
 
-load("//rules:python.bzl", "py_compileall_check", "py_extension", "py_lock_consistency_test", "py_tests")
+load("//rules:python.bzl", "py_compileall_check", "py_extension", "py_lock_consistency_test", "py_tests", "pyright_check")
 
 py_extension(
   name = "pyfast_test_extension",
@@ -47,6 +47,15 @@ py_compileall_check(
     "test_pyfast_extension.py",
     "test_stubs.py",
   ],
+  deps = [
+    "//python/lib/example:example",
+    "//python/lib/fastbytes:fastbytes",
+    "//python/app/hello:hello",
+  ],
+)
+
+pyright_check(
+  name = "pyright",
   deps = [
     "//python/lib/example:example",
     "//python/lib/fastbytes:fastbytes",

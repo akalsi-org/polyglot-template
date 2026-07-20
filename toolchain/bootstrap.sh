@@ -8,11 +8,12 @@ export POLYGLOT_LOCK_FILE
 . "$ROOT/toolchain/lock.sh"
 . "$ROOT/toolchain/wrappers.sh"
 
+(($# <= 2)) || { printf 'usage: ./repo.sh bootstrap [--offline] [--dry-run]\n' >&2; exit 2; }
 offline=0 dry_run=0
 for arg in "$@"; do
   case "$arg" in
-    --offline) offline=1 ;;
-    --dry-run) dry_run=1 ;;
+    --offline) ((offline == 0)) || { printf 'error: duplicate bootstrap option: %s\n' "$arg" >&2; exit 2; }; offline=1 ;;
+    --dry-run) ((dry_run == 0)) || { printf 'error: duplicate bootstrap option: %s\n' "$arg" >&2; exit 2; }; dry_run=1 ;;
     *) printf 'error: unknown bootstrap option: %s\n' "$arg" >&2; exit 2 ;;
   esac
 done
@@ -25,7 +26,7 @@ extract_archive() {
     *.tar.gz|*.tgz) listing=$(tar -tzf "$cache"); validate_members "$listing"; tar -xzf "$cache" -C "$destination" --no-same-owner --no-same-permissions ;;
     *.tar.xz) listing=$(tar -tJf "$cache"); validate_members "$listing"; tar -xJf "$cache" -C "$destination" --no-same-owner --no-same-permissions ;;
     *.tar.zst) listing=$(tar --zstd -tf "$cache"); validate_members "$listing"; tar --zstd -xf "$cache" -C "$destination" --no-same-owner --no-same-permissions ;;
-    *.zip) command -v unzip >/dev/null; listing=$(unzip -Z1 "$cache"); validate_members "$listing"; unzip -q "$cache" -d "$destination" ;;
+    *.zip|*.whl) command -v unzip >/dev/null; listing=$(unzip -Z1 "$cache"); validate_members "$listing"; unzip -q "$cache" -d "$destination" ;;
     *.zst)
       command -v zstd >/dev/null || { printf 'error: bootstrap requires zstd for %s\n' "$archive" >&2; return 1; }
       zstd -d -q -f -o "$destination/$expected" "$cache"
@@ -91,6 +92,18 @@ probe_go() {
   "$root/$expected" version | grep -q "go$version" || { printf 'error: Go capability probe failed\n' >&2; return 1; }
 }
 
+probe_clang_format() {
+  local root=$1 expected=$2 gcc_version loader gcc_install loader_dir clang_lib_dir
+  gcc_version=$(lock_value gcc-musl "$target" version)
+  loader=$(lock_value gcc-musl "$target" loader)
+  gcc_install="$LOCAL/toolchain/$target/gcc-musl-$gcc_version"
+  loader_dir=$(dirname -- "$gcc_install/$loader")
+  clang_lib_dir="$root/clang_format.libs"
+  "$gcc_install/$loader" --library-path "$loader_dir:$clang_lib_dir" "$root/$expected" --version >/dev/null || {
+    printf 'error: clang-format capability probe failed\n' >&2; return 1;
+  }
+}
+
 probe_executable() {
   local tool=$1 root=$2 expected=$3
   "$root/$expected" --version >/dev/null 2>&1 || { printf 'error: %s capability probe failed\n' "$tool" >&2; return 1; }
@@ -121,6 +134,7 @@ probe_artifact() {
     python:*) probe_python "$root" "$expected" ;;
     gcc-musl:*) probe_gcc "$root" "$expected" ;;
     go:*) probe_go "$root" "$expected" "$version" ;;
+    clang-format:*) probe_clang_format "$root" "$expected" ;;
     doctest:*) probe_doctest "$root" "$expected" ;;
     buck2:*) probe_buck2 "$root" "$expected" ;;
     *:executable) probe_executable "$tool" "$root" "$expected" ;;
@@ -136,21 +150,22 @@ tool_install_path() {
 }
 
 write_bootstrap_wrappers() {
-  local cxx cc python deno go buck2 loader gcc_version loader_path gcc_install
+  local cxx cc python deno go buck2 clang_format loader gcc_version loader_path gcc_install
   cxx=$(tool_install_path gcc-musl) || return 0
   cc="${cxx%g++}gcc"
   python=$(tool_install_path python) || return 0
   deno=$(tool_install_path deno) || return 0
   go=$(tool_install_path go) || return 0
   buck2=$(tool_install_path buck2) || return 0
+  clang_format=$(tool_install_path clang-format) || return 0
   gcc_version=$(lock_value gcc-musl "$target" version)
   loader=$(lock_value gcc-musl "$target" loader)
   gcc_install="$LOCAL/toolchain/$target/gcc-musl-$gcc_version"
   loader_path="$gcc_install/$loader"
-  for tool in "$cc" "$cxx" "$python" "$deno" "$go" "$buck2" "$loader_path"; do
+  for tool in "$cc" "$cxx" "$python" "$deno" "$go" "$buck2" "$clang_format" "$loader_path"; do
     [[ -x $tool ]] || return 0
   done
-  write_repo_tool_wrappers "$LOCAL" "$cc" "$cxx" "$python" "$loader_path" "$deno" "$go" "$buck2" "$gcc_install" "$target"
+  write_repo_tool_wrappers "$LOCAL" "$cc" "$cxx" "$python" "$loader_path" "$deno" "$go" "$buck2" "$clang_format" "$gcc_install" "$target"
   printf 'bootstrap: wrote self-contained tool wrappers\n'
 }
 
@@ -239,7 +254,7 @@ if ((dry_run == 0)); then
       [[ $(printf '%s\n' "$manifest_path" | sed '/^$/d' | wc -l) == 1 && -f $manifest_path ]] || {
         printf 'error: Buck did not produce exactly one Deno cache manifest\n' >&2; exit 1;
       }
-      DENO_DIR="$LOCAL/cache/deno" python3 "$ROOT/tools/deno_cache_exec.py" \
+      DENO_DIR="$LOCAL/cache/deno" "$LOCAL/bin/python3" "$ROOT/tools/deno_cache_exec.py" \
         --deno "$deno_install/$deno_expected" \
         --manifest "$manifest_path" \
         --root "$ROOT"

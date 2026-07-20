@@ -104,6 +104,7 @@ deno_cache(
     "//tsweb/test:test_srcs",
   ],
   srcs = {"tsweb/vite.config.ts": "//tsweb:vite.config.ts"},
+  entries = ["npm:pyright@1.1.407"],
   visibility = ["PUBLIC"],
 )
 
@@ -116,6 +117,12 @@ export_file(
 export_file(
   name = "deno.lock",
   src = "deno.lock",
+  visibility = ["PUBLIC"],
+)
+
+export_file(
+  name = "pyrightconfig.json",
+  src = "pyrightconfig.json",
   visibility = ["PUBLIC"],
 )
 

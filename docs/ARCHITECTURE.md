@@ -3,10 +3,12 @@
 ## Scope And Status
 
 This document describes the implemented bootstrap slice in this repository.
-It is a pinned, offline-after-bootstrap workspace for C++, Python, Go,
-TypeScript, and a React static site. Fleet, deployment, schema-generation,
-benchmark, and third-party-adapter designs in adjacent documents are proposals;
-they are not part of the current `repo.sh` interface.
+It is a Linux-only, CPU-native, offline-after-bootstrap workspace for C++,
+Python, Go, TypeScript, and a React static site. Linux x86-64 hosts build
+`x86_64-linux-musl`; Linux ARM64 hosts build `aarch64-linux-musl`. Fleet,
+deployment, schema-generation, benchmark, and third-party-adapter designs in
+adjacent documents are proposals; they are not part of the current `repo.sh`
+interface.
 
 ## Repository Shape
 
@@ -133,25 +135,25 @@ closure. `./repo.sh package-validate` validates these contracts before package
 assembly.
 
 `./repo.sh package <name> [dbg|opt]` creates a deterministic gzip tar archive
-at `dist/<name>-<version>-<target>.tar.gz`. Any package with its own
-`//packages:<name>` Buck2 target (`rules/package.bzl`'s `package()` rule -
-currently `polyglot-demo` and `polyglot-server`) is detected via `buck2
-targets` and built entirely in-graph, folding every dep's staged
-`PackageEntry` list into one deterministic tar.gz; `repo.sh` then copies
-Buck2's output archive to `dist/` under the release naming convention. Every
-other package (`gateway`, `schema-cli`: manifest-declared, no Buck2 target)
-falls through to `tools/package_release.py`, which assembles from raw
-build-directory executables. Package smoke extracts an archive into a clean
-temporary location and runs the declared consumer checks - the in-graph
-packages' own per-package checks live as `package_smoke` Buck2 targets
-alongside their `package()` target. `release-check` verifies a package name
-and tag against the root `CHANGELOG.md`; `release-notes` prints that tag's
-changelog section.
+at `dist/<name>-<version>-<target>.tar.gz`, but only when the catalog entry has
+its own `//packages:<name>` Buck2 target (`rules/package.bzl`'s `package()`
+rule - currently `polyglot-demo` and `polyglot-server`). `repo.sh` requires
+that target and builds it entirely in-graph, folding every dep's staged
+`PackageEntry` list into one deterministic tar.gz before copying Buck2's output
+under the release naming convention. Catalog-only declarations (`gateway`,
+`schema-cli`) fail closed: there is no raw-build fallback assembler. Package
+smoke extracts an archive into a clean temporary location and runs the declared
+consumer checks; the in-graph packages' own per-package checks live as
+`package_smoke` Buck2 targets alongside their `package()` target. Current Deno
+application packaging is limited to a zero-npm-dependency closure.
+`release-check` verifies a package name and tag against the root
+`CHANGELOG.md`; `release-notes` prints that tag's changelog section.
 
-The GitHub workflow runs the normal quality gates on native x64 and ARM64
-runners. A `packages/<name>/v<version>` tag additionally packages that named
-entry, runs the release check, uploads target-specific `.tar.gz` and `.sha256`
-files, and creates a GitHub Release from the root changelog section. See
+The GitHub workflow runs the normal quality gates on native Linux x64 and ARM64
+runners. A `packages/<name>/v<version>` tag must name an in-graph package; CI
+packages it, runs the release check, uploads target-specific `.tar.gz` and
+`.sha256` files, generates a GitHub artifact attestation for each archive, and
+creates a GitHub Release from the root changelog section. See
 [CI-RELEASE.md](CI-RELEASE.md) for the exact workflow contract.
 
 ## Editor And Agent Guidance
@@ -167,6 +169,8 @@ caches, build products, and releases remain ignored.
 
 This checkout does not currently provide toolchain-update commands, schema
 generation, benchmark commands, third-party dependency adapters,
-fleet management, deployment, certificate automation, Zstandard packaging, or
-attestation generation. Documents describing those capabilities retain their
-proposal or research status and must not be treated as executable contracts.
+fleet management, deployment, certificate automation, or Zstandard packaging.
+Tagged package archives do receive GitHub artifact attestations; broader SBOM
+and release-provenance policy remains incomplete. Documents describing
+unimplemented capabilities retain their proposal or research status and must
+not be treated as executable contracts.
