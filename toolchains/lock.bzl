@@ -6,7 +6,7 @@ TOOLCHAINS = {
     "aarch64-linux-musl": {
       "archive": "clang_format-19.1.7-py2.py3-none-musllinux_1_2_aarch64.whl",
       "expected": "clang_format/data/bin/clang-format",
-      "sha256": "fc011dc7bbe3ac8a32e0caa37ab8ba6c1639ceef6ecd04feea8d37360fc175e4",
+      "sha256": "ffca915c09aed9137f8c649ad7521bd5ce690c939121db1ba54af2ba63ac8374",
       "url": "https://files.pythonhosted.org/packages/52/04/ed8e2af6b3e29655a858b3aad145f3f0539df0dd1c77815b95f578260bd3/clang_format-19.1.7-py2.py3-none-musllinux_1_2_aarch64.whl",
       "version": "19.1.7",
     },
