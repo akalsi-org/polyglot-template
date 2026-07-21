@@ -1,22 +1,20 @@
 # Current Capabilities
 
-This page separates commands that work in this checkout from planned
-deployment/fleet capabilities.
+This is the compatibility and readiness contract for the executable repository
+slice. A command or guarantee is current only when this page identifies its
+verification. Design material in [DEPLOYMENT.md](DEPLOYMENT.md),
+[FLEET.md](FLEET.md), and [DESIGN-README.md](DESIGN-README.md) remains a
+proposal unless it is listed here.
 
-| Area | Available now | Primary command | Verification |
+| Area | Current, verified contract | Boundary / deferred work | Evidence |
 | --- | --- | --- | --- |
-| Bootstrap | Pinned, checksum-verified local tools on Linux x86-64 and ARM64 hosts | `./repo.sh bootstrap` | `./repo.sh doctor --deep` |
-| Build and test | C++, Python, Go, Deno, React, and package graph | `./repo.sh build`, `./repo.sh test` | `./repo.sh lint` |
-| Packages | In-graph Buck package archives and clean-extraction smoke tests | `./repo.sh package-list`, `./repo.sh package <name>` | `./repo.sh package-smoke <archive> <name>` |
-| Editor | VS Code tasks and pinned language tools | **Workspace: bootstrap pinned tools** | **Workspace: verify editor prerequisites** |
-| Release | Tag validation, archive checksums, GitHub artifact attestations, and idempotent GitHub release reconciliation | package release workflow | release workflow verification |
-| Deployment | Read-only contracts only while implementation is staged | not yet exposed | future `deploy plan/status/verify` gates |
-
-`gateway` and `schema-cli` appear in the catalog without a Buck-backed package
-target. They are declarations, not releasable artifacts: `./repo.sh package`
-and tagged release CI fail closed for them, while `./repo.sh package-target-check
-<name>` reports that distinction. Current Deno application package support is
-limited to zero-npm-dependency closures.
+| Host and targets | Linux x86-64 hosts build `x86_64-linux-musl`; Linux ARM64 hosts build `aarch64-linux-musl`. Builds are host-native. | No cross-compilation and no macOS or Windows support. | `./repo.sh target`; native x64 and ARM64 CI matrix |
+| Bootstrap and normal builds | Pinned, checksum-verified tools; named Buck-backed build, test, lint, package, and release commands are offline after bootstrap. | Raw `./repo.sh go` and `./repo.sh deno` passthroughs remain caller-controlled and can use network-capable tool operations. | `./repo.sh bootstrap --offline`; `./repo.sh doctor --deep`; CI cold-graph replay |
+| Language lanes | C++, Python, pure Go, Deno TypeScript, and React static-site build/test lanes run through the pinned closure. | Sanitizers are explicitly deferred to preserve the hermetic Linux-musl toolchain contract; a future sanitizer lane requires a separately evaluated host-debug toolchain. | `./repo.sh build`; `./repo.sh test`; `./repo.sh cpp-build dbg` |
+| Packages | Buck-owned `package()` targets produce deterministic native `.tar.gz` archives and clean-extraction smoke tests. Catalog-only declarations fail closed. | `gateway` and `schema-cli` are declarations, not releasable packages. Deno application packaging supports only zero-npm-dependency closures; npm-dependent runtime packaging is deferred. | `./repo.sh package-validate`; `./repo.sh package <name>`; `./repo.sh package-smoke <archive> <name>` |
+| Release | Package-tag CI requires annotated tags, validates each archive/checksum/SBOM/provenance sidecar, creates GitHub artifact attestations, and reconciles a GitHub Release with a deterministic release manifest. | Repository CI cannot establish a signing trust root; maintainers must sign release tags and configure the host trust policy separately. | [CI-RELEASE.md](CI-RELEASE.md); package-release workflow |
+| Deployment | A Buck-owned, read-only deployment-plan and observation-verification contract is available. | No `repo.sh deploy` interface, remote transport, host mutation, certificate automation, apply, or rollback exists. | `./repo.sh buck2 test //infra/deploy:readonly-contract` |
+| Editor | VS Code tasks use the pinned toolchain and configured language roots. | Editor integration is development support, not a cross-platform compatibility claim. | **Workspace: bootstrap pinned tools**; **Workspace: verify editor prerequisites** |
 
 ## First ten minutes
 

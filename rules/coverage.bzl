@@ -35,6 +35,8 @@ manifest file itself) is therefore also passed into the merge action's own
 `hidden` list directly.
 """
 
+load("//rules:pinned_python.bzl", "pinned_python_command_from_tools", "pinned_python_tools_from_dirs")
+
 CoverageInfo = provider(fields = [
   "kind",  # "cxx_gcov" | "go_profile" | "deno" | "python_lcov"
 
@@ -86,7 +88,7 @@ def _hidden_for(info):
 # invocation time so a new test participates by existing). `actions` is
 # either an AnalysisContext.actions or a bxl_actions().actions - both
 # expose the same write_json/declare_output/run surface used here.
-def coverage_merge_actions(actions, merge_tool, gomod, infos):
+def coverage_merge_actions(actions, merge_tool, gomod, infos, python_dir, gcc_dir):
   """infos: list of (name, CoverageInfo); returns (merged_lcov, summary)."""
   entries = []
   hidden = []
@@ -100,7 +102,10 @@ def coverage_merge_actions(actions, merge_tool, gomod, infos):
   summary = actions.declare_output("summary.txt")
   actions.run(
     cmd_args(
-      ["python3", merge_tool, manifest, merged.as_output(), summary.as_output()],
+      pinned_python_command_from_tools(
+        pinned_python_tools_from_dirs(python_dir, gcc_dir),
+        [merge_tool, manifest, merged.as_output(), summary.as_output()],
+      ),
       # go.mod is read by tools/coverage_merge.py at run time (to strip the
       # Go module import prefix off go_profile entries' file paths) via a
       # plain relative "go.mod" open() - not passed as an argv path, so it

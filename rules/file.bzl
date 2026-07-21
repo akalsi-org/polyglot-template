@@ -13,3 +13,16 @@ export_file = rule(
     "src": attrs.source(),
   },
 )
+
+
+def _export_files_impl(ctx: AnalysisContext) -> list[Provider]:
+  return [DefaultInfo(default_outputs = ctx.attrs.srcs)]
+
+
+# Export a complete source-file closure, such as a vendored dependency tree.
+export_files = rule(
+  impl = _export_files_impl,
+  attrs = {
+    "srcs": attrs.list(attrs.source()),
+  },
+)

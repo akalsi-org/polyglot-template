@@ -46,6 +46,7 @@ def main() -> None:
     "react-dom/client": "npm:react-dom@19.2.7/client",
     "vite": "npm:vite@8.1.4",
     "pyright": "npm:pyright@1.1.407",
+    "nanoid": "npm:nanoid@3.3.15",
   }
   assert deno_config["scopes"] == {
     "./ts/": {"@/": "./ts/lib/"},

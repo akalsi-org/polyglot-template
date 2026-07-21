@@ -53,13 +53,14 @@ to any declared input invalidates only the actions that read it - GOCACHE
 sharing only matters on the remaining case, an actual buck2 cache miss,
 where it turns a cold Go recompile into a warm one.
 
-go.mod lives at the repo root, outside go/'s own package; it is tracked here
-via the root //BUCK's `export_file(name = "go.mod")` (see _TOOLCHAIN_ATTRS'
-`_gomod`) rather than a plain `attrs.source("//go.mod")` string, since
-buck2 requires a target - not just a path - to reference a source file
-across a package boundary. Threading it into every action's hidden inputs
-alongside the go/ sources means a go.mod-only edit invalidates buck2's
-action cache for these targets exactly as it should.
+go.mod, go.sum, and the committed vendor/ tree live at the repo root, outside
+go/'s own package. They are tracked through root //BUCK export targets (see
+_TOOLCHAIN_ATTRS) rather than path strings, since buck2 requires targets to
+reference sources across a package boundary. Threading all three into every
+action's hidden inputs means dependency manifest or vendored-source edits
+invalidate the actions that compile or test them. The Go commands use
+-mod=vendor, so normal actions neither resolve modules from GOPROXY nor mutate
+the module manifests.
 
 Toolchain artifact tracking (fixed bug): every script below needs the path
 to the extracted go toolchain (tools.goroot), embedded as literal text so
@@ -145,8 +146,14 @@ def _go_srcs(ctx: AnalysisContext, own_srcs: list, deps: list):
 _TOOLCHAIN_ATTRS = {
   "_go": attrs.dep(default = "//toolchains:go-" + _NATIVE_TARGET, providers = [DefaultInfo]),
   "_gomod": attrs.source(default = "//:go.mod"),
+  "_gosum": attrs.source(default = "//:go.sum"),
+  "_vendor": attrs.dep(default = "//:go_vendor", providers = [DefaultInfo]),
   "_target_arch": target_arch_attr(),
 }
+
+
+def _go_inputs(ctx, srcs):
+  return srcs + [ctx.attrs._gomod, ctx.attrs._gosum] + ctx.attrs._vendor[DefaultInfo].default_outputs
 
 def _toolchain_tools(ctx):
   fail_if_cross_arch(ctx, _NATIVE_TARGET)
@@ -217,7 +224,10 @@ def _write_go_script(ctx, name, tools, tail_lines):
     # too, for the same shared-/tmp reason as SCRATCH_BASE above.
     "export TMPDIR=\"$SCRATCH/tmp\"",
     "mkdir -p \"$GOCACHE\" \"$GOPATH\" \"$GOMODCACHE\" \"$TMPDIR\"",
-    "export CGO_ENABLED=0 GOTOOLCHAIN=local GOEXPERIMENT=jsonv2 GOFLAGS=-mod=mod GOPROXY=off GOSUMDB=off",
+    # -mod=vendor makes the committed dependency closure authoritative. Combined
+    # with GOPROXY=off/GOSUMDB=off, Go cannot resolve or verify through a network
+    # service, and it cannot update go.mod or go.sum during an action.
+    "export CGO_ENABLED=0 GOTOOLCHAIN=local GOEXPERIMENT=jsonv2 GOFLAGS=-mod=vendor GOPROXY=off GOSUMDB=off",
     "export PATH=\"$GOROOT/bin:$PATH\"",
   ] + tail_lines
   return ctx.actions.write(name + ".sh", lines, is_executable = True, allow_args = True)
@@ -253,7 +263,7 @@ go_library = rule(
 def _go_binary_impl(ctx: AnalysisContext) -> list[Provider]:
   tools = _toolchain_tools(ctx)
   own_srcs, srcs_tset = _go_srcs(ctx, ctx.attrs.srcs, ctx.attrs.deps)
-  all_srcs = own_srcs + [ctx.attrs._gomod]
+  all_srcs = _go_inputs(ctx, own_srcs)
   binary = ctx.actions.declare_output(ctx.attrs.name)
   tail = [
     "PKG=" + ctx.attrs.package,
@@ -340,7 +350,7 @@ def _go_test_coverage_action(ctx, tools, all_srcs):
 def _go_test_impl(ctx: AnalysisContext) -> list[Provider]:
   tools = _toolchain_tools(ctx)
   own_srcs, srcs_tset = _go_srcs(ctx, ctx.attrs.srcs, ctx.attrs.deps)
-  all_srcs = own_srcs + [ctx.attrs._gomod]
+  all_srcs = _go_inputs(ctx, own_srcs)
   tail = [
     # No `exec` - see go_binary's tail comment (EXIT trap must fire).
     "\"$GOROOT/bin/go\" test -trimpath " + " ".join(ctx.attrs.packages),
@@ -417,7 +427,7 @@ def _go_lint_impl(ctx: AnalysisContext) -> list[Provider]:
   # flattened list from _go_srcs is needed here - the tset it also returns
   # is discarded.
   own_srcs, _tset = _go_srcs(ctx, ctx.attrs.srcs, ctx.attrs.deps)
-  all_srcs = own_srcs + [ctx.attrs._gomod]
+  all_srcs = _go_inputs(ctx, own_srcs)
   if ctx.attrs.mode == "fmt":
     # own_srcs (not ctx.attrs.srcs alone): after the per-component split,
     # go/BUCK's own package has no .go files directly in it any more - every

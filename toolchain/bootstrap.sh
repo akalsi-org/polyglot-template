@@ -8,12 +8,13 @@ export POLYGLOT_LOCK_FILE
 . "$ROOT/toolchain/lock.sh"
 . "$ROOT/toolchain/wrappers.sh"
 
-(($# <= 2)) || { printf 'usage: ./repo.sh bootstrap [--offline] [--dry-run]\n' >&2; exit 2; }
-offline=0 dry_run=0
+(($# <= 3)) || { printf 'usage: ./repo.sh bootstrap [--offline] [--dry-run] [--repair]\n' >&2; exit 2; }
+offline=0 dry_run=0 repair=0
 for arg in "$@"; do
   case "$arg" in
     --offline) ((offline == 0)) || { printf 'error: duplicate bootstrap option: %s\n' "$arg" >&2; exit 2; }; offline=1 ;;
     --dry-run) ((dry_run == 0)) || { printf 'error: duplicate bootstrap option: %s\n' "$arg" >&2; exit 2; }; dry_run=1 ;;
+    --repair) ((repair == 0)) || { printf 'error: duplicate bootstrap option: %s\n' "$arg" >&2; exit 2; }; repair=1 ;;
     *) printf 'error: unknown bootstrap option: %s\n' "$arg" >&2; exit 2 ;;
   esac
 done
@@ -184,7 +185,7 @@ install_one() {
   install="$LOCAL/toolchain/$target/$tool-$version"
   stamp="$install/.installed-$sha"
   cache="$LOCAL/downloads/$sha-$archive"
-  if [[ -f $stamp && (($kind == header && -f $install/$expected) || ($kind == executable && -x $install/$expected)) ]]; then
+  if ((repair == 0)) && [[ -f $stamp && (($kind == header && -f $install/$expected) || ($kind == executable && -x $install/$expected)) ]]; then
     [[ $tool != go ]] || chmod -R u+w -- "$install"
     printf 'bootstrap: %s %s already installed\n' "$tool" "$version"; return
   fi
@@ -201,7 +202,12 @@ install_one() {
     "$ROOT/toolchain/fetch_binary.sh" "$url" "$sha" "$cache"
   else
     local actual; actual=$(sha256sum "$cache" | awk '{print $1}')
-    [[ $actual == "$sha" ]] || { printf 'error: cached checksum mismatch for %s\n' "$tool" >&2; return 1; }
+    if [[ $actual != "$sha" ]]; then
+      ((offline == 0)) || { printf 'error: cached checksum mismatch for %s\n' "$tool" >&2; return 1; }
+      printf 'bootstrap: discarding checksum-mismatched cache for %s\n' "$tool" >&2
+      rm -f -- "$cache"
+      "$ROOT/toolchain/fetch_binary.sh" "$url" "$sha" "$cache"
+    fi
   fi
   tmp="$LOCAL/toolchain/$target/.${tool}-${version}.tmp.$$"
   rm -rf -- "$tmp"; mkdir -p "$tmp"

@@ -3,6 +3,7 @@ set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 tool="$root/tools/package_release.py"
+evidence_tool="$root/tools/release_evidence.py"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
@@ -20,6 +21,26 @@ common=(--root "$root" --catalog "$root/packages/catalog.bzl" --tools-lock "$tmp
 
 archive=$(python3 "$tool" "${common[@]}" package --package gateway --target x86_64-linux-musl --profile opt --build-dir "$build")
 cp "$archive" "$tmp/first-package.tar.gz"
+python3 "$evidence_tool" package --archive "$archive" --catalog "$root/packages/catalog.bzl" \
+  --tools-lock "$tmp/resolved-tools.lock.toml" --package gateway --target x86_64-linux-musl --profile opt
+python3 "$evidence_tool" release-manifest --tag packages/gateway/v1.4.0 \
+  --output "$tmp/release-manifest.json" "$archive"
+grep -Fq '"schema": "polyglot.release-manifest/v1"' "$tmp/release-manifest.json"
+python3 - "$archive.provenance.json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+evidence = json.load(open(path, encoding="utf-8"))
+evidence["subject"]["sha256"] = "0" * 64
+with open(path, "w", encoding="utf-8") as stream:
+  json.dump(evidence, stream, sort_keys=True)
+PY
+if python3 "$evidence_tool" release-manifest --tag packages/gateway/v1.4.0 \
+  --output "$tmp/tampered-release-manifest.json" "$archive" >/dev/null 2>&1; then
+  echo "release evidence unexpectedly accepted a tampered provenance subject" >&2
+  exit 1
+fi
 python3 "$tool" "${common[@]}" smoke --archive "$archive" --package gateway --target x86_64-linux-musl --execute
 python3 "$tool" "${common[@]}" release-check --package gateway --target x86_64-linux-musl --tag packages/gateway/v1.4.0
 python3 "$tool" "${common[@]}" release-notes --tag packages/gateway/v1.4.0 >"$tmp/notes"

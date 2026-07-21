@@ -39,7 +39,11 @@ def _impl(ctx: bxl.Context):
     infos.append((node.label.name, info))
   merge_tool = _first_default_output(ctx, "//:coverage_merge.py")
   gomod = _first_default_output(ctx, "//:go.mod")
-  merged, summary = coverage_merge_actions(ctx.bxl_actions().actions, merge_tool, gomod, infos)
+  # coverage_merge.py is a Python action too: resolve both pinned toolchain
+  # roots so the shared helper can invoke CPython through the musl loader.
+  python_dir = _first_default_output(ctx, "//toolchains:python-x86_64-linux-musl" if host_info().arch.is_x86_64 else "//toolchains:python-aarch64-linux-musl")
+  gcc_dir = _first_default_output(ctx, "//toolchains:gcc-musl-x86_64-linux-musl" if host_info().arch.is_x86_64 else "//toolchains:gcc-musl-aarch64-linux-musl")
+  merged, summary = coverage_merge_actions(ctx.bxl_actions().actions, merge_tool, gomod, infos, python_dir, gcc_dir)
   ctx.output.print(ctx.output.ensure(merged))
   ctx.output.print(ctx.output.ensure(summary))
 

@@ -34,7 +34,7 @@ The repository owns tool provenance, lifecycle policy, packaging, benchmarks, an
 
 1. `repo.sh` is the stable human and CI interface.
 2. All tools are pinned in a committed lock and installed transactionally under ignored `.local/`.
-3. Normal bootstrap consumes exact committed pins; toolchain-update commands are not implemented in this checkout.
+3. Normal bootstrap consumes exact committed pins; reviewed lock changes use the manual `toolchain-lock`/`toolchain-qualify` lifecycle rather than an automatic mutable-artifact updater.
 4. Buck2 is the sole scheduler: one in-graph build/test/cache pass over every first-party rule (`rules/cxx.bzl`, `rules/go.bzl`, `rules/python.bzl`, `rules/deno.bzl`, `rules/package.bzl`), with in-graph toolchains (`toolchains/lock.bzl`, generated from `tools.lock.toml`) rather than a coarse task runner shelling out to per-language build tools.
 5. A BXL compilation-database query (`bxl/compdb.bxl`) over the Buck2-built cpp/python actions materializes one complete root `compile_commands.json` on demand (`./repo.sh compile-commands`), rather than each consumer emitting its own fragment for a separate merge step.
 6. The root compilation database currently merges C++ and Python native-extension fragments; third-party and generated-source import is proposed.

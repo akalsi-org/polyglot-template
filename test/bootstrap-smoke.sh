@@ -27,11 +27,18 @@ expect_usage_failure "$ROOT/repo.sh" help extra
 expect_usage_failure "$ROOT/repo.sh" target extra
 expect_usage_failure "$ROOT/repo.sh" doctor --deep extra
 expect_usage_failure "$ROOT/repo.sh" bootstrap --offline --offline
+expect_usage_failure "$ROOT/repo.sh" bootstrap --repair --repair
+expect_usage_failure "$ROOT/repo.sh" bootstrap --offline --dry-run --repair extra
+expect_usage_failure "$ROOT/repo.sh" toolchain-lock unexpected
+expect_usage_failure "$ROOT/repo.sh" toolchain-qualify unexpected
 expect_usage_failure "$ROOT/repo.sh" compile-commands dbg extra
 expect_usage_failure "$ROOT/repo.sh" cpp-build dbg extra
 
 help_output=$("$ROOT/repo.sh" help)
 [[ $help_output == *bootstrap* ]]
+[[ $help_output == *toolchain-lock* ]]
+[[ $help_output == *toolchain-qualify* ]]
+"$ROOT/repo.sh" toolchain-lock --check
 grep -Fq 'chmod -R u+w -- "$install"' "$ROOT/toolchain/bootstrap.sh"
 grep -Fq 'chmod -R u+w -- "$tmp"' "$ROOT/toolchain/bootstrap.sh"
 target=$("$ROOT/repo.sh" target)
@@ -77,7 +84,7 @@ schema = 1
 tool = "fixture"
 target = "$target"
 version = "1.0"
-url = "https://invalid.example/fixture.tar.gz"
+url = "file://$tmp/fixture.tar.gz"
 sha256 = "$sha"
 archive = "fixture.tar.gz"
 expected = "bin/fixture"
@@ -87,6 +94,18 @@ first=$("$ROOT/repo.sh" bootstrap --offline)
 [[ $first == *'installed fixture 1.0'* ]]
 second=$("$ROOT/repo.sh" bootstrap --offline)
 [[ $second == *'already installed'* ]]
+printf '#!/usr/bin/env sh\nprintf "corrupt fixture\\n"\n' >"$POLYGLOT_LOCAL_DIR/toolchain/$target/fixture-1.0/bin/fixture"
+chmod +x "$POLYGLOT_LOCAL_DIR/toolchain/$target/fixture-1.0/bin/fixture"
+repair=$("$ROOT/repo.sh" bootstrap --offline --repair)
+[[ $repair == *'installed fixture 1.0'* ]]
+[[ $("$POLYGLOT_LOCAL_DIR/toolchain/$target/fixture-1.0/bin/fixture") == 'fixture 1.0' ]]
+printf 'corrupt cache\n' >"$POLYGLOT_LOCAL_DIR/downloads/$sha-fixture.tar.gz"
+if "$ROOT/repo.sh" bootstrap --offline --repair >/dev/null 2>&1; then
+  printf 'offline bootstrap unexpectedly accepted a corrupt cache\n' >&2; exit 1
+fi
+recovered=$("$ROOT/repo.sh" bootstrap --repair)
+[[ $recovered == *'installed fixture 1.0'* ]]
+[[ $(sha256sum "$POLYGLOT_LOCAL_DIR/downloads/$sha-fixture.tar.gz" | awk '{print $1}') == "$sha" ]]
 "$ROOT/repo.sh" doctor --deep | grep -q 'ok: fixture 1.0'
 
 # Header-only artifacts are pinned and installed without pretending to be

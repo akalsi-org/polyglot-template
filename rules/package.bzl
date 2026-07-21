@@ -49,6 +49,7 @@ every toolchain directory a resolved-need artifact was `.project()`ed from.
 load("//config:defs.bzl", "fail_if_cross_arch", "target_arch_attr")
 load("//rules:pkg.bzl", "PackageEntry", "PackageInfo", "flatten_merged_package_entries", "flatten_merged_package_needs")
 load("//rules:package_smoke.bzl", "check_smoke_program", "shell_quote")
+load("//rules:pinned_python.bzl", "PINNED_PYTHON_ATTRS", "pinned_python_command", "pinned_python_script_args")
 load("//toolchains:lock.bzl", "TOOLCHAINS")
 
 def _native_target() -> str:
@@ -162,7 +163,7 @@ def _resolve_needs(ctx, needs):
 # _py_extension_impl docstrings), and a plain "tree" entry's own artifact
 # may itself be either a file or a directory (only known at stage-script RUN
 # time, per _stage_lines' `-d` branch below).
-_LEAF_KINDS = ("loader-bin", "static-bin", "loader-lib", "py-app-launcher", "deno-app-launcher", "synthetic-marker")
+_LEAF_KINDS = ("loader-bin", "static-bin", "loader-lib", "py-app-launcher", "deno-app-launcher", "deno-npm-closure", "deno-cache-closure", "synthetic-marker")
 
 # Kinds whose staged artifact is a real executable that must land 0755 - a
 # strict subset of _LEAF_KINDS (py-app-launcher/synthetic-marker entries
@@ -252,7 +253,7 @@ def _synthesize_launcher_markers(entries):
 def _dirname(path):
   return path.rsplit("/", 1)[0] if "/" in path else ""
 
-def _stage_lines(ctx, entries, needs):
+def _stage_lines(ctx, entries, needs, deno_node_modules, deno_dir):
   lines = []
   hidden = []
 
@@ -366,36 +367,64 @@ def _stage_lines(ctx, entries, needs):
           "chmod 0755 \"$OUT/bin/{py}\"".format(py = py),
         ]
 
+  # A deno_app emits a marker rather than directly depending on deno-cache:
+  # deno-cache itself walks every deno_app's sources, so a direct edge would
+  # form a cycle. package() resolves the marker here, where the graph is
+  # package -> deno-cache -> deno_app, and stages the cache action's locked,
+  # relocatable node_modules projection at the marker's declared destination.
+  # Its artifact is hidden explicitly, so the package action owns and tracks
+  # the npm closure instead of recovering it from host DENO_DIR at runtime.
+  has_deno_npm_closure = False
+  for entry in entries:
+    if entry.kind == "deno-npm-closure":
+      if entry.dest != "ts/node_modules":
+        fail("package({}): deno npm closure marker from {} must stage at ts/node_modules, got {!r}".format(ctx.attrs.name, entry.owner, entry.dest))
+      has_deno_npm_closure = True
+  if has_deno_npm_closure:
+    lines += [
+      cmd_args("DENO_NODE_MODULES=\"$(pwd)/", deno_node_modules, "\"", delimiter = ""),
+      "test -d \"$DENO_NODE_MODULES/.deno\"",
+      "mkdir -p \"$OUT/ts/node_modules\"",
+      "cp -R \"$DENO_NODE_MODULES\"/. \"$OUT/ts/node_modules\"/",
+      cmd_args("DENO_CACHE=\"$(pwd)/", deno_dir, "\"", delimiter = ""),
+      "test -d \"$DENO_CACHE\"",
+      "mkdir -p \"$OUT/runtime/deno/cache\"",
+      "cp -R \"$DENO_CACHE\"/. \"$OUT/runtime/deno/cache\"/",
+    ]
+    hidden += [deno_node_modules, deno_dir]
+
   # "deno-app-launcher": a small generated per-package deno.json (staged at
   # ts/deno.json - written ONCE, before any launcher below references it)
   # that maps this project's "@/" import scope onto the staged "lib/" root,
   # mirroring the repo's own root deno.json scope (`"./ts/": {"@/":
   # "./ts/lib/"}`) but rooted at ts/ itself since that's where deno_app's
   # own staged closure lands (a root-level sibling of bin/lib/libexec/
-  # runtime/share). Deliberately NOT the repo's real deno.json: that file
-  # declares npm: imports (react/vite/...) this packaging path refuses to
-  # ship - see the npm-closure guard below - and has no reason to carry
-  # deno.lock/fmt/lint/test config into a packaged app at all.
-  #
-  # npm-closure guard: package() only supports zero-npm-dep deno apps today
-  # - rather than silently shipping the whole npm store (deno vendors real
-  # package copies, not symlinks - see rules/deno.bzl's module docstring),
-  # this fails the BUILD loudly the moment any deno-app-launcher entry's
-  # own staged ts/ closure contains an "npm:" specifier anywhere, before
-  # any launcher is ever run.
+  # runtime/share). Its imports retain the root configuration's workspace
+  # dependencies: --frozen checks that exact workspace set against deno.lock,
+  # including dependencies not used by this particular app. nodeModulesDir:
+  # "manual" makes Deno consume the tracked ts/node_modules closure staged
+  # above, never a host-global DENO_DIR.
   has_deno_app = False
   for entry in entries:
     if entry.kind == "deno-app-launcher":
       has_deno_app = True
       break
   if has_deno_app:
+    if not has_deno_npm_closure:
+      fail("package({}): deno app launcher is missing its deno npm closure marker".format(ctx.attrs.name))
     lines += [
-      "if grep -rl 'npm:' \"$OUT/ts\" >/dev/null 2>&1; then",
-      "  echo \"package({}): npm-dependent deno apps not yet supported by packaging (found npm: specifier under ts)\" >&2".format(ctx.attrs.name),
-      "  exit 1",
-      "fi",
       "cat > \"$OUT/ts/deno.json\" <<'PKGEOF'",
       "{",
+      "  \"nodeModulesDir\": \"manual\",",
+      "  \"imports\": {",
+      "    \"@deno/vite-plugin\": \"npm:@deno/vite-plugin@2.0.2\",",
+      "    \"@vitejs/plugin-react\": \"npm:@vitejs/plugin-react@6.0.3\",",
+      "    \"react\": \"npm:react@19.2.7\",",
+      "    \"react-dom/client\": \"npm:react-dom@19.2.7/client\",",
+      "    \"vite\": \"npm:vite@8.1.4\",",
+      "    \"pyright\": \"npm:pyright@1.1.407\",",
+      "    \"nanoid\": \"npm:nanoid@3.3.15\"",
+      "  },",
       "  \"scopes\": {",
       "    \"./\": { \"@/\": \"./lib/\" }",
       "  }",
@@ -415,12 +444,14 @@ def _stage_lines(ctx, entries, needs):
       "#!/bin/sh",
       "set -eu",
       "ROOT=$(CDPATH= cd -- \"$(dirname -- \"$0\")/..\" && pwd -P)",
-      # --no-remote: fail-closed on any non-local import (the key offline
-      # guarantee - deno never even attempts a network fetch, cached or
-      # not). --allow-net: this app calls Deno.serve(). --config: the
-      # generated ts/deno.json above, so "@/" resolves inside the staged
-      # layout exactly like it does in the repo's own deno.json.
-      "exec \"$ROOT/runtime/deno/deno\" run --no-remote --allow-net --config \"$ROOT/ts/deno.json\" \"$ROOT/{main_dest}\" \"$@\"".format(main_dest = main_dest),
+      # --cached-only and --no-remote make a missing package closure fail
+      # rather than fetch; --frozen validates the packaged ts/deno.lock. A
+      # package-local DENO_DIR prevents a developer's host cache from making
+      # a clean-extraction smoke pass accidentally. --allow-net remains the
+      # explicit runtime permission required by this server app.
+      "export DENO_DIR=\"$ROOT/runtime/deno/cache\"",
+      "mkdir -p \"$DENO_DIR\"",
+      "exec \"$ROOT/runtime/deno/deno\" run --cached-only --frozen --no-remote --allow-net --config \"$ROOT/ts/deno.json\" \"$ROOT/{main_dest}\" \"$@\"".format(main_dest = main_dest),
       "PKGEOF",
       "chmod 0755 \"$OUT/bin/{name}\"".format(name = name),
     ]
@@ -466,7 +497,9 @@ def _package_impl(ctx: AnalysisContext) -> list[Provider]:
   # numbering) is stable regardless of the tset traversal order above.
   all_entries = [pair[1] for pair in sorted([(e.dest, e) for e in all_entries])]
 
-  stage_lines, stage_hidden = _stage_lines(ctx, all_entries, needs)
+  deno_node_modules = ctx.attrs._deno_node_modules[DefaultInfo].default_outputs[0]
+  deno_dir = ctx.attrs._deno_dir[DefaultInfo].default_outputs[0]
+  stage_lines, stage_hidden = _stage_lines(ctx, all_entries, needs, deno_node_modules, deno_dir)
 
   stage = ctx.actions.declare_output(ctx.attrs.name + "-stage", dir = True)
   metadata_script = ctx.actions.write(ctx.attrs.name + "-metadata.py", _METADATA_PY)
@@ -484,13 +517,17 @@ def _package_impl(ctx: AnalysisContext) -> list[Provider]:
     cmd_args("PACKAGE_MODEL=\"$(pwd)/", ctx.attrs._package_model, "\"", delimiter = ""),
     cmd_args("CATALOG=\"$(pwd)/", ctx.attrs.catalog, "\"", delimiter = ""),
     cmd_args("TOOLS_LOCK=\"$(pwd)/", ctx.attrs.tools_lock, "\"", delimiter = ""),
-    "python3 -B \"$METADATA_SCRIPT\" \"$PACKAGE_MODEL\" \"$CATALOG\" \"$TOOLS_LOCK\" %s %s %s %s \"$OUT\"" % (ctx.attrs.name, _NATIVE_TARGET, ctx.attrs.profile, ctx.attrs.version),
+    "LOADER=\"$(pwd)/$2\"",
+    "LOADER_DIR=\"$(pwd)/$3\"",
+    "PYTHON_LIB=\"$(pwd)/$4\"",
+    "PYTHON=\"$(pwd)/$5\"",
+    "\"$LOADER\" --library-path \"$LOADER_DIR:$PYTHON_LIB\" \"$PYTHON\" -B \"$METADATA_SCRIPT\" \"$PACKAGE_MODEL\" \"$CATALOG\" \"$TOOLS_LOCK\" %s %s %s %s \"$OUT\"" % (ctx.attrs.name, _NATIVE_TARGET, ctx.attrs.profile, ctx.attrs.version),
   ]
   metadata_inputs = [ctx.attrs._package_model, ctx.attrs.catalog, ctx.attrs.tools_lock]
   stage_inputs = stage_hidden + [metadata_script] + metadata_inputs
   stage_script, stage_written = ctx.actions.write(ctx.attrs.name + "-stage.sh", lines, is_executable = True, allow_args = True)
   ctx.actions.run(
-    cmd_args(["/bin/sh", stage_script, stage.as_output()], hidden = stage_inputs + stage_written),
+    cmd_args(["/bin/sh", stage_script, stage.as_output(), pinned_python_script_args(ctx)], hidden = stage_inputs + stage_written),
     category = "package_stage",
     identifier = ctx.attrs.name,
   )
@@ -498,7 +535,7 @@ def _package_impl(ctx: AnalysisContext) -> list[Provider]:
   archive = ctx.actions.declare_output(ctx.attrs.name + ".tar.gz")
   archive_script = ctx.actions.write(ctx.attrs.name + "-archive.py", _ARCHIVE_PY)
   ctx.actions.run(
-    cmd_args(["python3", archive_script, stage, archive.as_output()]),
+    pinned_python_command(ctx, [archive_script, stage, archive.as_output()]),
     category = "package_archive",
     identifier = ctx.attrs.name,
   )
@@ -620,11 +657,13 @@ _package_rule = rule(
     "tools_lock": attrs.source(default = "//:tools.lock.toml"),
     "version": attrs.string(),
     "_deno": attrs.dep(default = "//toolchains:deno-" + _NATIVE_TARGET, providers = [DefaultInfo]),
+    "_deno_dir": attrs.dep(default = "//:deno-cache[deno-dir]", providers = [DefaultInfo]),
+    "_deno_node_modules": attrs.dep(default = "//:deno-cache[node-modules]", providers = [DefaultInfo]),
     "_gcc": attrs.dep(default = "//toolchains:gcc-musl-" + _NATIVE_TARGET, providers = [DefaultInfo]),
     "_package_model": attrs.source(default = "//:package_model.py"),
     "_python_runtime": attrs.dep(default = "//toolchains:python-" + _NATIVE_TARGET, providers = [DefaultInfo]),
     "_target_arch": target_arch_attr(),
-  },
+  } | PINNED_PYTHON_ATTRS,
 )
 
 def package(**kwargs):
@@ -682,13 +721,17 @@ def _package_smoke_impl(ctx: AnalysisContext) -> list[Provider]:
     # One smoke run per staged site: vite_build stages each site at its
     # own web/<site>/ subdirectory, so iterate rather than assuming a
     # single site owns the web root outright.
+    lines.append("LOADER=\"$(pwd)/$1\"")
+    lines.append("LOADER_DIR=\"$(pwd)/$2\"")
+    lines.append("PYTHON_LIB=\"$(pwd)/$3\"")
+    lines.append("PYTHON=\"$(pwd)/$4\"")
     lines.append("for _site in \"$WORK\"/web/*/; do")
     lines.append("  [ -d \"$_site\" ] || continue")
-    lines.append("  python3 \"$SMOKE_SCRIPT\" --root \"$_site\"")
+    lines.append("  \"$LOADER\" --library-path \"$LOADER_DIR:$PYTHON_LIB\" \"$PYTHON\" \"$SMOKE_SCRIPT\" --root \"$_site\"")
     lines.append("done")
 
   script, written = ctx.actions.write(ctx.attrs.name + ".sh", lines, is_executable = True, allow_args = True)
-  command = cmd_args(script, hidden = hidden + written)
+  command = cmd_args([script, pinned_python_script_args(ctx)], hidden = hidden + written)
   return [
     DefaultInfo(default_output = script, other_outputs = written),
     RunInfo(args = command),
@@ -706,7 +749,7 @@ _package_smoke_rule = rule(
     "commands": attrs.dict(attrs.string(), attrs.list(attrs.string()), default = {}),
     "package": attrs.dep(providers = [DefaultInfo]),
     "smoke_script": attrs.option(attrs.source(), default = None),
-  },
+  } | PINNED_PYTHON_ATTRS,
 )
 
 def package_smoke(**kwargs):
@@ -723,10 +766,14 @@ def _package_manifest_test_impl(ctx: AnalysisContext) -> list[Provider]:
     cmd_args("PACKAGE_MODEL=\"$(pwd)/", ctx.attrs.package_model, "\"", delimiter = ""),
     cmd_args("CATALOG=\"$(pwd)/", ctx.attrs.catalog, "\"", delimiter = ""),
     cmd_args("TOOLS_LOCK=\"$(pwd)/", ctx.attrs.tools_lock, "\"", delimiter = ""),
-    "exec python3 -B \"$PACKAGE_MODEL\" --catalog \"$CATALOG\" --tools-lock \"$TOOLS_LOCK\" validate",
+    "LOADER=\"$(pwd)/$1\"",
+    "LOADER_DIR=\"$(pwd)/$2\"",
+    "PYTHON_LIB=\"$(pwd)/$3\"",
+    "PYTHON=\"$(pwd)/$4\"",
+    "exec \"$LOADER\" --library-path \"$LOADER_DIR:$PYTHON_LIB\" \"$PYTHON\" -B \"$PACKAGE_MODEL\" --catalog \"$CATALOG\" --tools-lock \"$TOOLS_LOCK\" validate",
   ]
   script, written = ctx.actions.write(ctx.attrs.name + ".sh", lines, is_executable = True, allow_args = True)
-  command = cmd_args(script, hidden = [ctx.attrs.package_model, ctx.attrs.catalog, ctx.attrs.tools_lock] + written)
+  command = cmd_args([script, pinned_python_script_args(ctx)], hidden = [ctx.attrs.package_model, ctx.attrs.catalog, ctx.attrs.tools_lock] + written)
   return [
     DefaultInfo(default_output = script, other_outputs = written),
     RunInfo(args = command),
@@ -743,7 +790,7 @@ _package_manifest_test_rule = rule(
     "catalog": attrs.source(default = "//packages:catalog.bzl"),
     "package_model": attrs.source(default = "//:package_model.py"),
     "tools_lock": attrs.source(),
-  },
+  } | PINNED_PYTHON_ATTRS,
 )
 
 def package_manifest_test(**kwargs):

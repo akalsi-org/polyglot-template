@@ -54,6 +54,7 @@ load("//config:flags.bzl", "coverage_enabled_flag")
 load("//rules:coverage.bzl", "CoverageInfo")
 load("//rules:deno_sources.bzl", "DenoAppInfo", "DenoSourcesInfo", "DenoSourceSet", "deno_sources_children", "flatten_deno_sources", "merge_direct_deno_sources", "own_deno_sources", "staged_path")
 load("//rules:pkg.bzl", "PACKAGE_LABELS_ATTR", "PackageEntry", "check_pkg_name", "package_info")
+load("//rules:pinned_python.bzl", "PINNED_PYTHON_ATTRS", "pinned_python_command", "pinned_python_script_args")
 
 def _native_target() -> str:
   # Mirrors rules/{cxx,go,python}.bzl's own _native_target(): this repo only
@@ -145,12 +146,16 @@ def _deno_app_impl(ctx: AnalysisContext) -> list[Provider]:
   # ts/lib/greeting/greeting.ts) - the package root mirrors the repo's own
   # top-level layout, so a deno_app's ts/ closure lands as a root-level
   # sibling of bin/lib/libexec/runtime/share, not nested under an "app/"
-  # prefix - plus a "deno-app-launcher" marker entry (no artifact of its
-  # own) at bin/<pkg_name> whose `meta` records this app's own entrypoint
-  # dest so rules/package.bzl's kind handler can pair the launcher back to
-  # the right file even though several of this app's own staged entries
-  # share the same owner. needs "deno-runtime" so package() also stages the
-  # pinned deno binary.
+  # prefix - plus the lock-keyed node_modules projection produced by the
+  # shared deno_cache action. It is an ordinary tracked PackageEntry, not a
+  # launcher side effect: Deno's relative symlinks remain valid after staging
+  # at ts/node_modules, and package() tracks the cache output as a real input.
+  # The root lockfile lands next to the generated ts/deno.json so the packaged
+  # launcher can retain --frozen. Finally, a "deno-app-launcher" marker entry
+  # (no artifact of its own) at bin/<pkg_name> records this app's own
+  # entrypoint dest, allowing rules/package.bzl to pair the launcher back to
+  # the right file even though several staged entries share the same owner.
+  # needs "deno-runtime" so package() also stages the pinned deno binary.
   closure = merge_direct_deno_sources(ctx, flatten_deno_sources(ctx, ctx.attrs.deps), {path: artifact for path, artifact, _owner in own})
   pkg_name = check_pkg_name(ctx, ctx.attrs.pkg_name or ctx.attrs.name)
   owner = str(ctx.label.raw_target())
@@ -159,6 +164,9 @@ def _deno_app_impl(ctx: AnalysisContext) -> list[Provider]:
     PackageEntry(dest = staged_path, artifact = artifact, kind = "tree", owner = owner)
     for staged_path, artifact in closure.items()
   ]
+  pkg_entries.append(PackageEntry(dest = "ts/node_modules", artifact = None, kind = "deno-npm-closure", owner = "//:deno-cache[node-modules]"))
+  pkg_entries.append(PackageEntry(dest = "runtime/deno/cache", artifact = None, kind = "deno-cache-closure", owner = "//:deno-cache[deno-dir]"))
+  pkg_entries.append(PackageEntry(dest = "ts/deno.lock", artifact = ctx.attrs.deno_lock, kind = "tree", owner = "//:deno.lock"))
   pkg_entries.append(PackageEntry(dest = "bin/" + pkg_name, artifact = None, kind = "deno-app-launcher", owner = owner, meta = main_dest))
   info = package_info(ctx, entries = pkg_entries, needs = ["deno-runtime"], deps = ctx.attrs.deps)
 
@@ -172,6 +180,7 @@ def _deno_app_impl(ctx: AnalysisContext) -> list[Provider]:
 _deno_app_rule = rule(
   impl = _deno_app_impl,
   attrs = {
+    "deno_lock": attrs.source(default = "//:deno.lock"),
     "deps": attrs.list(attrs.dep(providers = [DenoSourcesInfo]), default = []),
     "main": attrs.source(),
     "pkg_name": attrs.option(attrs.string(), default = None),
@@ -244,6 +253,10 @@ def _deno_cache_impl(ctx: AnalysisContext) -> list[Provider]:
       "PRUNE=\"$ROOT/$5\"",
       "CACHE_EXEC=\"$ROOT/$6\"",
       "MANIFEST=\"$ROOT/$7\"",
+      "LOADER=\"$ROOT/$8\"",
+      "LOADER_DIR=\"$ROOT/$9\"",
+      "PYTHON_LIB=\"$ROOT/${10}\"",
+      "PYTHON=\"$ROOT/${11}\"",
       "chmod +x \"$DENO\"",
       "WORK=$(mktemp -d)",
       "trap 'rm -rf \"$WORK\"' EXIT",
@@ -283,7 +296,7 @@ def _deno_cache_impl(ctx: AnalysisContext) -> list[Provider]:
       "  echo 'error: user+net namespaces unavailable, so deno offline resolution cannot be enforced. Set POLYGLOT_ALLOW_ONLINE_DENO_CACHE=1 to explicitly allow this action to fetch (breaking offline-after-bootstrap), or run on a host with unprivileged userns.' >&2",
       "  exit 1",
       "fi",
-      "if ! run_offline python3 \"$CACHE_EXEC\" --deno \"$DENO\" --manifest \"$MANIFEST\" --root \"$WORK\"; then",
+      "if ! run_offline \"$LOADER\" --library-path \"$LOADER_DIR:$PYTHON_LIB\" \"$PYTHON\" \"$CACHE_EXEC\" --deno \"$DENO\" --manifest \"$MANIFEST\" --root \"$WORK\"; then",
       "  echo 'error: deno cache failed (deno output above). If it needed the network, the .local/cache/deno seed is stale or incomplete - run ./repo.sh bootstrap. Otherwise fix the reported source/lock problem; graph actions never fetch.' >&2",
       "  exit 1",
       "fi",
@@ -295,7 +308,7 @@ def _deno_cache_impl(ctx: AnalysisContext) -> list[Provider]:
       # analysis caches by construction) and fails closed on anything it
       # does not understand.
       "mkdir -p \"$OUT_DENO_DIR\"",
-      "python3 \"$PRUNE\" \"$WORK/deno.lock\" \"$DENO_DIR\" \"$OUT_DENO_DIR\"",
+      "\"$LOADER\" --library-path \"$LOADER_DIR:$PYTHON_LIB\" \"$PYTHON\" \"$PRUNE\" \"$WORK/deno.lock\" \"$DENO_DIR\" \"$OUT_DENO_DIR\"",
       "mkdir -p \"$OUT_NODE_MODULES\"",
       "[ -d \"$WORK/node_modules\" ] && cp -R \"$WORK/node_modules\"/. \"$OUT_NODE_MODULES\"/ || true",
     ],
@@ -303,7 +316,7 @@ def _deno_cache_impl(ctx: AnalysisContext) -> list[Provider]:
   )
 
   ctx.actions.run(
-    cmd_args(["/bin/sh", script, staged, deno, deno_dir_out.as_output(), node_modules_out.as_output(), ctx.attrs._prune_tool, ctx.attrs._cache_exec_tool, manifest]),
+    cmd_args(["/bin/sh", script, staged, deno, deno_dir_out.as_output(), node_modules_out.as_output(), ctx.attrs._prune_tool, ctx.attrs._cache_exec_tool, manifest, pinned_python_script_args(ctx)]),
     category = "deno_cache",
     identifier = ctx.label.name,
     local_only = True,
@@ -335,7 +348,7 @@ _deno_cache_rule = rule(
     # (e.g. tsweb/vite.config.ts, a plain deno_library source, not an app).
     "entries": attrs.list(attrs.string(), default = []),
     "srcs": attrs.dict(attrs.string(), attrs.source(), default = {}),
-  },
+  } | PINNED_PYTHON_ATTRS,
 )
 
 def deno_cache(**kwargs):
@@ -677,7 +690,7 @@ def _tsconfig_emit_impl(ctx: AnalysisContext) -> list[Provider]:
   gen = ctx.actions.write(ctx.label.name + "-gen.py", _TSCONFIG_GEN_PY)
   out_dir = ctx.actions.declare_output(ctx.label.name, dir = True)
   ctx.actions.run(
-    cmd_args(["python3", gen, ctx.attrs.deno_json, out_dir.as_output(), "emit"]),
+    pinned_python_command(ctx, [gen, ctx.attrs.deno_json, out_dir.as_output(), "emit"]),
     category = "tsconfig_emit",
     identifier = ctx.label.name,
   )
@@ -687,14 +700,14 @@ tsconfig_emit = rule(
   impl = _tsconfig_emit_impl,
   attrs = {
     "deno_json": attrs.source(),
-  },
+  } | PINNED_PYTHON_ATTRS,
 )
 
 def _tsconfig_drift_test_impl(ctx: AnalysisContext) -> list[Provider]:
   gen = ctx.actions.write(ctx.label.name + "-gen.py", _TSCONFIG_GEN_PY)
   stamp = ctx.actions.declare_output(ctx.label.name + ".stamp")
   ctx.actions.run(
-    cmd_args(["python3", gen, ctx.attrs.deno_json, stamp.as_output(), "check"]),
+    pinned_python_command(ctx, [gen, ctx.attrs.deno_json, stamp.as_output(), "check"]),
     category = "tsconfig_drift_check",
     identifier = ctx.label.name,
   )
@@ -708,7 +721,7 @@ tsconfig_drift_test = rule(
   impl = _tsconfig_drift_test_impl,
   attrs = {
     "deno_json": attrs.source(),
-  },
+  } | PINNED_PYTHON_ATTRS,
 )
 
 # --- deno_graph_check: drift check between the DECLARED source set (this
@@ -804,7 +817,11 @@ def _deno_graph_check_impl(ctx: AnalysisContext) -> list[Provider]:
       "DECLARED=\"$ROOT/$5\"",
       "CHECKER=\"$ROOT/$6\"",
       "STAMP=\"$ROOT/$7\"",
-      "shift 7",
+      "LOADER=\"$ROOT/$8\"",
+      "LOADER_DIR=\"$ROOT/$9\"",
+      "PYTHON_LIB=\"$ROOT/${10}\"",
+      "PYTHON=\"$ROOT/${11}\"",
+      "shift 11",
       "chmod +x \"$DENO\"",
       "WORK=$(mktemp -d)",
       "trap 'rm -rf \"$WORK\"' EXIT",
@@ -816,23 +833,29 @@ def _deno_graph_check_impl(ctx: AnalysisContext) -> list[Provider]:
       "ln -s \"$NODE_MODULES\" \"$WORK/proj/node_modules\"",
       "export DENO_DIR=\"$WORK/denodir\"",
       "export DENO_NO_UPDATE_CHECK=1",
+      # Match deno_cache's network boundary. `deno info` now supports both
+      # --frozen and --no-remote, but the namespace remains the fail-closed
+      # defense-in-depth boundary for all graph resolution subprocesses.
+      "if unshare -rn true 2>/dev/null; then",
+      "  run_offline() { unshare -rn sh -c 'ip link set lo up 2>/dev/null || true; exec \"$@\"' offline-sh \"$@\"; }",
+      "else",
+      "  echo 'error: user+net namespaces unavailable, so deno graph resolution cannot be enforced. Run on a host with unprivileged userns.' >&2",
+      "  exit 1",
+      "fi",
       "cd \"$WORK/proj\"",
       "i=0",
       "for entry in \"$@\"; do",
       "  i=$((i + 1))",
-      # `deno info` has no --cached-only/--frozen flag (unlike check/test/run
-      # above) - it never touches the network on its own; DENO_NO_UPDATE_CHECK
-      # plus this action having no network access is what keeps it hermetic.
-      "  \"$DENO\" info --json \"$entry\" >\"$WORK/infos/$i.json\"",
+      "  run_offline \"$DENO\" info --json --frozen --no-remote \"$entry\" >\"$WORK/infos/$i.json\"",
       "done",
       "cd \"$ROOT\"",
-      "python3 \"$CHECKER\" \"$WORK/infos\" \"$DECLARED\"",
+      "\"$LOADER\" --library-path \"$LOADER_DIR:$PYTHON_LIB\" \"$PYTHON\" \"$CHECKER\" \"$WORK/infos\" \"$DECLARED\"",
       "echo ok >\"$STAMP\"",
     ],
     is_executable = True,
   )
   ctx.actions.run(
-    cmd_args(["/bin/sh", script, staged, deno_dir, node_modules, deno, declared, checker, stamp.as_output()] + _resolve_entries(ctx)),
+    cmd_args(["/bin/sh", script, staged, deno_dir, node_modules, deno, declared, checker, stamp.as_output(), pinned_python_script_args(ctx)] + _resolve_entries(ctx)),
     category = "deno_graph_check",
     identifier = ctx.label.name,
   )
@@ -845,14 +868,15 @@ def _deno_graph_check_impl(ctx: AnalysisContext) -> list[Provider]:
 _deno_graph_check_rule = rule(
   impl = _deno_graph_check_impl,
   # Optional (default []) - see deno_check's identical comment above.
-  attrs = _CONSUMER_ATTRS | {"entries": attrs.list(attrs.string(), default = [])},
+  attrs = _CONSUMER_ATTRS | PINNED_PYTHON_ATTRS | {"entries": attrs.list(attrs.string(), default = [])},
 )
 
 def deno_graph_check(**kwargs):
   _deno_graph_check_rule(**_consumer_defaults(kwargs))
 
-# --- smoke_test: reuses an existing, read-only python3 validation script
-# (e.g. tools/tsweb_smoke.py) against a built artifact directory.
+# --- smoke_test: runs an existing, read-only validation script through the
+# pinned Python loader (e.g. tools/tsweb_smoke.py) against a built artifact
+# directory.
 def _smoke_test_impl(ctx: AnalysisContext) -> list[Provider]:
   stamp = ctx.actions.declare_output(ctx.label.name + ".stamp")
   script = ctx.actions.write(
@@ -863,14 +887,18 @@ def _smoke_test_impl(ctx: AnalysisContext) -> list[Provider]:
       "SCRIPT=$1",
       "ROOT=$2",
       "STAMP=$3",
-      "shift 3",
-      "python3 \"$SCRIPT\" --root \"$ROOT\" \"$@\"",
+      "LOADER=$4",
+      "LOADER_DIR=$5",
+      "PYTHON_LIB=$6",
+      "PYTHON=$7",
+      "shift 7",
+      "\"$LOADER\" --library-path \"$LOADER_DIR:$PYTHON_LIB\" \"$PYTHON\" \"$SCRIPT\" --root \"$ROOT\" \"$@\"",
       "echo ok >\"$STAMP\"",
     ],
     is_executable = True,
   )
   ctx.actions.run(
-    cmd_args(["/bin/sh", script, ctx.attrs.script, ctx.attrs.root, stamp.as_output()] + ctx.attrs.extra_args),
+    cmd_args(["/bin/sh", script, ctx.attrs.script, ctx.attrs.root, stamp.as_output(), pinned_python_script_args(ctx)] + ctx.attrs.extra_args),
     category = "smoke_test",
     identifier = ctx.label.name,
   )
@@ -886,5 +914,5 @@ smoke_test = rule(
     "extra_args": attrs.list(attrs.string(), default = []),
     "root": attrs.source(),
     "script": attrs.source(),
-  },
+  } | PINNED_PYTHON_ATTRS,
 )

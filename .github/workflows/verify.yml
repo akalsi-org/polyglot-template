@@ -201,6 +201,36 @@ jobs:
           ./test/graph-compdb-contract.sh
           ./test/deno-manifest-contract.sh
 
+      - name: Run repository infrastructure tests
+        run: ./repo.sh infra-test
+
+      - name: Run optimized full-graph test suite
+        run: ./repo.sh test opt
+
+      - name: Generate merged coverage report
+        run: ./repo.sh coverage
+
+      - name: Upload merged coverage report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: coverage-${{ matrix.target }}
+          path: |
+            buck-out/**/merged.lcov
+            buck-out/**/summary.txt
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Rehearse package release without publishing
+        if: ${{ !startsWith(github.ref, 'refs/tags/packages/') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          package=polyglot-demo
+          tag=packages/polyglot-demo/v0.1.0
+          ./repo.sh package-target-check "$package"
+          ./repo.sh package "$package" opt
+          ./repo.sh release-check "$package" "$tag"
+
       - name: Build and run C++ profiles
         run: |
           ./repo.sh cpp-build dbg
@@ -213,6 +243,19 @@ jobs:
 
       - name: Exercise pinned Python runtime
         run: ./repo.sh python -I -c 'import ctypes, hashlib, sqlite3, ssl, sys, zlib; print(sys.version)'
+
+      - name: Enforce immutable release-tag policy
+        if: startsWith(github.ref, 'refs/tags/packages/')
+        shell: bash
+        run: |
+          set -euo pipefail
+          # A lightweight checkout normally has the tagged commit but not its
+          # tag object. Fetch it explicitly, then reject lightweight tags.
+          # Signature trust roots are deployment-specific and cannot be
+          # declared safely in this repository; see docs/CI-RELEASE.md.
+          git fetch --force --tags origin
+          test "$(git cat-file -t "$GITHUB_REF_NAME")" = tag
+          git cat-file -p "$GITHUB_REF_NAME" | grep -Fq "tag $GITHUB_REF_NAME"
 
       - name: Resolve tagged package
         if: startsWith(github.ref, 'refs/tags/packages/')
@@ -236,6 +279,8 @@ jobs:
           archive=$(find dist -maxdepth 1 -type f -name "$package-*-${{ matrix.target }}.tar.gz" -print -quit)
           test -n "$archive"
           sha256sum "$archive" > "$archive.sha256"
+          test -s "$archive.sbom.json"
+          test -s "$archive.provenance.json"
 
       - name: Upload verified package asset
         if: startsWith(github.ref, 'refs/tags/packages/')
@@ -245,6 +290,8 @@ jobs:
           path: |
             dist/*.tar.gz
             dist/*.tar.gz.sha256
+            dist/*.tar.gz.sbom.json
+            dist/*.tar.gz.provenance.json
           if-no-files-found: error
           compression-level: 0
 

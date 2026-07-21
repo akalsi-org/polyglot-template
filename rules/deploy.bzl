@@ -5,6 +5,8 @@ file.  This rule deliberately emits only a deterministic plan artifact and a
 local inspection command; it has no remote transport or activation surface.
 """
 
+load("//rules:pinned_python.bzl", "PINNED_PYTHON_ATTRS", "pinned_python_command", "pinned_python_script_args")
+
 def _valid_dns_label(value):
   if value == "" or len(value) > 63 or value.startswith("-") or value.endswith("-"):
     return False
@@ -75,14 +77,18 @@ def _deployment_plan_impl(ctx):
     [
       "#!/bin/sh",
       "set -eu",
+      "LOADER=\"$(pwd)/$1\"",
+      "LOADER_DIR=\"$(pwd)/$2\"",
+      "PYTHON_LIB=\"$(pwd)/$3\"",
+      "PYTHON=\"$(pwd)/$4\"",
       cmd_args("PLAN=\"$(pwd)/", output, "\"", delimiter = ""),
       cmd_args("TOOL=\"$(pwd)/", ctx.attrs.tool, "\"", delimiter = ""),
-      "exec python3 -B \"$TOOL\" plan --plan \"$PLAN\"",
+      "exec \"$LOADER\" --library-path \"$LOADER_DIR:$PYTHON_LIB\" \"$PYTHON\" -B \"$TOOL\" plan --plan \"$PLAN\"",
     ],
     is_executable = True,
     allow_args = True,
   )
-  command = cmd_args(script, hidden = [output, ctx.attrs.tool] + written)
+  command = cmd_args([script, pinned_python_script_args(ctx)], hidden = [output, ctx.attrs.tool] + written)
   return [
     DefaultInfo(default_output = output, other_outputs = written),
     RunInfo(args = command),
@@ -99,12 +105,12 @@ deployment_plan = rule(
     "routes": attrs.dict(attrs.string(), attrs.string()),
     "target": attrs.string(),
     "tool": attrs.source(),
-  },
+  } | PINNED_PYTHON_ATTRS,
 )
 
 def _readonly_contract_test_impl(ctx):
   plan = ctx.attrs.plan[DefaultInfo].default_outputs[0]
-  command = cmd_args(["python3", ctx.attrs.tool, "contract", "--plan", plan])
+  command = pinned_python_command(ctx, [ctx.attrs.tool, "contract", "--plan", plan])
   return [
     DefaultInfo(default_output = plan),
     ExternalRunnerTestInfo(
@@ -119,5 +125,5 @@ deployment_readonly_contract_test = rule(
   attrs = {
     "plan": attrs.dep(providers = [DefaultInfo]),
     "tool": attrs.source(),
-  },
+  } | PINNED_PYTHON_ATTRS,
 )

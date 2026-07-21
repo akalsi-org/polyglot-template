@@ -184,9 +184,14 @@ Commands:
   exec <command> [args...]     Run a command in the pinned repository environment.
   help                         Show this help.
   target                       Print the CPU-native musl output triplet.
-  bootstrap [--offline] [--dry-run]
-                               Install the locked repo-local toolchain.
+  bootstrap [--offline] [--dry-run] [--repair]
+                               Install the locked repo-local toolchain; --repair
+                               reinstalls every locked artifact after probing it.
   doctor [--deep]              Validate target and installed tools.
+  toolchain-lock [--check]     Regenerate, or verify, toolchains/lock.bzl.
+  toolchain-qualify [--offline]
+                               Regenerate the derived lock, reinstall and probe
+                               every locked artifact, then run deep doctor.
   buck2 [args...]              Run the pinned Buck2 binary directly.
   infra-lint                   Check shell/Python infra scripts outside the buck2 graph.
   format [--check]             Apply, or check, repository formatting for every lane.
@@ -259,10 +264,29 @@ case "$command" in
     "$ROOT/toolchain/target.sh"
     ;;
   bootstrap)
-    (($# <= 2)) || { printf 'usage: ./repo.sh bootstrap [--offline] [--dry-run]\n' >&2; exit 2; }
+    (($# <= 3)) || { printf 'usage: ./repo.sh bootstrap [--offline] [--dry-run] [--repair]\n' >&2; exit 2; }
     "$ROOT/toolchain/bootstrap.sh" "$@"
     ;;
   doctor) "$ROOT/toolchain/doctor.sh" "$@" ;;
+  toolchain-lock)
+    (($# <= 1)) || { printf 'usage: ./repo.sh toolchain-lock [--check]\n' >&2; exit 2; }
+    case ${1:-} in
+      '') python3 "$ROOT/tools/gen_toolchain_lock.py" --lock "$ROOT/tools.lock.toml" --output "$ROOT/toolchains/lock.bzl" ;;
+      --check) python3 "$ROOT/tools/gen_toolchain_lock.py" --lock "$ROOT/tools.lock.toml" --output "$ROOT/toolchains/lock.bzl" --check ;;
+      *) printf 'usage: ./repo.sh toolchain-lock [--check]\n' >&2; exit 2 ;;
+    esac
+    ;;
+  toolchain-qualify)
+    (($# <= 1)) || { printf 'usage: ./repo.sh toolchain-qualify [--offline]\n' >&2; exit 2; }
+    case ${1:-} in
+      '') offline=() ;;
+      --offline) offline=(--offline) ;;
+      *) printf 'usage: ./repo.sh toolchain-qualify [--offline]\n' >&2; exit 2 ;;
+    esac
+    "$ROOT/repo.sh" toolchain-lock
+    "$ROOT/repo.sh" bootstrap "${offline[@]}" --repair
+    "$ROOT/repo.sh" doctor --deep
+    ;;
   buck2)
     setup_environment
     exec "$POLYGLOT_BUCK2" "$@"
@@ -498,6 +522,9 @@ case "$command" in
     tmp="$archive.tmp.$$"
     cp -- "$ROOT/$out" "$tmp"
     mv -- "$tmp" "$archive"
+    pinned_python "$ROOT/tools/release_evidence.py" package \
+      --archive "$archive" --catalog "$ROOT/packages/catalog.bzl" \
+      --tools-lock "$ROOT/tools.lock.toml" --package "$1" --target "$target" --profile "$profile"
     printf '%s\n' "$archive"
     ;;
   package-target-check)
@@ -546,6 +573,7 @@ case "$command" in
     require_no_args infra-test "$@"
     setup_environment
     bash "$ROOT/test/bootstrap-smoke.sh"
+    bash "$ROOT/test/go-vendor-contract.sh"
     bash "$ROOT/test/workflow-contract.sh"
     bash "$ROOT/test/docs-contract.sh"
     pinned_python "$ROOT/test/editor-contract.py"

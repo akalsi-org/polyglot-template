@@ -85,9 +85,17 @@ assert_present 'release workflow checks for an existing release' grep -Fq 'gh re
 assert_present 'workflow pins actions/attest to the approved SHA' grep -Fq 'actions/attest@36051bcae73b7c2a8a6945a48cbf80953c6baa35' "$workflow"
 assert_present 'package release caller grants attestation write permission' grep -Fq 'attestations: write' "$release_workflow"
 assert_present 'release workflow validates published checksums' grep -Fq 'sha256sum --check' "$release_workflow"
+assert_present 'tag verification rejects lightweight release tags' grep -Fq 'git cat-file -t "$GITHUB_REF_NAME"' "$workflow"
+assert_present 'tag verification fetches annotated tag objects' grep -Fq 'git fetch --force --tags origin' "$workflow"
+assert_present 'tag packaging requires an SBOM sidecar' grep -Fq 'test -s "$archive.sbom.json"' "$workflow"
+assert_present 'tag packaging requires a provenance sidecar' grep -Fq 'test -s "$archive.provenance.json"' "$workflow"
+assert_present 'tag workflow uploads SBOM evidence' grep -Fq 'dist/*.tar.gz.sbom.json' "$workflow"
+assert_present 'tag workflow uploads provenance evidence' grep -Fq 'dist/*.tar.gz.provenance.json' "$workflow"
+assert_present 'release workflow verifies evidence and writes a manifest' grep -Fq 'tools/release_evidence.py release-manifest' "$release_workflow"
+assert_present 'release workflow publishes the release manifest' grep -Fq 'artifacts/release-manifest.json' "$release_workflow"
 assert_present 'release workflow compares published assets byte-for-byte' grep -Fq 'cmp -- "$asset" "published/$name"' "$release_workflow"
 assert_present 'release workflow uploads assets to the selected repository' grep -Fq 'gh release upload "$GITHUB_REF_NAME" "$asset" --repo "$GITHUB_REPOSITORY"' "$release_workflow"
-assert_present 'release workflow creates releases with assets and checksums' grep -Fq 'gh release create "$GITHUB_REF_NAME" "${assets[@]}" "${checksums[@]}' "$release_workflow"
+assert_present 'release workflow creates releases with archives, checksums, and evidence' grep -Fq 'gh release create "$GITHUB_REF_NAME" "${release_assets[@]}' "$release_workflow"
 assert_absent 'workflow must not reference Moon' grep -qi 'moon' "$workflow"
 
 assert_order_pattern 'online bootstrap precedes offline bootstrap' "$workflow" \
@@ -97,7 +105,8 @@ assert_order_pattern 'offline bootstrap precedes deep doctor' "$workflow" \
 
 for command in \
   './repo.sh exec buck2 build //toolchains:native' \
-  './repo.sh lint' './repo.sh package-validate' \
+  './repo.sh lint' './repo.sh package-validate' './repo.sh infra-test' \
+  './repo.sh test opt' './repo.sh coverage' \
   './repo.sh package-target-check "$package"' \
   './test/graph-compdb-contract.sh' \
   './test/deno-manifest-contract.sh' \
@@ -107,6 +116,25 @@ for command in \
   './repo.sh python -I -c'; do
   assert_present "workflow retains distinct check: $command" grep -Fq "$command" "$workflow"
 done
+assert_present 'workflow uploads a target-keyed merged coverage artifact' \
+  grep -Fq 'name: coverage-${{ matrix.target }}' "$workflow"
+assert_present 'workflow uploads the merged lcov report' \
+  grep -Fq 'buck-out/**/merged.lcov' "$workflow"
+assert_present 'workflow uploads the coverage summary' \
+  grep -Fq 'buck-out/**/summary.txt' "$workflow"
+assert_present 'branch and PR runs rehearse release without publishing' \
+  grep -Fq "if: \${{ !startsWith(github.ref, 'refs/tags/packages/') }}" "$workflow"
+assert_present 'release rehearsal packages the selected package under opt' \
+  grep -Fq './repo.sh package "$package" opt' "$workflow"
+assert_present 'release rehearsal verifies the selected package tag' \
+  grep -Fq './repo.sh release-check "$package" "$tag"' "$workflow"
+assert_absent 'verification workflow must not publish releases' grep -Fq 'gh release ' "$workflow"
+assert_present 'tag package artifacts remain package-tag guarded' \
+  grep -Fq "if: startsWith(github.ref, 'refs/tags/packages/')" "$workflow"
+assert_present 'package release workflow remains the tag-only publisher' \
+  grep -Fq 'gh release create' "$release_workflow"
+assert_present 'package release workflow only invokes verify on package tags' \
+  grep -Fq 'tags: ["packages/*/v*"]' "$release_workflow"
 assert_present 'workflow retains a network-isolated cold full-graph build/test replay' \
   grep -Fq "unshare -rn sh -c 'ip link set lo up 2>/dev/null || true; ./repo.sh exec buck2 clean && ./repo.sh build && ./repo.sh test'" "$workflow"
 assert_count 'offline replay performs one full-graph build' 1 '^          unshare -rn sh -c .*./repo.sh exec buck2 clean && ./repo.sh build && ./repo.sh test' "$workflow"
@@ -114,8 +142,10 @@ assert_absent 'workflow must not repeat the full graph through a direct Buck2 te
 assert_count 'workflow must not run a second aggregate repo build after the offline replay' 0 '^          ./repo.sh build$' "$workflow"
 assert_count 'workflow must not run a second aggregate repo test after the offline replay' 0 '^          ./repo.sh test$' "$workflow"
 
-assert_order 'tag package target validation precedes package assembly' "$workflow" \
-  './repo.sh package-target-check "$package"' './repo.sh package "$package" opt'
+assert_count 'each package assembly is preceded by an explicit target validation' 2 \
+  './repo.sh package-target-check "\$package"' "$workflow"
+assert_count 'workflow assembles package artifacts only for rehearsal and tag release paths' 2 \
+  './repo.sh package "\$package" opt' "$workflow"
 if sed -n '/^  package)/,/^  package-smoke)/p' "$root/repo.sh" | grep -Fq 'package_release.py'; then
   fail 'repo package command still falls through to the raw-build assembler'
 fi

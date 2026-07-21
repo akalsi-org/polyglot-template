@@ -1,5 +1,5 @@
 load("//rules:deno.bzl", "deno_cache")
-load("//rules:file.bzl", "export_file")
+load("//rules:file.bzl", "export_file", "export_files")
 
 # Uniform build/test/lint entry points across all five lanes.
 #
@@ -129,6 +129,21 @@ export_file(
 export_file(
   name = "go.mod",
   src = "go.mod",
+  visibility = ["PUBLIC"],
+)
+
+export_file(
+  name = "go.sum",
+  src = "go.sum",
+  visibility = ["PUBLIC"],
+)
+
+# Keep every vendored file as a real Buck input: Go resolves normal external
+# modules from this committed tree with -mod=vendor, so an edit to any package
+# invalidates the actions that compile or test it.
+export_files(
+  name = "go_vendor",
+  srcs = glob(["vendor/**"]),
   visibility = ["PUBLIC"],
 )
 

@@ -56,15 +56,21 @@ jobs:
           shopt -s nullglob
           assets=(artifacts/*.tar.gz)
           checksums=(artifacts/*.tar.gz.sha256)
-          ((${#assets[@]} > 0 && ${#assets[@]} == ${#checksums[@]}))
+          sboms=(artifacts/*.tar.gz.sbom.json)
+          provenances=(artifacts/*.tar.gz.provenance.json)
+          ((${#assets[@]} > 0 && ${#assets[@]} == ${#checksums[@]} && ${#assets[@]} == ${#sboms[@]} && ${#assets[@]} == ${#provenances[@]}))
           for checksum in "${checksums[@]}"; do
             (cd artifacts && sha256sum --check "$(basename "$checksum")")
           done
+          ./repo.sh python -I tools/release_evidence.py release-manifest \
+            --tag "$GITHUB_REF_NAME" --output artifacts/release-manifest.json "${assets[@]}"
+          evidence=("${sboms[@]}" "${provenances[@]}" artifacts/release-manifest.json)
+          release_assets=("${assets[@]}" "${checksums[@]}" "${evidence[@]}")
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             # A retry may add a missing asset, but it must never replace a
             # published byte stream. A differing asset means the supposedly
             # immutable release is inconsistent and fails closed.
-            for asset in "${assets[@]}" "${checksums[@]}"; do
+            for asset in "${release_assets[@]}"; do
               name=$(basename "$asset")
               if gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --pattern "$name" --dir published --clobber >/dev/null 2>&1; then
                 cmp -- "$asset" "published/$name"
@@ -73,7 +79,7 @@ jobs:
               fi
             done
           else
-            gh release create "$GITHUB_REF_NAME" "${assets[@]}" "${checksums[@]}" \
+            gh release create "$GITHUB_REF_NAME" "${release_assets[@]}" \
               --repo "$GITHUB_REPOSITORY" \
               --title "$GITHUB_REF_NAME" \
               --notes-file release-notes.md \

@@ -23,5 +23,19 @@ source_entries = [
 deno_config = json.loads((root / "deno.json").read_text())
 expected = sorted(source_entries + [deno_config["imports"]["pyright"]])
 assert entries == expected, ("manifest/source-or-tool mismatch", sorted(set(expected) ^ set(entries)))
-print(f"Deno graph manifest: ok ({len(entries)} entries)")
+
+package_rules = (root / "rules" / "package.bzl").read_text()
+for name, specifier in deno_config["imports"].items():
+    encoded = f'\\\"{name}\\\": \\\"{specifier}\\\"'
+    assert encoded in package_rules, f"packaged Deno config omits locked workspace import: {name}"
+assert '"  \\"nodeModulesDir\\": \\"manual\\",' in package_rules
+
+rules = (root / "rules" / "deno.bzl").read_text()
+graph_rule = rules[rules.index("def _deno_graph_check_impl"):rules.index("_deno_graph_check_rule = rule")]
+assert r'run_offline \"$DENO\" info --json --frozen --no-remote \"$entry\"' in graph_rule
+assert "if unshare -rn true 2>/dev/null; then" in graph_rule
+assert r"unshare -rn sh -c 'ip link set lo up 2>/dev/null || true; exec \"$@\"'" in graph_rule
+assert "deno graph resolution cannot be enforced" in graph_rule
+assert r'\"$DENO\" info --json \"$entry\"' not in graph_rule
+print(f"Deno graph manifest and offline graph policy: ok ({len(entries)} entries)")
 PY

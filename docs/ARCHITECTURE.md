@@ -5,10 +5,11 @@
 This document describes the implemented bootstrap slice in this repository.
 It is a Linux-only, CPU-native, offline-after-bootstrap workspace for C++,
 Python, Go, TypeScript, and a React static site. Linux x86-64 hosts build
-`x86_64-linux-musl`; Linux ARM64 hosts build `aarch64-linux-musl`. Fleet,
-deployment, schema-generation, benchmark, and third-party-adapter designs in
-adjacent documents are proposals; they are not part of the current `repo.sh`
-interface.
+`x86_64-linux-musl`; Linux ARM64 hosts build `aarch64-linux-musl`. Fleet, schema-generation, benchmark, and third-party-adapter designs in adjacent
+documents are proposals; they are not part of the current `repo.sh` interface.
+Deployment has only the read-only Buck plan/observation contract documented in
+[CURRENT-CAPABILITIES.md](CURRENT-CAPABILITIES.md); it has no deploy command or
+remote mutation path.
 
 ## Repository Shape
 
@@ -42,8 +43,9 @@ Run `./repo.sh help` for the canonical, current list. The primary commands are:
 ```text
 shell
 exec <command> [args...]
-bootstrap [--offline] [--dry-run]
+bootstrap [--offline] [--dry-run] [--repair]
 doctor [--deep]
+toolchain-lock [--check] | toolchain-qualify [--offline]
 buck2 [args...]
 target
 lint
@@ -74,6 +76,10 @@ expected binaries for every supported target. `./repo.sh bootstrap` is the only
 command allowed to fetch. It installs verified artifacts below
 `.local/toolchain/<target>/`; normal build, lint, test, package, and release
 commands use that local installation and do not fall back to host compilers.
+`toolchain-lock` regenerates or checks the derived Buck2 projection, while
+`toolchain-qualify` reinstalls and probes every locked artifact before a deep
+doctor check. See [TOOLCHAIN-LIFECYCLE.md](TOOLCHAIN-LIFECYCLE.md) for the
+reviewed update, recovery, and rollback workflow.
 
 The current host CPU selects the target: x86-64 hosts produce
 `x86_64-linux-musl`, and ARM64 hosts produce `aarch64-linux-musl`. Native C++
@@ -167,10 +173,14 @@ caches, build products, and releases remain ignored.
 
 ## Deliberately Unimplemented
 
-This checkout does not currently provide toolchain-update commands, schema
-generation, benchmark commands, third-party dependency adapters,
-fleet management, deployment, certificate automation, or Zstandard packaging.
-Tagged package archives do receive GitHub artifact attestations; broader SBOM
-and release-provenance policy remains incomplete. Documents describing
+This checkout does not currently provide schema generation, benchmark commands,
+third-party dependency adapters, fleet management, a deploy command or remote
+mutation path, certificate automation, cross-compilation, macOS/Windows
+support, sanitizers, or Zstandard packaging. Sanitizers remain explicitly
+deferred to preserve the hermetic Linux-musl closure; they require a separately
+evaluated host-debug toolchain. Tagged package archives do receive GitHub
+artifact attestations, but signed/annotated-tag requirements, SBOM publication,
+and separate release-provenance policy are incomplete. Documents describing
 unimplemented capabilities retain their proposal or research status and must
-not be treated as executable contracts.
+not be treated as executable contracts. See
+[CURRENT-CAPABILITIES.md](CURRENT-CAPABILITIES.md) for the readiness matrix.

@@ -1,6 +1,6 @@
 # Polyglot Template Bootstrap Slice
 
-This repository is the executable vertical slice associated with the decision package. It establishes the public command surface, native target policy, language-owned source layout, locked bootstrap model, package/runtime closure schema, and C++ build-graph generation without implementing fleet deployment.
+This repository is the executable vertical slice associated with the decision package. It establishes the public command surface, native target policy, language-owned source layout, locked bootstrap model, package/runtime closure schema, and C++ build-graph generation without implementing fleet deployment or remote mutation. See [current capabilities](docs/CURRENT-CAPABILITIES.md) for the verified readiness and compatibility boundary.
 
 ## Quick Start
 

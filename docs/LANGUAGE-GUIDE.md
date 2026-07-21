@@ -96,12 +96,16 @@ component behavior, while `tsweb-test` also checks emitted asset integrity.
 | Run Go | `./repo.sh go <args...>` |
 
 The wrapper pins Go, isolates all Go caches under `.local/`, sets
-`GOTOOLCHAIN=local`, and enforces `CGO_ENABLED=0`. Do not use the system `go`
-command or add CGO dependencies without revisiting the native toolchain
-contract. `./repo.sh go <args...>` intentionally passes its arguments to Go, so
-commands such as module download or installation can use the network; it is not
-part of the offline guarantee. Keep Go formatting canonical with `gofmt`;
-`./repo.sh lint` runs it and `go vet` through the pinned setup.
+`GOTOOLCHAIN=local`, and enforces `CGO_ENABLED=0`. Go dependencies are locked
+in `go.sum` and committed under `vendor/`; update both with the pinned Go
+command before changing an external import. Named `go-build` and `go-test`
+commands use the vendored closure with module services disabled, so they remain
+offline after bootstrap. Do not use the system `go` command or add CGO
+dependencies without revisiting the native toolchain contract. `./repo.sh go
+<args...>` intentionally passes its arguments to Go, so commands such as module
+download or installation can use the network; it is not part of the offline
+guarantee. Keep Go formatting canonical with `gofmt`; `./repo.sh lint` runs it
+and `go vet` through the pinned setup.
 
 ## Cross-Lane Work
 

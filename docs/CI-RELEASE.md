@@ -38,20 +38,30 @@ workflow derives `<name>` from that ref, then executes:
 ./repo.sh release-check <name> packages/<name>/v<version>
 ```
 
-For each native target, package output is a top-level file:
+For each native target, package output includes immutable archive evidence:
 
 ```text
 dist/<name>-<version>-<target>.tar.gz
 dist/<name>-<version>-<target>.tar.gz.sha256
+dist/<name>-<version>-<target>.tar.gz.sbom.json
+dist/<name>-<version>-<target>.tar.gz.provenance.json
 ```
+
+`repo.sh package` produces the deterministic SBOM and provenance sidecars after
+it verifies the archive's embedded package and closure metadata. Both sidecars
+bind their `subject` SHA-256 to the exact archive. The release job checks those
+bindings, then writes and publishes the deterministic
+`release-manifest.json`, which lists every target archive, checksum, SBOM, and
+provenance sidecar.
 
 The verification matrix uploads those verified files as cross-job artifacts and
 uses GitHub's `actions/attest` action to create an artifact attestation for each
 target archive. After both targets pass, the release job downloads the archives
-and checksum sidecars, verifies each checksum, and runs:
+and evidence, verifies checksums and evidence bindings, and runs:
 
 ```bash
 ./repo.sh release-notes packages/<name>/v<version>
+./repo.sh python -I tools/release_evidence.py release-manifest ...
 gh release create packages/<name>/v<version> artifacts/* --verify-tag
 ```
 
@@ -60,17 +70,23 @@ The release notes are the matching section from the repository-root
 `packages/catalog.bzl`; runtime closure validation comes from the same
 Buck-owned catalog.
 
-## Current Boundaries
+## Tag Policy And Current Boundaries
 
-- The workflow is triggered by the tag-name pattern. It does not currently
-  require an annotated or signed tag, nor inspect tag-object metadata.
-- It uploads gzip tar archives and sidecar SHA-256 files. It does not publish
+- Release tags must be annotated (`git tag -a packages/<name>/v<version>`) and
+  must be signed by a maintainer (`git tag -s ...`). CI fetches the tag object
+  and fails closed on a lightweight tag, an enforceable repository-local check.
+- Repository code cannot safely declare the public-key trust root needed for
+  `git verify-tag`: that keyring belongs to the release host/organization, not
+  the source tree. Configure that trust policy separately and require signed
+  tags there; CI deliberately does not claim it has verified a signature merely
+  because a tag name matched.
+- It uploads gzip tar archives, checksum sidecars, deterministic SBOM and
+  provenance sidecars, and `release-manifest.json`. It does not publish
   Zstandard archives, static extractors, or self-extracting installers.
 - The package-release workflow grants `attestations: write`,
   `artifact-metadata: write`, and `id-token: write` to its verification caller;
   each tagged target archive receives a GitHub artifact attestation. The release
   job separately adds `contents: write` to publish or reconcile release assets.
-  The release itself does not attach an SBOM or a separate provenance file.
 - `gh release create --verify-tag` confirms that the tag exists remotely. It
   does not make an existing release mutable.
 
