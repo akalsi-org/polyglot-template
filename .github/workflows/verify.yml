@@ -45,7 +45,7 @@ jobs:
             buck-out/v2/art
             buck-out/v2/cache
             buck-out/go-build-cache/${{ matrix.target }}
-          key: polyglot-v1-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('tools.lock.toml', 'toolchain/**', 'toolchains/**', 'rules/**', '.buckconfig') }}
+          key: polyglot-v1-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('tools.lock.toml', 'toolchain/**', 'toolchains/**', '.buckconfig') }}
           restore-keys: |
             polyglot-v1-${{ runner.os }}-${{ matrix.target }}-
 
@@ -57,6 +57,27 @@ jobs:
         run: |
           ./repo.sh bootstrap --offline || ./repo.sh bootstrap
           ./repo.sh doctor --deep
+
+      - name: Buck2 toolchain smoke
+        run: |
+          set -euo pipefail
+          ./repo.sh exec buck2 build //toolchains:native 2> buck2-second-build.log
+          cat buck2-second-build.log
+          if grep -q 'Down: [1-9]' buck2-second-build.log; then
+            echo "error: expected a cache-hit build with 0B network downloaded, but a nonzero download was recorded" >&2
+            exit 1
+          fi
+          rm -f buck2-second-build.log
+          ./repo.sh exec buck2 kill
+
+      - name: Offline full-graph replay (cold buck-out, no network)
+        run: |
+          set -euo pipefail
+          sudo sysctl -qw kernel.apparmor_restrict_unprivileged_userns=0 || true
+          unshare -rn true || { echo "error: unprivileged user+net namespaces unavailable; cannot prove offline replay" >&2; exit 1; }
+          ./repo.sh exec buck2 kill || true
+          unshare -rn sh -c 'ip link set lo up 2>/dev/null || true; ./repo.sh exec buck2 clean && ./repo.sh build && ./repo.sh test'
+          ./repo.sh exec buck2 kill
 
       - name: Run repository quality gates & infra tests
         run: |
@@ -101,7 +122,7 @@ jobs:
             buck-out/v2/art
             buck-out/v2/cache
             buck-out/go-build-cache/${{ matrix.target }}
-          key: polyglot-v1-${{ runner.os }}-${{ matrix.target }}-dbg-${{ hashFiles('tools.lock.toml', 'toolchain/**', 'toolchains/**', 'rules/**', '.buckconfig') }}
+          key: polyglot-v1-${{ runner.os }}-${{ matrix.target }}-dbg-${{ hashFiles('tools.lock.toml', 'toolchain/**', 'toolchains/**', '.buckconfig') }}
           restore-keys: |
             polyglot-v1-${{ runner.os }}-${{ matrix.target }}-dbg-
             polyglot-v1-${{ runner.os }}-${{ matrix.target }}-
@@ -170,7 +191,7 @@ jobs:
             buck-out/v2/art
             buck-out/v2/cache
             buck-out/go-build-cache/${{ matrix.target }}
-          key: polyglot-v1-${{ runner.os }}-${{ matrix.target }}-opt-${{ hashFiles('tools.lock.toml', 'toolchain/**', 'toolchains/**', 'rules/**', '.buckconfig') }}
+          key: polyglot-v1-${{ runner.os }}-${{ matrix.target }}-opt-${{ hashFiles('tools.lock.toml', 'toolchain/**', 'toolchains/**', '.buckconfig') }}
           restore-keys: |
             polyglot-v1-${{ runner.os }}-${{ matrix.target }}-opt-
             polyglot-v1-${{ runner.os }}-${{ matrix.target }}-
