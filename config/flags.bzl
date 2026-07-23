@@ -21,9 +21,8 @@ DBG_COMPILE_FLAGS = [
   "-g3",
   "-Wall",
   "-Wextra",
-  "-Wpedantic",
-  "-Werror=uninitialized",
-  "-Werror=maybe-uninitialized",
+  "-Wno-pedantic",
+  "-Werror",
   "-fno-omit-frame-pointer",
   COVERAGE_FLAG,
 ]
@@ -33,9 +32,8 @@ OPT_COMPILE_FLAGS = [
   "-DNDEBUG",
   "-Wall",
   "-Wextra",
-  "-Wpedantic",
-  "-Werror=uninitialized",
-  "-Werror=maybe-uninitialized",
+  "-Wno-pedantic",
+  "-Werror",
 ]
 
 # Same for both profiles today except for COVERAGE_FLAG (dbg-only); cpp.toml

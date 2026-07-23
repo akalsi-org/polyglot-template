@@ -139,7 +139,7 @@ fi
 
 help=$($root/repo.sh help)
 for command in shell exec buck2 format lint build test cpp-build cpp-run cpp-test python-build python-test \
-  ts-build ts-test tsweb-build tsweb-test go-build go-test package-list package package-smoke; do
+  ts-build ts-test tsweb-build tsweb-test go-build go-test init-project package-list package package-smoke; do
   assert_present "repo help documents '$command'" grep -Eq "^  ${command}( |$)" <<<"$help"
 done
 for removed in _job-budget cpp-configure cpp-reflection-probe; do

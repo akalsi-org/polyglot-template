@@ -1,6 +1,6 @@
 {
   "include": ["python/lib", "python/app"],
-  "extraPaths": ["python/lib"],
+  "extraPaths": ["python/lib", "python/app"],
   "pythonVersion": "3.14",
   "reportMissingModuleSource": "none",
   "typeCheckingMode": "standard"

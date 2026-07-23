@@ -1,0 +1,23 @@
+{
+  "name": "Polyglot Template (Linux Musl)",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "llvm-vs-code-extensions.vscode-clangd",
+        "denoland.vscode-deno",
+        "golang.go",
+        "ms-python.python",
+        "ms-python.vscode-pylance"
+      ],
+      "settings": {
+        "editor.tabSize": 2,
+        "editor.insertSpaces": true
+      }
+    }
+  },
+  "postCreateCommand": "./repo.sh bootstrap && ./repo.sh doctor",
+  "remoteUser": "ubuntu"
+}

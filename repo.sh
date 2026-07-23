@@ -214,6 +214,7 @@ Commands:
   go [args...]                 Run raw pinned Go arguments; they may access the network.
   go-build                     Build the Go application via buck2.
   go-test                      Build, run, and test the Go lane via buck2.
+  init-project <name> [org]    Initialize a new project from this template with custom names.
   infra-test                   Run repository infrastructure tests (bootstrap/workflow/package).
   package-list                 List declared package identity, targets, and executables.
   package-explain <name>       Show catalog identity, runtime closure, and Buck target status.
@@ -496,6 +497,11 @@ case "$command" in
     require_no_args package-validate "$@"
     setup_environment
     "$POLYGLOT_BUCK2" test //packages:manifest-validate
+    ;;
+  init-project)
+    (($# >= 1 && $# <= 2)) || { printf 'usage: ./repo.sh init-project <new-project-name> [new-org-name]\n' >&2; exit 2; }
+    setup_environment
+    pinned_python "$ROOT/tools/init_project.py" "$@"
     ;;
   package-list)
     (($# == 0)) || { printf 'usage: ./repo.sh package-list\n' >&2; exit 2; }
