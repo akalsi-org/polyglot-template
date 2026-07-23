@@ -1,11 +1,9 @@
-"""Lightweight Python test helpers: parametrization, skips, mocks, and auto-teardown TestContext."""
+"""Lightweight Python test helpers: parametrization, skips, mocks, and smart TestContext."""
 
 from __future__ import annotations
 
 import contextlib
-import functools
 import inspect
-import os
 import tempfile
 import unittest
 from unittest.mock import (
@@ -35,9 +33,25 @@ class TestContext(contextlib.ExitStack):
   are automatically torn down in reverse order when the test finishes.
   """
 
-  def enter(self, cm: Any) -> Any:
-    """Enter a context manager and register it for automatic teardown."""
-    return self.enter_context(cm)
+  def add_cleanup(self, item: Any, *args: Any, **kwargs: Any) -> Any:
+    """Smart cleanup and resource registration.
+
+    - If item has __enter__ and __exit__ (context manager), automatically calls
+      __enter__() and registers __exit__() for automatic teardown.
+    - If item is a callable, registers it to be called on test teardown.
+    - If item has a close() method, registers item.close() for teardown.
+    """
+    if hasattr(item, "__enter__") and hasattr(item, "__exit__"):
+      return self.enter_context(item)
+    if callable(item):
+      return self.callback(item, *args, **kwargs)
+    if hasattr(item, "close") and callable(getattr(item, "close")):
+      return self.callback(getattr(item, "close"))
+    raise TypeError(f"Cannot register cleanup for object of type {type(item).__name__}")
+
+  def enter(self, item: Any, *args: Any, **kwargs: Any) -> Any:
+    """Alias for add_cleanup."""
+    return self.add_cleanup(item, *args, **kwargs)
 
   def mock(self, target: str, new: Any = DEFAULT, **kwargs: Any) -> Any:
     """Patch a target string and return the mock object.
@@ -56,10 +70,6 @@ class TestContext(contextlib.ExitStack):
   def mock_dict(self, in_dict: Any, values: Any = (), clear: bool = False) -> Any:
     """Patch a dictionary and restore original values on test teardown."""
     return self.enter_context(patch.dict(in_dict, values=values, clear=clear))
-
-  def add_cleanup(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
-    """Register a cleanup function to be called on test teardown."""
-    self.callback(fn, *args, **kwargs)
 
   def temp_dir(self) -> Path:
     """Create a temporary directory that is automatically deleted on test teardown."""

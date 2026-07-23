@@ -1,4 +1,5 @@
 import sys
+import tempfile
 from test_helpers import (
     MagicMock,
     TestContext,
@@ -6,6 +7,14 @@ from test_helpers import (
     skip,
     skip_if,
 )
+
+
+class DummyCloseable:
+  def __init__(self) -> None:
+    self.closed = False
+
+  def close(self) -> None:
+    self.closed = True
 
 
 @parametrize([
@@ -25,6 +34,22 @@ def test_parametrize_dicts(name: str, greeting: str) -> None:
   assert f"hello, {name}" == greeting
 
 
+def test_smart_add_cleanup(ctx: TestContext) -> None:
+  # 1. Smart add_cleanup with a ContextManager (__enter__ / __exit__)
+  td = ctx.add_cleanup(tempfile.TemporaryDirectory())
+  assert isinstance(td, str) and len(td) > 0
+
+  # 2. Smart add_cleanup with a closeable object
+  closeable = DummyCloseable()
+  ctx.add_cleanup(closeable)
+  assert not closeable.closed
+
+  # 3. Smart add_cleanup with a callback function
+  cleaned = []
+  ctx.add_cleanup(lambda: cleaned.append(True))
+  assert not cleaned
+
+
 def test_context_mock_and_tempdir(ctx: TestContext) -> None:
   m = ctx.mock("sys.version", "3.14.6-custom-mock")
   assert sys.version == "3.14.6-custom-mock"
@@ -34,10 +59,6 @@ def test_context_mock_and_tempdir(ctx: TestContext) -> None:
   test_file = tmp / "sample.txt"
   test_file.write_text("polyglot-test")
   assert test_file.read_text() == "polyglot-test"
-
-  cleaned = []
-  ctx.add_cleanup(lambda: cleaned.append(True))
-  assert not cleaned
 
 
 @skip("Demonstrating unconditional skip feature")

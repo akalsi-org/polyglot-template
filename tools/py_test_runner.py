@@ -77,20 +77,27 @@ class Loader(unittest.TestLoader):
             if isinstance(case, dict):
               args: tuple[Any, ...] = ()
               kwargs = case
-              param_str = "-".join(f"{k}={v}" for k, v in case.items())
-            elif isinstance(case, (list, tuple)):
+              param_str = ", ".join(f"{k}={v!r}" for k, v in case.items())
+              default_label = f"[{param_str}]"
+            elif isinstance(case, tuple):
+              args = case
+              kwargs = {}
+              param_str = ", ".join(repr(x) for x in case)
+              default_label = f"[({param_str})]"
+            elif isinstance(case, list):
               args = tuple(case)
               kwargs = {}
-              param_str = "-".join(str(x) for x in case)
+              param_str = ", ".join(repr(x) for x in case)
+              default_label = f"[[{param_str}]]"
             else:
               args = (case,)
               kwargs = {}
-              param_str = str(case)
+              default_label = f"[{case!r}]"
 
             if custom_names and idx < len(custom_names):
               label = f"[{custom_names[idx]}]"
             else:
-              label = f"[{param_str}]"
+              label = default_label
 
             test_cases.append(FunctionTest(value, args=args, kwargs=kwargs, name_suffix=label))
         else:
