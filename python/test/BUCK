@@ -24,6 +24,7 @@ py_tests(
   srcs = [
     "test_example.py",
     "test_fastbytes.py",
+    "test_helpers_test.py",
     "test_pyfast_extension.py",
     "test_stubs.py",
   ],
@@ -44,6 +45,7 @@ py_compileall_check(
   srcs = [
     "test_example.py",
     "test_fastbytes.py",
+    "test_helpers_test.py",
     "test_pyfast_extension.py",
     "test_stubs.py",
   ],
