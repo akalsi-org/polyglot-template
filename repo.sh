@@ -351,7 +351,7 @@ case "$command" in
   coverage)
     (($# == 0)) || { printf 'usage: ./repo.sh coverage\n' >&2; exit 2; }
     setup_environment
-    "$POLYGLOT_BUCK2" bxl //bxl:coverage.bxl:coverage
+    "$POLYGLOT_BUCK2" bxl -M all //bxl:coverage.bxl:coverage
     ;;
   test)
     (($# <= 1)) || { printf 'usage: ./repo.sh test [dbg|opt]\n' >&2; exit 2; }
@@ -368,7 +368,7 @@ case "$command" in
     setup_environment
     mapfile -t plat < <(target_platform_args "$profile")
     bxl_err=$(mktemp)
-    if ! out=$("$POLYGLOT_BUCK2" bxl "${plat[@]}" //bxl:compdb.bxl:compdb 2>"$bxl_err"); then
+    if ! out=$("$POLYGLOT_BUCK2" bxl -M all "${plat[@]}" //bxl:compdb.bxl:compdb 2>"$bxl_err"); then
       cat "$bxl_err" >&2; rm -f "$bxl_err"
       printf 'error: compdb bxl failed\n' >&2; exit 1
     fi
