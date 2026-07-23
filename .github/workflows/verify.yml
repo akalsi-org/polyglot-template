@@ -43,6 +43,7 @@ jobs:
             .local/cache/deno
             node_modules
             buck-out/v2/art
+            buck-out/v2/art-bxl
             buck-out/v2/cache
             buck-out/go-build-cache/${{ matrix.target }}
           key: polyglot-v1-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('tools.lock.toml', 'toolchain/**', 'toolchains/**', '.buckconfig') }}
@@ -120,6 +121,7 @@ jobs:
             .local/cache/deno
             node_modules
             buck-out/v2/art
+            buck-out/v2/art-bxl
             buck-out/v2/cache
             buck-out/go-build-cache/${{ matrix.target }}
           key: polyglot-v1-${{ runner.os }}-${{ matrix.target }}-dbg-${{ hashFiles('tools.lock.toml', 'toolchain/**', 'toolchains/**', '.buckconfig') }}
@@ -189,6 +191,7 @@ jobs:
             .local/cache/deno
             node_modules
             buck-out/v2/art
+            buck-out/v2/art-bxl
             buck-out/v2/cache
             buck-out/go-build-cache/${{ matrix.target }}
           key: polyglot-v1-${{ runner.os }}-${{ matrix.target }}-opt-${{ hashFiles('tools.lock.toml', 'toolchain/**', 'toolchains/**', '.buckconfig') }}

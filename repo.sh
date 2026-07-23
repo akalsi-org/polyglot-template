@@ -374,6 +374,10 @@ case "$command" in
     fi
     rm -f "$bxl_err"
     out_file=$(printf '%s\n' "$out" | grep -E '^buck-out/.*\.json$' | tail -n1)
+    if [[ -z $out_file || ! -f $out_file ]]; then
+      out=$("$POLYGLOT_BUCK2" bxl -M all --no-remote-cache "${plat[@]}" //bxl:compdb.bxl:compdb 2>/dev/null || true)
+      out_file=$(printf '%s\n' "$out" | grep -E '^buck-out/.*\.json$' | tail -n1)
+    fi
     [[ -n $out_file && -f $out_file ]] || { printf 'error: compdb bxl output file not found in stdout: %s\n' "$out" >&2; exit 1; }
     tmp="$ROOT/.compile_commands.json.tmp.$$"
     cp -- "$out_file" "$tmp"
