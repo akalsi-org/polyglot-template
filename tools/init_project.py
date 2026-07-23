@@ -39,9 +39,16 @@ def main():
     "rules/python.bzl",
     "rules/deno.bzl",
     "rules/package.bzl",
+    "cpp/lib/example/example.cc",
+    "cpp/test/example_test.cc",
     "go/app/hello/main.go",
     "go/app/hello/main_test.go",
     "go/test/greeting_test.go",
+    "tsweb/app/site/index.html",
+    "tsweb/lib/app/app.tsx",
+    "tsweb/lib/title/title.ts",
+    "tsweb/test/title_test.ts",
+    "docs/LANGUAGE-GUIDE.md",
   ]
 
   print(f"Initializing new project '{new_project}' (org: '{new_org}')...")
