@@ -30,6 +30,12 @@ assert_count() {
   [[ $actual == "$expected" ]] || fail "$description (expected $expected, found $actual)"
 }
 
+assert_fixed_count() {
+  local description=$1 expected=$2 text=$3 file=$4 actual
+  actual=$(grep -F -c -- "$text" "$file" || true)
+  [[ $actual == "$expected" ]] || fail "$description (expected $expected, found $actual)"
+}
+
 assert_order() {
   local description=$1 file=$2 before=$3 after=$4
   local -a before_lines after_lines
@@ -153,7 +159,7 @@ assert_absent 'repo.sh must not reference Moon' grep -qi 'moon' "$root/repo.sh"
 assert_present 'repo.sh build delegates to the pinned Buck2 binary' grep -Fq '"$POLYGLOT_BUCK2" build' "$root/repo.sh"
 assert_present 'repo.sh test selects the requested target platform' grep -Fq 'mapfile -t plat < <(target_platform_args "$profile")' "$root/repo.sh"
 assert_present 'repo.sh test delegates to pinned Buck2 over the full graph' grep -Fq '"$POLYGLOT_BUCK2" test "${plat[@]}" //...' "$root/repo.sh"
-assert_count 'aggregate build, test, and cpp-build refresh profile compdb' 3 \
+assert_fixed_count 'aggregate build, test, and cpp-build refresh profile compdb' 3 \
   '[[ ${POLYGLOT_DEFER_COMPDB:-0} == 1 ]] || "$ROOT/repo.sh" compile-commands "$profile"' "$root/repo.sh"
 assert_present 'repo.sh lint runs Buck2 lint-labelled tests' grep -Fq '"$POLYGLOT_BUCK2" test //... --labels lint' "$root/repo.sh"
 
