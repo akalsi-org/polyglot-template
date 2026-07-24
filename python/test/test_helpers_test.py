@@ -6,6 +6,7 @@ from test_helpers import (
     parametrize,
     skip,
     skip_if,
+    xfail,
 )
 
 
@@ -74,3 +75,8 @@ def test_demonstrate_skip_if() -> None:
 @skip_if(False, "Should not skip")
 def test_demonstrate_skip_if_false() -> None:
   assert True
+
+
+@xfail("Demonstrating an expected failure")
+def test_demonstrate_xfail() -> None:
+  assert False, "Expected failures are reported without failing the suite"

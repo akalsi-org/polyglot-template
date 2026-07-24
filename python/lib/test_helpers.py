@@ -6,6 +6,7 @@ import contextlib
 import inspect
 import tempfile
 import unittest
+import unittest.mock as mock
 from unittest.mock import (
     ANY,
     DEFAULT,
@@ -95,6 +96,19 @@ def parametrize(cases: Sequence[Any], names: Sequence[str] | None = None) -> Cal
   return decorator
 
 
+def xfail(reason: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+  """Mark a test as expected to fail for the supplied reason.
+
+  A failing xfail test is reported as XFAIL and does not fail the suite. If it
+  succeeds instead, it is reported as XPASS and fails the suite.
+  """
+  def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+    setattr(fn, "__unittest_expecting_failure__", True)
+    setattr(fn, "__xfail_reason__", reason)
+    return fn
+  return decorator
+
+
 def skip(reason: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
   """Unconditionally skip a test function."""
   def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -128,5 +142,6 @@ __all__ = [
     "patch",
     "parametrize",
     "skip",
+    "xfail",
     "skip_if",
 ]

@@ -348,6 +348,7 @@ case "$command" in
     rm -f "$uquery_err"
     "$POLYGLOT_BUCK2" build "${plat[@]}" "${buildables[@]}"
     stage_python_extensions "${plat[@]}"
+    [[ ${POLYGLOT_DEFER_COMPDB:-0} == 1 ]] || "$ROOT/repo.sh" compile-commands "$profile"
     ;;
   coverage)
     (($# == 0)) || { printf 'usage: ./repo.sh coverage\n' >&2; exit 2; }
@@ -361,6 +362,7 @@ case "$command" in
     setup_environment
     mapfile -t plat < <(target_platform_args "$profile")
     "$POLYGLOT_BUCK2" test "${plat[@]}" //...
+    [[ ${POLYGLOT_DEFER_COMPDB:-0} == 1 ]] || "$ROOT/repo.sh" compile-commands "$profile"
     ;;
   compile-commands)
     (($# <= 1)) || { printf 'usage: ./repo.sh compile-commands [dbg|opt]\n' >&2; exit 2; }

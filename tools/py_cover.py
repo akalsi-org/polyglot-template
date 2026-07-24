@@ -121,7 +121,11 @@ def _run_with_monitoring(runner_path, runner_argv, in_scope):
     if in_scope(path):
       ap = os.path.abspath(path)
       lines = executable.setdefault(ap, set())
-      lines.update(line for _offset, line in dis.findlinestarts(code) if line > 0)
+      lines.update(
+        line
+        for _offset, line in dis.findlinestarts(code)
+        if isinstance(line, int) and line > 0
+      )
     for constant in code.co_consts:
       if isinstance(constant, type(code)):
         remember_executable(constant)
