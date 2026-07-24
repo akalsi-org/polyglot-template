@@ -103,6 +103,8 @@ for command in \
   './repo.sh python -I -c'; do
   assert_present "workflow retains distinct check: $command" grep -Fq "$command" "$workflow"
 done
+assert_present 'workflow generates coverage from a cold Buck output tree' \
+  grep -Fq './repo.sh exec buck2 clean && ./repo.sh coverage' "$workflow"
 assert_present 'workflow uploads a target-keyed merged coverage artifact' \
   grep -Fq 'name: coverage-${{ matrix.target }}' "$workflow"
 assert_present 'workflow uploads the merged lcov report' \
@@ -151,6 +153,8 @@ assert_absent 'repo.sh must not reference Moon' grep -qi 'moon' "$root/repo.sh"
 assert_present 'repo.sh build delegates to the pinned Buck2 binary' grep -Fq '"$POLYGLOT_BUCK2" build' "$root/repo.sh"
 assert_present 'repo.sh test selects the requested target platform' grep -Fq 'mapfile -t plat < <(target_platform_args "$profile")' "$root/repo.sh"
 assert_present 'repo.sh test delegates to pinned Buck2 over the full graph' grep -Fq '"$POLYGLOT_BUCK2" test "${plat[@]}" //...' "$root/repo.sh"
+assert_count 'aggregate build, test, and cpp-build refresh profile compdb' 3 \
+  '[[ ${POLYGLOT_DEFER_COMPDB:-0} == 1 ]] || "$ROOT/repo.sh" compile-commands "$profile"' "$root/repo.sh"
 assert_present 'repo.sh lint runs Buck2 lint-labelled tests' grep -Fq '"$POLYGLOT_BUCK2" test //... --labels lint' "$root/repo.sh"
 
 environment=$($root/repo.sh exec bash -c 'printf "%s|%s|%s|%s|%s|%s\n" "$POLYGLOT_ROOT" "$POLYGLOT_TARGET" "$CXX" "$GOROOT" "$DENO_DIR" "$PYTHONPATH"')

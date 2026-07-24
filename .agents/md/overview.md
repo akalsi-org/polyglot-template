@@ -36,7 +36,7 @@ Lane commands are thin wrappers over Buck2: `build [dbg|opt]` builds every lane'
 2. Use `./repo.sh format` to apply formatting and `./repo.sh format --check` before handoff. `./repo.sh lint` includes the non-mutating format check.
 3. Use the lane test while iterating (`cpp-test`, `python-test`, `ts-test`, `tsweb-test`, or `go-test`), then `./repo.sh test` for a cross-lane change. Run `./repo.sh coverage` when changing executed behavior.
 4. Use `./repo.sh build [dbg|opt]` rather than hand-maintaining aggregate build lists; it discovers primary rule kinds automatically. For an ad hoc graph question, use `./repo.sh buck2 ...`.
-5. Never edit `.local/`, `build/`, `dist/`, `buck-out/`, generated `compile_commands.json`, or toolchain wrappers as source. Regenerate the compilation database with `./repo.sh compile-commands`.
+5. Never edit `.local/`, `build/`, `dist/`, `buck-out/`, generated `compile_commands.json`, or toolchain wrappers as source. Aggregate `build` and `test` refresh the matching-profile compilation database; use `./repo.sh compile-commands [dbg|opt]` after a clean when an editor-only refresh is needed.
 
 Code style is two spaces for repository-authored code, including Python, Starlark, C/C++, shell, JSON, and TOML. Python and Starlark block nesting is enforced at two spaces; C/C++ editors use `.clang-format` with two-space normal and continuation indents. Deno formats TypeScript with two spaces. Go is the sole syntax-level exception: it stays `gofmt`-canonical with tabs, rendered at width two by `.editorconfig` and VS Code. Do not hand-align generated-looking text, use tabs outside Go/Makefiles, or rely on host formatters; use `./repo.sh format`.
 
@@ -50,7 +50,7 @@ Keep new code inside its lane: `cpp/{lib,app,test}`, `python/{lib,app,test}`, `g
 - Deno/TypeScript: load `deno_library`, `deno_app`, `deno_check`, `deno_test`, or `vite_build` from `//rules:deno.bzl`. List every source in `srcs` and every source closure in `deps`; apps must list `main` in `srcs`. Add every new `deno_library` or `deno_app` to root `//:deno-cache`'s `deps`, or `./repo.sh lint` fails closed.
 - Tests: add a native test rule, not an untracked script. The test macros are discoverable by `./repo.sh test` and dbg coverage automatically. Use `--target-platforms //config:<native-target>-opt` when an opt-only test is needed; `-m` does not override these rules' default target platform.
 
-After adding a target, run its lane command, `./repo.sh lint`, and `./repo.sh test`. For a new C/C++ compile action, run `./repo.sh compile-commands` before handing off editor-facing work. Do not add a hand-maintained root build/test group: rule-kind discovery owns aggregate participation.
+After adding a target, run its lane command, `./repo.sh lint`, and `./repo.sh test`; aggregate build/test refresh the matching-profile compilation database. Use `./repo.sh compile-commands [dbg|opt]` only when an editor-only refresh is needed. Do not add a hand-maintained root build/test group: rule-kind discovery owns aggregate participation.
 
 ## Packaging
 

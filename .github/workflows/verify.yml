@@ -145,8 +145,8 @@ jobs:
           ./repo.sh cpp-build dbg
           ./repo.sh cpp-run dbg
 
-      - name: Generate merged coverage report
-        run: ./repo.sh coverage
+      - name: Generate merged coverage report from a cold Buck output tree
+        run: ./repo.sh exec buck2 clean && ./repo.sh coverage
 
       - name: Upload merged coverage report
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

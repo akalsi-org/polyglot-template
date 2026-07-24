@@ -30,11 +30,12 @@ class FunctionTest(unittest.TestCase):
       kwargs: dict[str, Any] | None = None,
       name_suffix: str = "",
   ):
-    super().__init__("run_test")
     self._function = function
     self._args = args
     self._kwargs = kwargs or {}
     self._name_suffix = name_suffix
+    method = "_run_expected_failure" if getattr(function, "__unittest_expecting_failure__", False) else "run_test"
+    super().__init__(method)
 
   def id(self) -> str:
     base = f"{self._function.__module__}.{self._function.__qualname__}"
@@ -43,7 +44,7 @@ class FunctionTest(unittest.TestCase):
   def shortDescription(self) -> str | None:
     return inspect.getdoc(self._function)
 
-  def run_test(self) -> None:
+  def _run_function(self) -> None:
     if getattr(self._function, "__unittest_skip__", False):
       reason = getattr(self._function, "__unittest_skip_why__", "skipped")
       self.skipTest(reason)
@@ -61,6 +62,13 @@ class FunctionTest(unittest.TestCase):
       result = self._function(*self._args, **kwargs)
       if inspect.isawaitable(result):
         asyncio.run(result)
+
+  def run_test(self) -> None:
+    self._run_function()
+
+  @unittest.expectedFailure
+  def _run_expected_failure(self) -> None:
+    self._run_function()
 
 
 class Loader(unittest.TestLoader):
@@ -113,9 +121,15 @@ class Result(unittest.TextTestResult):
     self._started_at = time.perf_counter()
     super().startTest(test)
 
-  def _report(self, status: str, test: unittest.Testable) -> None:
+  def _report(self, status: str, test: unittest.Testable, reason: str | None = None) -> None:
     elapsed_ms = (time.perf_counter() - self._started_at) * 1000
-    self.stream.writeln(f"{status:5} {test.id()} ({elapsed_ms:.1f} ms)")
+    detail = f" [{reason}]" if reason else ""
+    self.stream.writeln(f"{status:5} {test.id()}{detail} ({elapsed_ms:.1f} ms)")
+
+  @staticmethod
+  def _xfail_reason(test: unittest.Testable) -> str | None:
+    function = getattr(test, "_function", None)
+    return getattr(function, "__xfail_reason__", None)
 
   def addSuccess(self, test: unittest.Testable) -> None:
     super().addSuccess(test)
@@ -132,6 +146,14 @@ class Result(unittest.TextTestResult):
   def addSkip(self, test: unittest.Testable, reason: str) -> None:
     super().addSkip(test, reason)
     self._report("SKIP", test)
+
+  def addExpectedFailure(self, test: unittest.Testable, err: Any) -> None:
+    super().addExpectedFailure(test, err)
+    self._report("XFAIL", test, self._xfail_reason(test))
+
+  def addUnexpectedSuccess(self, test: unittest.Testable) -> None:
+    super().addUnexpectedSuccess(test)
+    self._report("XPASS", test, self._xfail_reason(test))
 
 
 class Runner(unittest.TextTestRunner):
