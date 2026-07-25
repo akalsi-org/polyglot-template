@@ -148,4 +148,17 @@ export POLYGLOT_LOCK_FILE="$tmp/header.lock.toml"
 "$ROOT/repo.sh" bootstrap --offline | grep -q 'installed header-fixture 1.0'
 "$ROOT/repo.sh" doctor --deep | grep -q 'ok: header-fixture 1.0'
 
+# ShellCheck is a pinned artifact, and `./repo.sh lint` runs it
+# unconditionally. It used to be an opportunistic `command -v` check, which
+# meant its findings appeared only on CI, where the host happened to provide
+# it - a comment that ShellCheck parsed as a malformed directive passed lint
+# locally and broke the CI run. Assert both halves of the fix: the tool is
+# locked, and lint depends on the pinned copy rather than PATH.
+unset POLYGLOT_LOCK_FILE
+grep -Fq 'tool = "shellcheck"' "$ROOT/tools.lock.toml"
+grep -Fq '"$POLYGLOT_SHELLCHECK" --severity=error --shell=bash' "$ROOT/repo.sh"
+if grep -Fq 'command -v shellcheck' "$ROOT/repo.sh"; then
+  printf 'repo.sh still gates shell linting on a host-provided ShellCheck\n' >&2; exit 1
+fi
+
 printf 'bootstrap smoke: ok\n'

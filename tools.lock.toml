@@ -162,3 +162,26 @@ url = "https://files.pythonhosted.org/packages/52/04/ed8e2af6b3e29655a858b3aad14
 sha256 = "ffca915c09aed9137f8c649ad7521bd5ce690c939121db1ba54af2ba63ac8374"
 archive = "clang_format-19.1.7-py2.py3-none-musllinux_1_2_aarch64.whl"
 expected = "clang_format/data/bin/clang-format"
+
+# shellcheck ships statically linked binaries with no runtime dependencies, so
+# it needs neither the musl loader nor a library path - a plain direct wrapper
+# is enough. Pinning it turns shell linting from an opportunistic host-provided
+# gate (present on CI, absent on most developer machines, so its findings
+# surfaced only after a push) into a guaranteed one.
+[[artifact]]
+tool = "shellcheck"
+target = "x86_64-linux-musl"
+version = "0.10.0"
+url = "https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz"
+sha256 = "6c881ab0698e4e6ea235245f22832860544f17ba386442fe7e9d629f8cbedf87"
+archive = "shellcheck-v0.10.0.linux.x86_64.tar.xz"
+expected = "shellcheck-v0.10.0/shellcheck"
+
+[[artifact]]
+tool = "shellcheck"
+target = "aarch64-linux-musl"
+version = "0.10.0"
+url = "https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.aarch64.tar.xz"
+sha256 = "324a7e89de8fa2aed0d0c28f3dab59cf84c6d74264022c00c22af665ed1a09bb"
+archive = "shellcheck-v0.10.0.linux.aarch64.tar.xz"
+expected = "shellcheck-v0.10.0/shellcheck"

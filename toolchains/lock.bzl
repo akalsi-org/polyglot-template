@@ -120,4 +120,20 @@ TOOLCHAINS = {
       "version": "3.14.6+20260610",
     },
   },
+  "shellcheck": {
+    "aarch64-linux-musl": {
+      "archive": "shellcheck-v0.10.0.linux.aarch64.tar.xz",
+      "expected": "shellcheck-v0.10.0/shellcheck",
+      "sha256": "324a7e89de8fa2aed0d0c28f3dab59cf84c6d74264022c00c22af665ed1a09bb",
+      "url": "https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.aarch64.tar.xz",
+      "version": "0.10.0",
+    },
+    "x86_64-linux-musl": {
+      "archive": "shellcheck-v0.10.0.linux.x86_64.tar.xz",
+      "expected": "shellcheck-v0.10.0/shellcheck",
+      "sha256": "6c881ab0698e4e6ea235245f22832860544f17ba386442fe7e9d629f8cbedf87",
+      "url": "https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz",
+      "version": "0.10.0",
+    },
+  },
 }

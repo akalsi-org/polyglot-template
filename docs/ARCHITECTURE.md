@@ -135,7 +135,10 @@ task runner layered over a separate jobserver.
   targets.
 - `lint` runs `buck2 test //... --labels lint` (every lane's
   formatting/static-policy targets, selected by label) plus infra checks
-  (`bash -n` over the shell scripts, `tools/lint.py`) that have no buck2
+  (`bash -n` and pinned ShellCheck over the shell scripts — ShellCheck is
+  a locked artifact like every other tool, so the gate is mandatory rather
+  than dependent on what the host happens to provide — plus
+  `tools/lint.py`) that have no buck2
   target because they check files outside the buck2 graph.
 - `coverage` is default-on-for-`dbg`: every instrumented lane's test
   collects coverage as a normal build output under `dbg`, and

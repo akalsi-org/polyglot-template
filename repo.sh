@@ -48,7 +48,7 @@ tool_path() {
 }
 
 setup_environment() {
-  local target gcc python deno go buck2 clang_format gcc_bin go_root path_prefix loader loader_path env_bin gcc_install jobs
+  local target gcc python deno go buck2 clang_format shellcheck gcc_bin go_root path_prefix loader loader_path env_bin gcc_install jobs
   target=$("$ROOT/toolchain/target.sh")
   export POLYGLOT_TARGET=$target
   export POLYGLOT_LOCK_FILE=${POLYGLOT_LOCK_FILE:-$ROOT/tools.lock.toml}
@@ -59,7 +59,8 @@ setup_environment() {
   go=$(tool_path go)
   buck2=$(tool_path buck2)
   clang_format=$(tool_path clang-format)
-  for tool in "$gcc" "$python" "$deno" "$go" "$buck2" "$clang_format"; do
+  shellcheck=$(tool_path shellcheck)
+  for tool in "$gcc" "$python" "$deno" "$go" "$buck2" "$clang_format" "$shellcheck"; do
     [[ -x $tool ]] || { printf 'error: pinned toolchain is not installed; run ./repo.sh bootstrap\n' >&2; return 1; }
   done
 
@@ -73,13 +74,14 @@ setup_environment() {
   env_bin="$POLYGLOT_LOCAL_DIR/bin"
   export CC="${gcc%g++}gcc"
   export CXX=$gcc
-  write_repo_tool_wrappers "$POLYGLOT_LOCAL_DIR" "$CC" "$CXX" "$python" "$loader_path" "$deno" "$go" "$buck2" "$clang_format" "$gcc_install" "$target"
+  write_repo_tool_wrappers "$POLYGLOT_LOCAL_DIR" "$CC" "$CXX" "$python" "$loader_path" "$deno" "$go" "$buck2" "$clang_format" "$gcc_install" "$target" "$shellcheck"
   export POLYGLOT_CXX=$gcc
   export POLYGLOT_PYTHON=$python
   export POLYGLOT_DENO=$deno
   export POLYGLOT_GO=$go
   export POLYGLOT_BUCK2=$buck2
   export POLYGLOT_CLANG_FORMAT=$env_bin/clang-format
+  export POLYGLOT_SHELLCHECK=$env_bin/shellcheck
   export GOROOT=$go_root
   export GOPATH="$POLYGLOT_LOCAL_DIR/cache/go/path"
   export GOMODCACHE="$POLYGLOT_LOCAL_DIR/cache/go/mod"
@@ -357,17 +359,18 @@ case "$command" in
     for script in "${infra_scripts[@]}"; do
       bash -n "$script" || { printf 'error: shell syntax check failed: %s\n' "$script" >&2; exit 1; }
     done
-    # shellcheck is not a pinned toolchain artifact (it is a Haskell binary
-    # with no entry in tools.lock.toml), so it can only be an opportunistic
-    # gate: it runs when the host happens to provide it and is skipped
-    # otherwise. `bash -n` above is the guaranteed floor. To make shellcheck
-    # mandatory it must first be pinned in tools.lock.toml and installed by
-    # bootstrap like every other tool.
-    if command -v shellcheck >/dev/null 2>&1; then
-      shellcheck --severity=error --shell=bash -- "${infra_scripts[@]}"
-    else
-      printf 'infra-lint: shellcheck not on PATH; syntax-only shell gating\n'
-    fi
+    # Pinned in tools.lock.toml and installed by bootstrap, so this is a
+    # MANDATORY gate, not the opportunistic `command -v` check it used to be.
+    # That version ran only where the host happened to provide the binary -
+    # CI, essentially never a developer machine - so its findings appeared
+    # for the first time after a push. A statically linked 2.3MB download is
+    # a small price for a gate that fails where the code is written.
+    #
+    # NOTE for anyone editing comments in this repository's shell scripts: a
+    # comment whose first word is "shellcheck" is parsed as a DIRECTIVE, and
+    # an unrecognized directive key is a hard error (SC1072/SC1073), not a
+    # warning. That is exactly how prose here once broke CI.
+    "$POLYGLOT_SHELLCHECK" --severity=error --shell=bash -- "${infra_scripts[@]}"
     pinned_python "$ROOT/tools/lint.py"
     ;;
   format)

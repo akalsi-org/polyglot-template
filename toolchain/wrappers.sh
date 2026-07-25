@@ -52,7 +52,7 @@ exec \"\$ROOT/$loader_rel\" --library-path \"\$ROOT/$loader_dir_rel:\$ROOT/$clan
 
 write_repo_tool_wrappers() {
   local local_dir=$1 cc=$2 cxx=$3 python=$4 loader=$5 deno=$6 go=$7 buck2=$8 clang_format=$9
-  local gcc_install=${10} target=${11} env_bin binutil binutil_rel
+  local gcc_install=${10} target=${11} shellcheck=${12} env_bin binutil binutil_rel
   env_bin="$local_dir/bin"
   mkdir -p "$env_bin"
   write_python_tool_wrapper "$local_dir" "$env_bin/python" "$python" "$loader"
@@ -63,6 +63,10 @@ write_repo_tool_wrappers() {
   write_direct_tool_wrapper "$local_dir" "$env_bin/deno" "$deno"
   write_direct_tool_wrapper "$local_dir" "$env_bin/buck2" "$buck2"
   write_clang_format_tool_wrapper "$local_dir" "$env_bin/clang-format" "$clang_format" "$loader"
+  # Statically linked: no loader, no --library-path, so the direct wrapper
+  # applies. Written last so an older bootstrap that has every other tool but
+  # not this one still produces the wrappers it can.
+  write_direct_tool_wrapper "$local_dir" "$env_bin/shellcheck" "$shellcheck"
   for binutil in ar ranlib nm strip objcopy ld; do
     binutil_rel=$(lock_value gcc-musl "$target" "$binutil")
     write_direct_tool_wrapper "$local_dir" "$env_bin/$binutil" "$gcc_install/$binutil_rel"

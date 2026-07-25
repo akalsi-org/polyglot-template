@@ -187,7 +187,7 @@ tool_install_path() {
 }
 
 write_bootstrap_wrappers() {
-  local cxx cc python deno go buck2 clang_format loader gcc_version loader_path gcc_install
+  local cxx cc python deno go buck2 clang_format shellcheck loader gcc_version loader_path gcc_install
   cxx=$(tool_install_path gcc-musl) || return 0
   cc="${cxx%g++}gcc"
   python=$(tool_install_path python) || return 0
@@ -195,14 +195,15 @@ write_bootstrap_wrappers() {
   go=$(tool_install_path go) || return 0
   buck2=$(tool_install_path buck2) || return 0
   clang_format=$(tool_install_path clang-format) || return 0
+  shellcheck=$(tool_install_path shellcheck) || return 0
   gcc_version=$(lock_value gcc-musl "$target" version)
   loader=$(lock_value gcc-musl "$target" loader)
   gcc_install="$LOCAL/toolchain/$target/gcc-musl-$gcc_version"
   loader_path="$gcc_install/$loader"
-  for tool in "$cc" "$cxx" "$python" "$deno" "$go" "$buck2" "$clang_format" "$loader_path"; do
+  for tool in "$cc" "$cxx" "$python" "$deno" "$go" "$buck2" "$clang_format" "$shellcheck" "$loader_path"; do
     [[ -x $tool ]] || return 0
   done
-  write_repo_tool_wrappers "$LOCAL" "$cc" "$cxx" "$python" "$loader_path" "$deno" "$go" "$buck2" "$clang_format" "$gcc_install" "$target"
+  write_repo_tool_wrappers "$LOCAL" "$cc" "$cxx" "$python" "$loader_path" "$deno" "$go" "$buck2" "$clang_format" "$gcc_install" "$target" "$shellcheck"
   printf 'bootstrap: wrote self-contained tool wrappers\n'
 }
 
@@ -277,6 +278,14 @@ install_one() {
   rm -rf -- "$old"
   tree_content_hash "$install" >"$stamp"
   trap - RETURN
+  # A running buck2 daemon holds its binary by path. Replacing that binary
+  # leaves the daemon alive but broken, and the NEXT command fails with
+  # "Failed to start .../buck2 (deleted)" - an error about a path that no
+  # longer exists, from a command that did nothing wrong. Reinstalling buck2
+  # therefore retires the daemons of the binary it replaced.
+  if [[ $tool == buck2 ]]; then
+    "$install/$expected" killall >/dev/null 2>&1 || true
+  fi
   printf 'bootstrap: installed %s %s for %s\n' "$tool" "$version" "$target"
 }
 
