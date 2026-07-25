@@ -29,18 +29,26 @@ Editors use two-space indentation across the repository. Go source remains `gofm
 
 ### Instantiating A New Repository From This Template
 
-This repository is a template. After cloning it as the starting point for a new
-project, rename its namespaces once, before writing project code:
+This repository is a template. Clone it, then run `init-project` once, before
+writing project code:
 
 ```bash
-./repo.sh init-project <new-project-name> [new-org-name]
+git clone ssh://git@github.com/akalsi-org/polyglot-template my-project
+cd my-project
+./repo.sh init-project my-project my-org
 ```
+
+That single command renames, strips the template-only fat, and leaves you with
+a fresh repository: one commit, no tags, no upstream. It never pushes - the
+commands to attach your own remote are printed at the end.
 
 `init-project` runs `tools/init_project.py` through the pinned interpreter. It
 rewrites the repository namespace, the Go module path
 (`github.com/<org>/<project>`), package catalog entries, and documentation
 references away from `polyglot-template`/`akalsi-org`. The organization argument
-is optional; omitting it keeps the current organization.
+is optional; omitting it keeps the current organization. `LICENSE` is left
+alone on purpose: its copyright line names a holder, not a namespace, and
+reassigning it is a claim only you can make.
 
 It then walks you, one file at a time, through this template's own
 self-referential test files (`test/docs-contract.sh`,
@@ -52,6 +60,27 @@ file is or isn't safe to remove and, if you remove one, also drops its
 invocation from `repo.sh`'s `infra-test` gate. Answer non-interactively with
 `--keep-all-tests` or `--strip-all-tests` (e.g. for scripted forking); the
 command fails closed if stdin isn't a terminal and neither flag is given.
+
+A second pass then offers the leaf demo code itself - the greeting/hello
+example library and app in the C++ and Python lanes, which exist only so a
+fresh clone has something that builds. Removing a group also applies the edits
+that removal requires elsewhere (`cpp/test/BUCK`, `python/test/BUCK`,
+`packages/BUCK`, `packages/catalog.bzl`, `test/graph-compdb-contract.sh`), so
+the graph stays buildable rather than merely smaller; it then prints the
+`repo.sh` lane verbs (`cpp-run`, `python-build`, ...) that now name a removed
+target and are yours to repoint. `--keep-all-demos` / `--strip-all-demos`
+answer this pass non-interactively.
+
+Reusable infrastructure is never a prune candidate, including some that does
+not look like infrastructure: `cpp/lib/pyfast/` and its test fixture under
+`python/test/` (`pyfast_test_ext.c`, `extension_init.py`,
+`test_pyfast_extension.py` - the only thing that tests `pyfast.h`),
+`python/lib/testlib.py` with its self-test and `tools/py_test_runner.py`,
+`python/lib/fastbytes/` (the worked `py_extension` example), and
+`cpp/test/reflection.cc` (`rules/toolchain.bzl`'s reflection capability
+probe). Whole lanes (`go/`, `ts/`, `tsweb/`) and the demo package entries are
+deliberately not offered - removing those means editing `repo.sh`,
+`//:deno-cache`, `go.mod`/`vendor/`, and CI, which is a fork's own job.
 
 Re-run bootstrap-backed commands afterward and verify with
 `./repo.sh doctor --deep`, `./repo.sh test`, and `./repo.sh infra-test`.

@@ -70,8 +70,38 @@ catalog/example code (`polyglot-demo`, `gateway`, the `go-cmp` import in
 `tools/init_project.py` alongside the existing ones — same file, same
 docstring's MAINTAINER NOTE. If the file tests a Buck2 rule or tool
 mechanism generically (deriving its expectations from the tree rather than
-hardcoding this repo's identity, the way `deno-manifest-contract.sh` and
-`graph-compdb-contract.sh` do), it does not belong on that list.
+hardcoding this repo's identity, the way `deno-manifest-contract.sh` does),
+it does not belong on that list. `graph-compdb-contract.sh` is the in-between
+case: it exercises the BXL compdb generically but names four specific graph
+compile actions, two of which are demo sources — so it stays off
+`TEST_STRIP_CANDIDATES` and is instead edited by the demo-pruning pass below.
+
+### Adding Or Removing Demo Code
+
+`./repo.sh init-project`'s second pass prunes leaf demo code
+(`tools/init_project.py`'s `DEMO_STRIP_GROUPS`): the greeting/hello example
+library and app in the C++ and Python lanes. Each group carries the exact
+`Edit`s its removal requires elsewhere in the graph, so every group leaves
+`./repo.sh build`, `test`, `lint`, and `infra-test` passing on its own and in
+any combination.
+
+Two rules when touching that list. First, a new file that only exists to give
+a lane something that builds belongs to a group, and anything that starts
+*referencing* demo code — a BUCK dep list, a catalog entry, a hardcoded path
+in a `test/` contract — has to be added as an `Edit` on the owning group, or
+pruning silently produces a broken graph. Second, keep it to LEAF demo code:
+whole lanes (`go/`, `ts/`, `tsweb/`) and the demo package entries are
+deliberately not candidates, because removing those means rewriting
+`repo.sh`'s per-lane verbs, root `//:deno-cache`'s hand-listed closure,
+`go/BUCK`'s lint dep lists, `go.mod`/`vendor/`, and
+`.github/workflows/verify.yml`.
+
+The KEEP-LIST in that module's docstring records the infrastructure that is
+never a candidate. Consult it before assuming a file is demo scaffolding:
+`python/test/pyfast_test_ext.c` and friends read like a demo fixture but are
+`pyfast.h`'s only test, and `cpp/test/reflection.cc` is
+`rules/toolchain.bzl`'s reflection capability probe — deleting `cpp/test/`
+breaks the toolchain, not just the tests.
 
 ## Packaging
 
