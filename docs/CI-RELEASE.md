@@ -48,9 +48,15 @@ stylesheet, script, or font, so it opens over `file://` with no server and no
 network.
 
 The same generator writes the GitHub **job summary**: a headline total, a
-per-directory rollup, and an expandable per-file table listing each file's
-uncovered line ranges, worst-covered first, with a link to the artifact
-holding the interactive page. Both renderings come from one in-memory model,
+per-directory rollup, an expandable per-file table listing each file's
+uncovered line ranges worst-covered first, and — under *Uncovered lines in
+context* — the actual source of every uncovered region with three lines of
+surrounding context, rendered in a ```diff block so GitHub colours the
+uncovered lines red without any stylesheet. That last section exists so the
+common case needs no download at all: the artifact is the deep-dive, not the
+only way to read the result. Excerpts are budgeted well under the 1 MiB
+summary limit and state how many files they dropped. A link to the artifact
+holding the interactive page sits at the top. Both renderings come from one in-memory model,
 so the summary cannot disagree with the report it links to. The job summary is
 Markdown because GitHub strips `<script>` and `<style>` from summaries — the
 page itself cannot be inlined there. Both are published with `if: always()`,

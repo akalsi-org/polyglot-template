@@ -431,6 +431,74 @@ def _uncovered_ranges(counts):
 # out instead. See docs/CI-RELEASE.md.
 _MAX_SUMMARY_ROWS = 200
 _MAX_RANGES = 8
+_CONTEXT_LINES = 3
+# Budget for the annotated excerpts, well under GitHub's 1 MiB so the tables
+# above can never be pushed over the cliff by them.
+_MAX_EXCERPT_BYTES = 400_000
+
+
+def _annotated_hunks(entry, context = _CONTEXT_LINES):
+  """Renders each uncovered region of a file with surrounding source.
+
+  Emitted as a ```diff block: GitHub colours a leading "-" red, which is
+  exactly the emphasis an uncovered line wants, and it needs no stylesheet -
+  the job-summary renderer allows no CSS. Every line is prefixed with its
+  marker and number, so source text that happens to start with "-" or "+"
+  cannot be mistaken for a marker.
+  """
+  source = entry["source"]
+  if not source:
+    return None
+  missed = sorted(int(number) for number, count in entry["counts"].items() if count == 0)
+  if not missed:
+    return None
+  # Merge regions whose context windows touch, so adjacent misses read as one
+  # hunk instead of repeating the same surrounding lines.
+  regions = []
+  for number in missed:
+    low, high = number - context, number + context
+    if regions and low <= regions[-1][1] + 1:
+      regions[-1][1] = max(regions[-1][1], high)
+    else:
+      regions.append([low, high])
+
+  width = len(str(min(len(source), regions[-1][1])))
+  lines = []
+  for index, (low, high) in enumerate(regions):
+    if index:
+      lines.append("@@")
+    for number in range(max(1, low), min(len(source), high) + 1):
+      count = entry["counts"].get(str(number))
+      marker = "-" if count == 0 else " "
+      lines.append("%s %*d | %s" % (marker, width, number, source[number - 1]))
+  return "\n".join(lines)
+
+
+def _render_excerpts(entries):
+  """Annotated source for every file with uncovered lines, worst first."""
+  blocks = []
+  budget = _MAX_EXCERPT_BYTES
+  omitted = 0
+  for entry in entries:
+    hunks = _annotated_hunks(entry)
+    if hunks is None:
+      continue
+    block = ("<details><summary><code>%s</code> - %d uncovered line%s</summary>\n\n"
+             "```diff\n%s\n```\n\n</details>\n"
+             % (entry["path"], entry["found"] - entry["hit"],
+                "" if entry["found"] - entry["hit"] == 1 else "s", hunks))
+    if len(block) > budget:
+      omitted += 1
+      continue
+    budget -= len(block)
+    blocks.append(block)
+  if not blocks:
+    return []
+  out = ["### Uncovered lines in context", ""] + blocks
+  if omitted:
+    out.append("_%d further file%s omitted to stay within GitHub's job-summary size "
+               "limit; the HTML report has them all._" % (omitted, "" if omitted == 1 else "s"))
+  return out
 
 
 def render_markdown(report, title, html_link = None):
@@ -492,6 +560,10 @@ def render_markdown(report, title, html_link = None):
     lines.append("_%d further files are fully covered or omitted from this table; "
                  "the HTML report lists every file._" % (len(ranked) - len(shown)))
   lines += ["", "</details>", ""]
+  # The reason to open a coverage report is to read the lines that are not
+  # covered. Inlining them here means the common case needs no download and
+  # no hosting: the HTML report stays the deep-dive, not the only way in.
+  lines += _render_excerpts(ranked)
   return "\n".join(lines) + "\n"
 
 
