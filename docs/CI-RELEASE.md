@@ -95,10 +95,14 @@ bindings, then writes and publishes the deterministic
 `release-manifest.json`, which lists every target archive, checksum, SBOM, and
 provenance sidecar.
 
-The verification matrix uploads those verified files as cross-job artifacts and
-uses GitHub's `actions/attest` action to create an artifact attestation for each
-target archive. After both targets pass, the release job downloads the archives
-and evidence, verifies checksums and evidence bindings, and runs:
+The verification matrix uploads those verified files as cross-job artifacts.
+After both targets pass, the release job downloads the archives and evidence,
+verifies checksums and evidence bindings, publishes, and only then uses
+GitHub's `actions/attest` action to create an artifact attestation covering
+every published archive — after the checksum verification, so the workflow's
+identity is never bound to bytes nothing has checked. The verification
+workflow itself mints no attestation and holds no write scope; see the token
+scope note below. The release job runs:
 
 ```bash
 ./repo.sh release-notes packages/<name>/v<version>
@@ -124,10 +128,17 @@ Buck-owned catalog.
 - It uploads gzip tar archives, checksum sidecars, deterministic SBOM and
   provenance sidecars, and `release-manifest.json`. It does not publish
   Zstandard archives, static extractors, or self-extracting installers.
-- The package-release workflow grants `attestations: write`,
-  `artifact-metadata: write`, and `id-token: write` to its verification caller;
-  each tagged target archive receives a GitHub artifact attestation. The release
-  job separately adds `contents: write` to publish or reconcile release assets.
+- Token scope: `verify.yml` declares `contents: read` and no job in it
+  requests more. That is a hard constraint, not a preference — a called
+  workflow's job may request no more than its caller grants, and
+  `ci-release.yml` (branch and PR runs) grants read only, so a single write
+  scope in `verify.yml` makes the workflow file invalid on *every* branch
+  push, whether or not the job that asks for it would ever run. Attestation
+  therefore lives in `package-release.yml`'s release job, which lists every
+  scope it needs (`contents: write` to publish, plus `attestations: write`,
+  `artifact-metadata: write`, and `id-token: write` to attest) because a
+  job-level block replaces the workflow-level one. Each published archive
+  receives a GitHub artifact attestation.
 - `gh release create --verify-tag` confirms that the tag exists remotely. It
   does not make an existing release mutable.
 

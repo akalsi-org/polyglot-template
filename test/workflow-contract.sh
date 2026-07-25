@@ -4,6 +4,7 @@ set -euo pipefail
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 workflow=$root/.github/workflows/verify.yml
 release_workflow=$root/.github/workflows/package-release.yml
+caller_workflow=$root/.github/workflows/ci-release.yml
 
 fail() {
   printf 'workflow contract: failed: %s\n' "$1" >&2
@@ -81,8 +82,13 @@ assert_present 'Deno dependency cache includes node_modules' grep -Fq '         
 assert_present 'release workflow only runs for package tags' grep -Fq 'tags: ["packages/*/v*"]' "$release_workflow"
 assert_present 'release workflow preserves in-progress releases' grep -Fq 'cancel-in-progress: false' "$release_workflow"
 assert_present 'release workflow checks for an existing release' grep -Fq 'gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY"' "$release_workflow"
-assert_present 'workflow pins actions/attest to the approved SHA' grep -Fq 'actions/attest@36051bcae73b7c2a8a6945a48cbf80953c6baa35' "$workflow"
-assert_present 'package release caller grants attestation write permission' grep -Fq 'attestations: write' "$release_workflow"
+assert_present 'release workflow pins actions/attest to the approved SHA' \
+  grep -Fq 'actions/attest@36051bcae73b7c2a8a6945a48cbf80953c6baa35' "$release_workflow"
+assert_present 'release workflow grants attestation write permission' grep -Fq 'attestations: write' "$release_workflow"
+assert_present 'attestation is minted by the publisher, over published archives' \
+  grep -Fq 'subject-path: artifacts/*.tar.gz' "$release_workflow"
+assert_order 'archives are attested only after their checksums are verified' "$release_workflow" \
+  'sha256sum --check' 'Attest published package archives'
 assert_present 'release workflow validates published checksums' grep -Fq 'sha256sum --check' "$release_workflow"
 assert_present 'verify workflow records checksums against the bare archive name' \
   grep -Fq '(cd dist && sha256sum "$(basename "$archive")" > "$(basename "$archive").sha256")' "$workflow"
@@ -90,12 +96,20 @@ assert_absent 'verify workflow must not bake the dist/ prefix into a checksum bo
   grep -Eq '^ +sha256sum "\$archive" > "\$archive\.sha256"$' "$workflow"
 assert_present 'verify workflow defaults every job to read-only token scope' \
   grep -Eq '^permissions:$' "$workflow"
-assert_count 'verify workflow grants id-token write exactly once, at job level' 1 \
-  '^      id-token: write$' "$workflow"
-assert_count 'verify workflow grants attestation write exactly once, at job level' 1 \
-  '^      attestations: write$' "$workflow"
-assert_order_pattern 'the read-only workflow default precedes any job-level grant' "$workflow" \
-  '^permissions:$' '^      id-token: write$'
+# THE rule that a previous iteration got wrong, and that GitHub only reports
+# as "Invalid workflow file" at dispatch time, on every branch push: a called
+# workflow's job may request no more than its CALLER grants. Both callers of
+# verify.yml reach it through a `verify:` job with no permissions block, so
+# verify.yml's effective ceiling is ci-release.yml's `contents: read`. Any
+# write scope anywhere in the called workflow invalidates it - assert on the
+# scopes, not on where they appear, because the failure is total.
+for scope in 'id-token: write' 'attestations: write' 'artifact-metadata: write' 'contents: write'; do
+  assert_absent "verify workflow must not request '$scope' (it exceeds its caller's grant)" \
+    grep -Fq "$scope" "$workflow"
+done
+assert_absent 'verify workflow must not mint attestations' grep -Fq 'actions/attest@' "$workflow"
+assert_absent 'the verify caller must not widen token scope for branch runs' \
+  grep -Eq 'id-token: write|attestations: write' "$caller_workflow"
 assert_absent 'verify workflow must not expand a tag-derived value into a run body' \
   grep -Fq 'package=${{ steps.package.outputs.name }}' "$workflow"
 assert_present 'verify workflow passes the tag-derived package name as environment data' \
