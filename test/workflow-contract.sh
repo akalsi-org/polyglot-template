@@ -181,6 +181,14 @@ for command in \
 done
 assert_present 'workflow generates coverage from a cold Buck output tree' \
   grep -Fq './repo.sh exec buck2 clean && ./repo.sh coverage' "$workflow"
+# The lint job's gates must precede the offline replay. The replay begins with
+# `buck2 clean`, so gates placed after it rebuild the whole graph from scratch
+# on a cold daemon - measured at roughly double the lint step's cost - while
+# the restored buck-out cache is thrown away having served one toolchain
+# build. Ordering is the entire fix, so it is the thing asserted.
+assert_order 'lint job gates run before the cache-destroying offline replay' "$workflow" \
+  'name: Run repository quality gates & infra tests' \
+  'name: Offline full-graph replay (cold buck-out, no network)'
 assert_present 'workflow uploads a target-keyed merged coverage artifact' \
   grep -Fq 'name: coverage-${{ matrix.target }}' "$workflow"
 assert_present 'workflow uploads the merged lcov report' \

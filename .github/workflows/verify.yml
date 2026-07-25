@@ -82,15 +82,14 @@ jobs:
           rm -f buck2-second-build.log
           ./repo.sh exec buck2 kill
 
-      - name: Offline full-graph replay (cold buck-out, no network)
-        run: |
-          set -euo pipefail
-          sudo sysctl -qw kernel.apparmor_restrict_unprivileged_userns=0 || true
-          unshare -rn true || { echo "error: unprivileged user+net namespaces unavailable; cannot prove offline replay" >&2; exit 1; }
-          ./repo.sh exec buck2 kill || true
-          unshare -rn sh -c 'ip link set lo up 2>/dev/null || true; ./repo.sh exec buck2 clean && ./repo.sh build && ./repo.sh test'
-          ./repo.sh exec buck2 kill
-
+      # BEFORE the offline replay, and the order is a measured cost, not a
+      # preference. The replay's first act is `buck2 clean`, so anything after
+      # it runs against a wiped buck-out and a cold daemon: this job used to
+      # restore a buck-out cache, spend it on one toolchain build, delete it,
+      # and then rebuild the whole graph a third time to lint it. Running the
+      # gates first spends the restored cache on them instead. The replay
+      # still starts from a clean tree, so it proves exactly what it did.
+      #
       # ./repo.sh infra-test now runs graph-compdb-contract.sh and
       # deno-manifest-contract.sh itself, so local `./repo.sh ci` covers
       # exactly what this job covers. Do not re-list them here.
@@ -99,6 +98,15 @@ jobs:
           ./repo.sh lint
           ./repo.sh package-validate
           ./repo.sh infra-test
+
+      - name: Offline full-graph replay (cold buck-out, no network)
+        run: |
+          set -euo pipefail
+          sudo sysctl -qw kernel.apparmor_restrict_unprivileged_userns=0 || true
+          unshare -rn true || { echo "error: unprivileged user+net namespaces unavailable; cannot prove offline replay" >&2; exit 1; }
+          ./repo.sh exec buck2 kill || true
+          unshare -rn sh -c 'ip link set lo up 2>/dev/null || true; ./repo.sh exec buck2 clean && ./repo.sh build && ./repo.sh test'
+          ./repo.sh exec buck2 kill
 
   test-dbg:
     name: test-dbg ${{ matrix.target }}
