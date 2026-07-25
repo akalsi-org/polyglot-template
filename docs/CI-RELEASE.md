@@ -62,6 +62,24 @@ Markdown because GitHub strips `<script>` and `<style>` from summaries — the
 page itself cannot be inlined there. Both are published with `if: always()`,
 so a run that fails the coverage floor still shows which lines are missing.
 
+To read the interactive page from a CI run, download the artifact — GitHub
+never serves artifact content as a page, so there is no URL to open:
+
+```bash
+gh run download --name coverage-x86_64-linux-musl
+# then open buck-out/coverage-report/coverage.html
+```
+
+Locally the same page is written directly by `./repo.sh coverage`, at
+`buck-out/coverage-report/coverage.html`; no download step is involved.
+
+Hosting it instead of downloading it would mean GitHub Pages, which is
+deliberately **not** wired up: serving a private repository's Pages requires
+GitHub Enterprise, so on this repository it would publish annotated source to
+a public URL. It would also need `pages: write` and `id-token: write`, which
+cannot live in `verify.yml` at all (see the token scope note below) and would
+have to be a separate job in `ci-release.yml`.
+
 The `test-opt` job runs `./repo.sh test opt`, builds and runs the C++ `opt`
 profile, runs the opt `pyfast` extension test directly against
 `//config:<target>-opt`, exercises the pinned Python runtime, and owns the
