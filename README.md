@@ -40,9 +40,21 @@ project, rename its namespaces once, before writing project code:
 rewrites the repository namespace, the Go module path
 (`github.com/<org>/<project>`), package catalog entries, and documentation
 references away from `polyglot-template`/`akalsi-org`. The organization argument
-is optional; omitting it keeps the current organization. Re-run bootstrap-backed
-commands afterward and verify with `./repo.sh doctor --deep` and
-`./repo.sh test`.
+is optional; omitting it keeps the current organization.
+
+It then walks you, one file at a time, through this template's own
+self-referential test files (`test/docs-contract.sh`,
+`test/workflow-contract.sh`, and others) - contracts that assert exact strings
+from *this repository's* docs, CI YAML, or demo catalog, not your project.
+Keeping them means they will start failing the moment you rewrite the README
+or customize CI, which forking implies you will; each prompt explains why that
+file is or isn't safe to remove and, if you remove one, also drops its
+invocation from `repo.sh`'s `infra-test` gate. Answer non-interactively with
+`--keep-all-tests` or `--strip-all-tests` (e.g. for scripted forking); the
+command fails closed if stdin isn't a terminal and neither flag is given.
+
+Re-run bootstrap-backed commands afterward and verify with
+`./repo.sh doctor --deep`, `./repo.sh test`, and `./repo.sh infra-test`.
 
 Running `./repo.sh` starts an interactive shell with the exact pinned
 toolchain, runtime, cache, and source-root environment. Use `./repo.sh exec`

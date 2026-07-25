@@ -52,6 +52,27 @@ Keep new code inside its lane: `cpp/{lib,app,test}`, `python/{lib,app,test}`, `g
 
 After adding a target, run its lane command, `./repo.sh lint`, and `./repo.sh test`; aggregate build/test refresh the matching-profile compilation database. Use `./repo.sh compile-commands [dbg|opt]` only when an editor-only refresh is needed. Do not add a hand-maintained root build/test group: rule-kind discovery owns aggregate participation.
 
+### Adding A `test/` File — Is It Self-Referential?
+
+`./repo.sh init-project` walks a fork through pruning this template's own
+self-referential tests (`tools/init_project.py`'s `TEST_STRIP_CANDIDATES`):
+files whose assertions are specific to THIS repository's own docs, CI YAML, or
+demo catalog/example code, rather than testing reusable Buck2 rule/tooling
+behavior. That list is not auto-discovered from `test/` — nothing scans for
+new files, so a new self-referential test left off it silently ships into
+every future fork and rots there, unpruned and eventually failing for reasons
+that have nothing to do with the fork's own project.
+
+When adding a file under `test/`, ask: does this assert exact strings from
+this repo's own prose/CI, or does it only pass because of the demo
+catalog/example code (`polyglot-demo`, `gateway`, the `go-cmp` import in
+`go/test/greeting_test.go`)? If so, add a `TestStripCandidate` entry in
+`tools/init_project.py` alongside the existing ones — same file, same
+docstring's MAINTAINER NOTE. If the file tests a Buck2 rule or tool
+mechanism generically (deriving its expectations from the tree rather than
+hardcoding this repo's identity, the way `deno-manifest-contract.sh` and
+`graph-compdb-contract.sh` do), it does not belong on that list.
+
 ## Packaging
 
 `packages/catalog.bzl` declares package identity/version/executables/runtime and resolved runtime closure. `package()` targets in `packages/BUCK` (`rules/package.bzl`) assemble packages with their own Buck2 target (currently `polyglot-demo`, `polyglot-server`) entirely in-graph from a generic `PackageInfo` contract each lane's rules emit, staging a flattened sibling layout (`bin/`, `lib/`, `runtime/`, plus per-lane roots like `python/`, `ts/`, `web/`) at the package root. `./repo.sh package <name> [dbg|opt]` requires a matching `//packages:<name>` Buck2 target and fails closed for catalog-only declarations (`gateway`, `schema-cli`); it has no raw-build assembly fallback. Each in-graph package's `package_smoke` target (`checks` + optional `smoke_script`) verifies the assembled archive. The current Deno application package support is limited to zero-npm-dependency closures.

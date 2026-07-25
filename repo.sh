@@ -612,7 +612,9 @@ case "$command" in
     "$POLYGLOT_BUCK2" test //packages:manifest-validate
     ;;
   init-project)
-    (($# >= 1 && $# <= 2)) || { printf 'usage: ./repo.sh init-project <new-project-name> [new-org-name]\n' >&2; exit 2; }
+    # Arg validation (including the new --keep-all-tests/--strip-all-tests
+    # flags) lives in init_project.py's argparse, not here - one place owns
+    # usage instead of two gates drifting apart.
     setup_environment
     pinned_python "$ROOT/tools/init_project.py" "$@"
     ;;
