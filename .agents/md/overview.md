@@ -45,7 +45,7 @@ Code style is two spaces for repository-authored code, including Python, Starlar
 Keep new code inside its lane: `cpp/{lib,app,test}`, `python/{lib,app,test}`, `go/{lib,app,test}`, `ts/{lib,app,test}`, or `tsweb/{lib,app,test}`. Put the target in the nearest `BUCK` file and copy the closest existing target before inventing attributes. First-party rule APIs, not a prelude or host build tool, are the contract:
 
 - C++: load `cxx_library`, `cxx_binary`, and `cxx_test` from `//rules:cxx.bzl`; public headers live below `cpp/lib` and are included by their logical `cpp/lib`-relative path. Give runnable binaries a stable `pkg_name` when they will be packaged.
-- Python: load `py_library`, `py_extension`, `py_binary`, and `py_tests` from `//rules:python.bzl`. `py_tests` defaults discovery to its own package, uses readable top-level `test_*` functions (including `async def`), and participates in dbg Python coverage. Native extensions use the pinned CPython ABI; C extensions declare `language = "c"`, and C++ header dependencies use `cxx_deps`. Keep import roots and `package` names explicit.
+- Python: load `py_library`, `py_extension`, `py_binary`, and `py_test` from `//rules:python.bzl`. `py_test` defaults discovery to its own package, uses readable top-level `test_*` functions (including `async def`), and participates in dbg Python coverage. Native extensions use the pinned CPython ABI; C extensions declare `language = "c"`, and C++ header dependencies use `cxx_deps`. Keep import roots and `package` names explicit.
 - Go: load `go_library`, `go_binary`, and `go_test` from `//rules:go.bzl`. Keep `CGO_ENABLED=0`; give binaries a `pkg_name` for packaging. A test that invokes `main()` depends on its sibling binary target so Buck tracks `main.go`.
 - Deno/TypeScript: load `deno_library`, `deno_app`, `deno_check`, `deno_test`, or `vite_build` from `//rules:deno.bzl`. List every source in `srcs` and every source closure in `deps`; apps must list `main` in `srcs`. Add every new `deno_library` or `deno_app` to root `//:deno-cache`'s `deps`, or `./repo.sh lint` fails closed.
 - Tests: add a native test rule, not an untracked script. The test macros are discoverable by `./repo.sh test` and dbg coverage automatically. Use `--target-platforms //config:<native-target>-opt` when an opt-only test is needed; `-m` does not override these rules' default target platform.
@@ -72,9 +72,13 @@ Repository-owned skills, when added, belong under `.agents/skills/`. This checko
 
 ## Reviews
 
-After any large pass (multi-file feature, migration stage, sweeping cleanup), run two parallel external reviews before committing, both through OMC (`omc team 1:antigravity:code-reviewer ...`): one worker pinned to "Gemini 3.1 Pro (High)" (agy display name) and one to GPT 5.6 Terra (codex worker, model slug `gpt-5.6-terra`). Pass each a short task string pointing at a review brief file (long inline tasks break tmux submission); triage their verdicts adversarially — confirm findings against sources before fixing, and record refuted claims rather than silently dropping them.
+After any large pass (multi-file feature, migration stage, sweeping cleanup), obtain at least one independent review before committing. Independent means a reviewer that did not write the change. Prefer two independent reviewers for a change that crosses lanes, contracts, or the release path.
 
-If either external review cannot start, times out, or returns an infrastructure error, do not represent it as approval: record the failed reviewer and reason in the handoff, then run the equivalent local review with the available code-reviewer/verifier tools. A fallback review is useful evidence, but it does not erase the external-review failure.
+Write the review brief to a file and point the reviewer at that path rather than pasting a long task inline. Triage verdicts adversarially: confirm each finding against the source it cites before fixing, and record refuted claims rather than silently dropping them.
+
+If a review cannot start, times out, or returns an infrastructure error, do not represent it as approval. Record the failed reviewer and the reason in the handoff, then run the equivalent local review with whatever tooling is available. A fallback review is useful evidence, but it does not erase the failure.
+
+Which review tool, vendor, or model provides that review is machine-local configuration. It is not a repository contract and must not be pinned here — see PRINCIPLES.md P14.
 
 ## Agent Safety And Handoff
 
@@ -89,21 +93,6 @@ If either external review cannot start, times out, or returns an infrastructure 
 `cnp` (also `c+p`) means commit the current task's intended changes and push the current branch. Exclude unrelated, generated, credential-bearing, and untracked state unless the user explicitly includes it.
 
 Never commit authentication state, sessions, caches, downloaded tools, build output, or generated agent-runtime databases.
-
-
-<!-- headroom:memory-instructions -->
-## Memory
-
-Use the `headroom_memory` MCP server for persistent cross-session knowledge.
-
-**Before** answering questions about prior decisions, conventions, project context,
-architecture, user preferences, org info, codenames, debugging history, or anything
-from past sessions — call `memory_search` first.
-
-**After** making durable decisions, discovering conventions, or learning important
-facts — call `memory_save` to persist them for future sessions.
-
-Memory is your first source of truth for anything not visible in the current conversation.
 
 ## Component agent guides
 

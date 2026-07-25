@@ -1,4 +1,11 @@
-# repo.sh's go-test equivalent (`go test ./go/...`).
+# repo.sh's go-test equivalent, scoped to this package's own external test
+# package. Deliberately NOT `./go/...`: that pattern also compiled and ran
+# go/app/hello's own main_test (which //go/app/hello:main_test already
+# runs), so every `buck2 test //...` executed those tests twice and the
+# merged Go coverage profile counted go/app/hello's lines from two
+# independent profiles. `coverage_packages` keeps go/lib/greeting - which
+# only this external test package exercises - attributed; see
+# rules/go.bzl's _go_test_coverage_action for why that is a separate attr.
 
 load("//rules:go.bzl", "go_test")
 
@@ -6,5 +13,6 @@ go_test(
   name = "greeting_test",
   srcs = ["greeting_test.go"],
   deps = ["//go/lib/greeting:greeting"],
-  packages = ["./go/..."],
+  packages = ["./go/test/..."],
+  coverage_packages = ["./go/lib/...", "./go/test/..."],
 )

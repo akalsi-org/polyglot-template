@@ -39,6 +39,36 @@ jobs:
         with:
           persist-credentials: false
 
+      # The publish step below calls `./repo.sh release-notes` and
+      # `./repo.sh python`, both of which route through setup_environment and
+      # hard-fail with "pinned toolchain is not installed" on a bare runner.
+      # This job therefore bootstraps exactly like the verify.yml jobs do; the
+      # cache key mirrors their structure so a warm verify run seeds it.
+      - name: Restore toolchain & Buck2 cache
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            .local/downloads
+            .local/toolchain/x86_64-linux-musl
+            .local/cache/deno
+            node_modules
+            buck-out/v2/art
+            buck-out/v2/art-bxl
+            buck-out/v2/cache
+            buck-out/go-build-cache/x86_64-linux-musl
+          key: polyglot-v1-${{ runner.os }}-x86_64-linux-musl-${{ hashFiles('tools.lock.toml', 'toolchain/**', 'toolchains/**', '.buckconfig') }}
+          restore-keys: |
+            polyglot-v1-${{ runner.os }}-x86_64-linux-musl-
+
+      - name: Enable unprivileged user namespaces
+        run: |
+          sudo sysctl -qw kernel.apparmor_restrict_unprivileged_userns=0 || true
+
+      - name: Bootstrap pinned tools
+        run: |
+          ./repo.sh bootstrap --offline || ./repo.sh bootstrap
+          ./repo.sh doctor --deep
+
       - name: Download verified package assets
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:

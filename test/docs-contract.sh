@@ -36,7 +36,7 @@ grep -Fq 'requires annotated tags' "$root/docs/CURRENT-CAPABILITIES.md"
 grep -Fq 'No `repo.sh deploy` interface, remote transport, host mutation' "$root/docs/CURRENT-CAPABILITIES.md"
 grep -Fq 'Deployment has only the read-only Buck plan/observation contract' "$root/docs/ARCHITECTURE.md"
 grep -Fq 'remote mutation path.' "$root/docs/ARCHITECTURE.md"
-grep -Fq 'Status: proposed implementation baseline' "$root/docs/FLEET.md"
+grep -Fq 'Status: proposed implementation baseline' "$root/docs/proposals/FLEET.md"
 grep -Fq 'Status: proposed design baseline' "$root/docs/DESIGN-README.md"
 
 if grep -RInE 'package\.toml|runtime-resolution\.lock\.toml|falls through to `tools/package_release\.py`|does not currently generate provenance attestations|only operation permitted to fetch dependencies' \

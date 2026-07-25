@@ -20,6 +20,8 @@ pattern instead (e.g. `buck2 test //...`); see the root BUCK file's
 comments for the convention this repo uses.
 """
 
+load("//rules:host.bzl", "native_target")
+
 def _group_impl(ctx: AnalysisContext) -> list[Provider]:
   outputs = []
   for dep in ctx.attrs.deps:
@@ -33,16 +35,6 @@ _group_rule = rule(
   },
 )
 
-def _native_target() -> str:
-  # Mirrors rules/cxx.bzl's/rules/go.bzl's _native_target(): this repo only
-  # ever builds the host's own musl output triplet.
-  arch = host_info().arch
-  if arch.is_x86_64:
-    return "x86_64-linux-musl"
-  if arch.is_aarch64:
-    return "aarch64-linux-musl"
-  fail("unsupported native CPU architecture")
-
 # group()'s deps typically cross into //config:opt-or-dbg-selecting lanes
 # (cxx_binary, py_binary, polyglot_package, ...); a dependency edge (unlike a
 # target given directly on the buck2 command line) has no configuration
@@ -52,5 +44,5 @@ def _native_target() -> str:
 # `default_target_platform` macro pattern so plain `buck2 build //:build`
 # works without requiring `-m`/`--target-platforms` on every invocation.
 def group(**kwargs):
-  kwargs.setdefault("default_target_platform", "//config:{}-dbg".format(_native_target()))
+  kwargs.setdefault("default_target_platform", "//config:{}-dbg".format(native_target()))
   _group_rule(**kwargs)

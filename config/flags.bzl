@@ -62,3 +62,16 @@ def coverage_enabled_flag():
     "//config:opt": False,
     "DEFAULT": True,
   })
+
+def check_flags(flags):
+  """Rejects flags outside the pinned musl toolchain's contract.
+
+  Lives here rather than in rules/cxx.bzl because rules/python.bzl's
+  py_extension compiles with the same toolchain and needs the identical
+  check - it previously carried a verbatim copy, which is exactly the kind
+  of duplicate that drifts the moment FORBIDDEN_FLAGS grows an entry."""
+  for flag in flags:
+    if flag in FORBIDDEN_FLAGS:
+      fail("forbidden C++ flag: {}".format(flag))
+    if flag.startswith("-fsanitize"):
+      fail("sanitizers are outside the pinned musl toolchain contract: {}".format(flag))

@@ -47,26 +47,23 @@ every toolchain directory a resolved-need artifact was `.project()`ed from.
 """
 
 load("//config:defs.bzl", "fail_if_cross_arch", "target_arch_attr")
+load("//rules:env.bzl", "action_env")
+load("//rules:host.bzl", "native_target")
+load("//rules:hosttools.bzl", "require_host_tools")
 load("//rules:pkg.bzl", "PackageEntry", "PackageInfo", "flatten_merged_package_entries", "flatten_merged_package_needs")
 load("//rules:package_smoke.bzl", "check_smoke_program", "shell_quote")
 load("//rules:pinned_python.bzl", "PINNED_PYTHON_ATTRS", "pinned_python_command", "pinned_python_script_args")
 load("//toolchains:lock.bzl", "TOOLCHAINS")
 
-def _native_target() -> str:
-  # Mirrors rules/{cxx,go,python}.bzl's _native_target(): every already-
-  # ported lane only ever builds the host's own musl output triplet, so
-  # package() inherits that same native-only constraint.
-  arch = host_info().arch
-  if arch.is_x86_64:
-    return "x86_64-linux-musl"
-  if arch.is_aarch64:
-    return "aarch64-linux-musl"
-  fail("unsupported native CPU architecture")
-
-_NATIVE_TARGET = _native_target()
+_NATIVE_TARGET = native_target()
 _GCC = TOOLCHAINS["gcc-musl"][_NATIVE_TARGET]
 _LOADER_DIR = _GCC["loader"].rsplit("/", 1)[0]
-_LOADER_NAME = "ld-musl-x86_64.so.1" if _NATIVE_TARGET.startswith("x86_64") else "ld-musl-aarch64.so.1"
+# Derived from the SAME lock entry this file already loads two lines up,
+# rather than re-deriving the name from the target triple: the packaged
+# lib/<loader> path and the loader the graph actually execs are then the
+# same string by construction, so a lock change cannot make the launcher
+# scripts point at a file the staging step never wrote.
+_LOADER_NAME = _GCC["loader"].rsplit("/", 1)[-1]
 
 _PYTHON = TOOLCHAINS["python"][_NATIVE_TARGET]
 _PY_ROOT_REL = _PYTHON["expected"].rsplit("/", 2)[0]  # "python", matches rules/python.bzl's _PY_ROOT_REL
@@ -185,6 +182,34 @@ def _check_dest(ctx, dest, owner):
     if segment == "." or segment == "..":
       fail("package({}): dest {!r} (from {}) has a {!r} path segment - malformed path".format(ctx.attrs.name, dest, owner, segment))
 
+def _dedupe_identical_entries(entries):
+  """Collapses entries that are the same entry stated twice.
+
+  Every deno_app unconditionally emits three PACKAGE-level (not app-level)
+  entries - ts/node_modules, runtime/deno/cache and ts/deno.lock - each with
+  a constant owner naming the shared //:deno-cache / //:deno.lock target
+  rather than the emitting app. Two deno_apps in one package() therefore
+  produced two byte-identical entries per dest, and _check_collisions
+  reported "dest collision at 'ts/node_modules' between //:deno-cache[node-
+  modules] and //:deno-cache[node-modules]" - naming the same target twice
+  and pointing at neither app, for a configuration that is not actually a
+  conflict at all.
+
+  Identity is (dest, kind, owner, artifact, meta): every field that decides
+  what gets staged and how. Two entries agreeing on all five stage the same
+  bytes at the same path, so keeping one is not a merge - it is recognizing
+  that there was only ever one entry. Anything that differs in ANY field
+  still reaches _check_collisions and still fails."""
+  seen = {}
+  out = []
+  for entry in entries:
+    key = (entry.dest, entry.kind, entry.owner, str(entry.artifact), entry.meta)
+    if key in seen:
+      continue
+    seen[key] = True
+    out.append(entry)
+  return out
+
 def _check_collisions(ctx, entries):
   by_dest = {}
   for entry in entries:
@@ -253,7 +278,41 @@ def _synthesize_launcher_markers(entries):
 def _dirname(path):
   return path.rsplit("/", 1)[0] if "/" in path else ""
 
-def _stage_lines(ctx, entries, needs, deno_node_modules, deno_dir):
+# Generates the packaged ts/deno.json from the repo's own root deno.json.
+# Only nodeModulesDir and the scope root change; `imports` is copied
+# verbatim, which is what keeps the packaged launcher's --frozen check
+# agreeing with the packaged ts/deno.lock.
+_PKG_DENO_JSON_PY = [
+  "import json, sys",
+  "",
+  "src, dest = sys.argv[1], sys.argv[2]",
+  "with open(src) as f:",
+  "  root = json.load(f)",
+  "",
+  # "manual" (not the root's "auto"): the package ships a real, tracked
+  # ts/node_modules staged by the deno-npm-closure marker, and "auto" would
+  # have deno try to (re)materialize it from a DENO_DIR at runtime.
+  "out = {\"nodeModulesDir\": \"manual\", \"imports\": root.get(\"imports\", {})}",
+  "",
+  # The root config scopes "@/" under "./ts/" because ts/ is a subdirectory
+  # of the repo. In a package, ts/deno.json IS the ts/ root, so the same
+  # mapping re-roots to "./" -> "./lib/". Derived from the root entry rather
+  # than hardcoded so a scope rename travels with it.
+  "scopes = root.get(\"scopes\", {})",
+  "ts_scope = scopes.get(\"./ts/\")",
+  "if ts_scope is None:",
+  "  sys.exit(",
+  "    'package(): root deno.json has no \"./ts/\" scope to re-root for the packaged ts/deno.json. '",
+  "    'If the ts/ import scope was renamed, update rules/package.bzl to match.'",
+  "  )",
+  "out[\"scopes\"] = {\"./\": {key: value.replace(\"./ts/\", \"./\", 1) for key, value in ts_scope.items()}}",
+  "",
+  "with open(dest, \"w\") as f:",
+  "  json.dump(out, f, indent=2)",
+  "  f.write(\"\\n\")",
+]
+
+def _stage_lines(ctx, entries, needs, deno_node_modules, deno_dir, pkg_deno_json_script):
   lines = []
   hidden = []
 
@@ -412,25 +471,21 @@ def _stage_lines(ctx, entries, needs, deno_node_modules, deno_dir):
   if has_deno_app:
     if not has_deno_npm_closure:
       fail("package({}): deno app launcher is missing its deno npm closure marker".format(ctx.attrs.name))
+    # DERIVED from the root //:deno.json, never restated. The previous
+    # version of this block was a hand-written copy of deno.json's import
+    # map, byte-identical to it and with no drift test - so bumping react in
+    # deno.json (and therefore in deno.lock, which the launcher validates
+    # with --frozen) left the packaged map behind and the failure surfaced
+    # at RUNTIME, in a released archive, as a --frozen rejection. The
+    # generator below rewrites exactly the two things that must differ in a
+    # package (nodeModulesDir, and the scope root - ts/ is the package's own
+    # root here, not a subdirectory) and copies the imports verbatim.
     lines += [
-      "cat > \"$OUT/ts/deno.json\" <<'PKGEOF'",
-      "{",
-      "  \"nodeModulesDir\": \"manual\",",
-      "  \"imports\": {",
-      "    \"@deno/vite-plugin\": \"npm:@deno/vite-plugin@2.0.2\",",
-      "    \"@vitejs/plugin-react\": \"npm:@vitejs/plugin-react@6.0.3\",",
-      "    \"react\": \"npm:react@19.2.7\",",
-      "    \"react-dom/client\": \"npm:react-dom@19.2.7/client\",",
-      "    \"vite\": \"npm:vite@8.1.4\",",
-      "    \"pyright\": \"npm:pyright@1.1.407\",",
-      "    \"nanoid\": \"npm:nanoid@3.3.15\"",
-      "  },",
-      "  \"scopes\": {",
-      "    \"./\": { \"@/\": \"./lib/\" }",
-      "  }",
-      "}",
-      "PKGEOF",
+      cmd_args("PKG_DENO_JSON_GEN=\"$(pwd)/", pkg_deno_json_script, "\"", delimiter = ""),
+      cmd_args("ROOT_DENO_JSON=\"$(pwd)/", ctx.attrs._deno_json, "\"", delimiter = ""),
+      "\"$LOADER\" --library-path \"$LOADER_DIR:$PYTHON_LIB\" \"$PYTHON\" -B \"$PKG_DENO_JSON_GEN\" \"$ROOT_DENO_JSON\" \"$OUT/ts/deno.json\"",
     ]
+    hidden += [pkg_deno_json_script, ctx.attrs._deno_json]
 
   for entry in entries:
     if entry.kind != "deno-app-launcher":
@@ -464,7 +519,7 @@ def _stage_lines(ctx, entries, needs, deno_node_modules, deno_dir):
   # fan-out, and re-walking the same shared subtree that many times bought
   # nothing. `2>/dev/null || true` also makes each find tolerant of either
   # root not existing at all (a pure cxx/go/deno package stages neither).
-  lines += [
+  lines += require_host_tools(["find"]) + [
     "find \"$OUT/runtime/python\" \"$OUT/python\" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true",
     "find \"$OUT/runtime/python\" \"$OUT/python\" -name '*.pyc' -delete 2>/dev/null || true",
   ]
@@ -484,12 +539,15 @@ def _package_impl(ctx: AnalysisContext) -> list[Provider]:
   # shared transitively by two deps (a diamond dep) is a single DAG node
   # reachable from both, and only a single shared traversal dedupes it the
   # way buck2's tsets are meant to.
-  infos = [d[PackageInfo] for d in ctx.attrs.deps if PackageInfo in d]
+  # No `if PackageInfo in d` filter any more - the attr constrains it, so a
+  # missing provider is a load-time error naming the offending label instead
+  # of a silently dropped dependency.
+  infos = [d[PackageInfo] for d in ctx.attrs.deps]
   entries = flatten_merged_package_entries(ctx, infos)
   needs = flatten_merged_package_needs(ctx, infos)
 
   extra_entries = _resolve_needs(ctx, needs)
-  all_entries = entries + extra_entries
+  all_entries = _dedupe_identical_entries(entries + extra_entries)
   markers = _synthesize_launcher_markers(all_entries)
   _check_collisions(ctx, all_entries + markers)
 
@@ -497,9 +555,20 @@ def _package_impl(ctx: AnalysisContext) -> list[Provider]:
   # numbering) is stable regardless of the tset traversal order above.
   all_entries = [pair[1] for pair in sorted([(e.dest, e) for e in all_entries])]
 
-  deno_node_modules = ctx.attrs._deno_node_modules[DefaultInfo].default_outputs[0]
-  deno_dir = ctx.attrs._deno_dir[DefaultInfo].default_outputs[0]
-  stage_lines, stage_hidden = _stage_lines(ctx, all_entries, needs, deno_node_modules, deno_dir)
+  # DEREFERENCED LAZILY, and that is the whole point: these two subtargets
+  # are outputs of //:deno-cache, the single local_only action that stages
+  # the entire npm closure. Reading .default_outputs here unconditionally
+  # made every package - including a pure-Go one - a consumer of that
+  # action's artifacts, so it had to RUN. _stage_lines only actually uses
+  # them when a "deno-npm-closure" marker is present, so the dereference
+  # moves behind that same condition. (The attrs stay unconditional deps:
+  # buck2 resolves an attrs.dep at analysis time regardless, but analyzing
+  # //:deno-cache is cheap - it is materializing its outputs that is not.)
+  needs_deno_closure = [e for e in all_entries if e.kind == "deno-npm-closure"]
+  deno_node_modules = ctx.attrs._deno_node_modules[DefaultInfo].default_outputs[0] if needs_deno_closure else None
+  deno_dir = ctx.attrs._deno_dir[DefaultInfo].default_outputs[0] if needs_deno_closure else None
+  pkg_deno_json_script = ctx.actions.write(ctx.attrs.name + "-pkg-deno-json.py", _PKG_DENO_JSON_PY)
+  stage_lines, stage_hidden = _stage_lines(ctx, all_entries, needs, deno_node_modules, deno_dir, pkg_deno_json_script)
 
   stage = ctx.actions.declare_output(ctx.attrs.name + "-stage", dir = True)
   metadata_script = ctx.actions.write(ctx.attrs.name + "-metadata.py", _METADATA_PY)
@@ -507,6 +576,14 @@ def _package_impl(ctx: AnalysisContext) -> list[Provider]:
     "#!/bin/sh",
     "set -eu",
     cmd_args("OUT=\"$(pwd)/", stage.as_output(), "\"", delimiter = ""),
+    # The pinned-interpreter invocation is bound BEFORE stage_lines, not
+    # after: the staging body itself now runs a Python step (the derived
+    # ts/deno.json generator - see _PKG_DENO_JSON_PY), so these four have to
+    # be in scope by then. The metadata step below reuses the same four.
+    "LOADER=\"$(pwd)/$2\"",
+    "LOADER_DIR=\"$(pwd)/$3\"",
+    "PYTHON_LIB=\"$(pwd)/$4\"",
+    "PYTHON=\"$(pwd)/$5\"",
   ] + stage_lines + [
     # package.json/closure.json/runtime-ref.json: same metadata.py step as
     # before this rewrite, inside this one staging action (a second action
@@ -517,10 +594,6 @@ def _package_impl(ctx: AnalysisContext) -> list[Provider]:
     cmd_args("PACKAGE_MODEL=\"$(pwd)/", ctx.attrs._package_model, "\"", delimiter = ""),
     cmd_args("CATALOG=\"$(pwd)/", ctx.attrs.catalog, "\"", delimiter = ""),
     cmd_args("TOOLS_LOCK=\"$(pwd)/", ctx.attrs.tools_lock, "\"", delimiter = ""),
-    "LOADER=\"$(pwd)/$2\"",
-    "LOADER_DIR=\"$(pwd)/$3\"",
-    "PYTHON_LIB=\"$(pwd)/$4\"",
-    "PYTHON=\"$(pwd)/$5\"",
     "\"$LOADER\" --library-path \"$LOADER_DIR:$PYTHON_LIB\" \"$PYTHON\" -B \"$METADATA_SCRIPT\" \"$PACKAGE_MODEL\" \"$CATALOG\" \"$TOOLS_LOCK\" %s %s %s %s \"$OUT\"" % (ctx.attrs.name, _NATIVE_TARGET, ctx.attrs.profile, ctx.attrs.version),
   ]
   metadata_inputs = [ctx.attrs._package_model, ctx.attrs.catalog, ctx.attrs.tools_lock]
@@ -530,6 +603,7 @@ def _package_impl(ctx: AnalysisContext) -> list[Provider]:
     cmd_args(["/bin/sh", stage_script, stage.as_output(), pinned_python_script_args(ctx)], hidden = stage_inputs + stage_written),
     category = "package_stage",
     identifier = ctx.attrs.name,
+    env = action_env(),
   )
 
   archive = ctx.actions.declare_output(ctx.attrs.name + ".tar.gz")
@@ -538,6 +612,7 @@ def _package_impl(ctx: AnalysisContext) -> list[Provider]:
     pinned_python_command(ctx, [archive_script, stage, archive.as_output()]),
     category = "package_archive",
     identifier = ctx.attrs.name,
+    env = action_env(),
   )
 
   return [DefaultInfo(
@@ -651,13 +726,22 @@ _METADATA_PY = [
 _package_rule = rule(
   impl = _package_impl,
   attrs = {
-    "deps": attrs.list(attrs.dep(), default = []),
+    # providers = [PackageInfo]: every other cross-rule edge in this repo
+    # constrains its providers, and this one silently did not while
+    # _package_impl additionally SKIPPED any dep lacking PackageInfo. A
+    # mistyped label or a non-packaging target therefore produced a package
+    # that was quietly missing an executable, with no error anywhere. A
+    # target that legitimately stages nothing still satisfies this: see
+    # rules/pkg.bzl's package_info(), which returns an empty PackageInfo
+    # (rather than none) for a "no-package"-labeled target.
+    "deps": attrs.list(attrs.dep(providers = [PackageInfo]), default = []),
     "catalog": attrs.source(default = "//packages:catalog.bzl"),
     "profile": attrs.string(default = select({"//config:opt": "opt", "DEFAULT": "dbg"})),
     "tools_lock": attrs.source(default = "//:tools.lock.toml"),
     "version": attrs.string(),
     "_deno": attrs.dep(default = "//toolchains:deno-" + _NATIVE_TARGET, providers = [DefaultInfo]),
     "_deno_dir": attrs.dep(default = "//:deno-cache[deno-dir]", providers = [DefaultInfo]),
+    "_deno_json": attrs.source(default = "//:deno.json"),
     "_deno_node_modules": attrs.dep(default = "//:deno-cache[node-modules]", providers = [DefaultInfo]),
     "_gcc": attrs.dep(default = "//toolchains:gcc-musl-" + _NATIVE_TARGET, providers = [DefaultInfo]),
     "_package_model": attrs.source(default = "//:package_model.py"),
@@ -676,6 +760,15 @@ def package(**kwargs):
 # deno) or already loader-wrapped (cpp-hello, python, python3,
 # python-hello), exactly like tools/package_release.py's smoke()'s
 # --execute path, but without needing host toolchain state to run it.
+#
+# `checks` is DEPRECATED - prefer the structured `commands` attr, which takes
+# {program: [args]}, validates the program path (see
+# rules/package_smoke.bzl's check_smoke_program) and shell-quotes each
+# argument. `checks` splices raw, unquoted, unvalidated shell straight into
+# the generated smoke script, so a mistake there is a shell injection into
+# the build rather than a rule-level error. No call site in this repo uses it
+# today; it remains only so an out-of-tree package definition does not break
+# on upgrade, and should not gain new users.
 #
 # `checks` is a list of raw shell command lines run against the extracted
 # archive at $WORK (e.g. "\"$WORK/bin/go-hello\"", "\"$WORK/bin/server\"
@@ -715,6 +808,7 @@ def _package_smoke_impl(ctx: AnalysisContext) -> list[Provider]:
     "mkdir -p \"$SCRATCH_BASE\"",
     "WORK=$(mktemp -d \"$SCRATCH_BASE/tmp.XXXXXX\")",
     "trap 'rm -rf \"$WORK\"' EXIT",
+  ] + require_host_tools(["tar"]) + [
     "tar -xzf \"$ARCHIVE\" -C \"$WORK\"",
   ] + command_lines
   if smoke_script != None:
@@ -745,6 +839,7 @@ def _package_smoke_impl(ctx: AnalysisContext) -> list[Provider]:
 _package_smoke_rule = rule(
   impl = _package_smoke_impl,
   attrs = {
+    # DEPRECATED - see this rule's doc comment; use `commands` instead.
     "checks": attrs.list(attrs.string(), default = []),
     "commands": attrs.dict(attrs.string(), attrs.list(attrs.string()), default = {}),
     "package": attrs.dep(providers = [DefaultInfo]),

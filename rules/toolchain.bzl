@@ -24,7 +24,25 @@ actually executes the extracted binary, which only works for the host's own
 architecture — exactly like toolchain/bootstrap.sh and toolchain/doctor.sh,
 which only ever probe the single native $target. Non-native targets get a
 stamp recording that the probe was skipped instead of an exec-format-error.
+
+EXECUTABLE BIT: restored exactly ONCE, here, by each rule's own
+`post_extract` lines (see _executable_bits() and its call sites). It used to
+be re-applied by every consumer instead - seven `chmod +x` sites across
+rules/toolchain.bzl, rules/deno.bzl and rules/python.bzl - each of them
+chmod'ing an artifact that was an INPUT to the very action doing the chmod.
+rules/deno.bzl's _stage_and_run copy ran in every deno consumer, so N
+concurrent deno actions raced to chmod the same inode of a shared,
+already-materialized output. A produced artifact's mode is the producing
+rule's responsibility; a consumer that has to fix up its own inputs is a
+consumer mutating the build graph underneath itself.
 """
+
+load("//rules:env.bzl", "action_env")
+load("//rules:hosttools.bzl", "require_host_tools", "sha256sum_guard")
+
+def _executable_bits(paths: list[str]) -> list[str]:
+  # $1 is the extraction directory in every post_extract context below.
+  return ["chmod +x \"$1/%s\"" % path for path in paths]
 
 def _archive_kind(archive_name: str) -> str:
   if archive_name.endswith(".zip"):
@@ -44,17 +62,22 @@ def _extract_cmd(kind: str) -> str:
     return "tar -xJf \"$2\" -C \"$1\" --no-same-owner --no-same-permissions"
   fail("unsupported archive kind: {}".format(kind))
 
+def _extract_tool(kind: str) -> str:
+  return "unzip" if kind == "zip" else "tar"
+
 def _download_and_extract(ctx: AnalysisContext, name: str, url: str, sha256: str, archive_name: str, post_extract: list[str] = []) -> Artifact:
   # `url` is deliberately unused here (kept for lock parity/diagnostics):
   # bootstrap owns fetching. See the module docstring's
   # OFFLINE-AFTER-BOOTSTRAP block for the correctness story.
   _ = url
   archive = ctx.actions.declare_output(archive_name)
+  kind = _archive_kind(archive_name)
   stage_archive_script = ctx.actions.write(
     name + "-local-archive.sh",
     [
       "#!/bin/sh",
       "set -eu",
+    ] + sha256sum_guard() + [
       "src=\".local/downloads/%s-%s\"" % (sha256, archive_name),
       "if [ ! -f \"$src\" ]; then",
       "  echo \"error: $src is missing - run ./repo.sh bootstrap (graph actions never fetch; bootstrap owns downloads)\" >&2",
@@ -73,6 +96,7 @@ def _download_and_extract(ctx: AnalysisContext, name: str, url: str, sha256: str
     cmd_args(["/bin/sh", stage_archive_script, archive.as_output()]),
     category = "stage_toolchain_archive",
     identifier = name,
+    env = action_env(),
     # Reads the untracked .local/downloads path, which only exists on the
     # bootstrapped host - never eligible for remote execution.
     local_only = True,
@@ -83,8 +107,9 @@ def _download_and_extract(ctx: AnalysisContext, name: str, url: str, sha256: str
     [
       "#!/bin/sh",
       "set -eu",
+    ] + require_host_tools([_extract_tool(kind)]) + [
       "mkdir -p \"$1\"",
-      _extract_cmd(_archive_kind(archive_name)),
+      _extract_cmd(kind),
     ] + post_extract,
     is_executable = True,
   )
@@ -92,6 +117,7 @@ def _download_and_extract(ctx: AnalysisContext, name: str, url: str, sha256: str
     cmd_args(["/bin/sh", extract_script, out_dir.as_output(), archive]),
     category = "extract_toolchain",
     identifier = name,
+    env = action_env(),
   )
   return out_dir
 
@@ -102,7 +128,17 @@ def _skipped_stamp(ctx: AnalysisContext, name: str) -> Artifact:
 # subcommand rather than a `--version` flag; deno accepts `--version`).
 def _version_probe_toolchain_impl(ctx: AnalysisContext) -> list[Provider]:
   name = ctx.label.name
-  out_dir = _download_and_extract(ctx, name, ctx.attrs.url, ctx.attrs.sha256, ctx.attrs.archive)
+  # The extracted binary's exec bit is restored here, in the producing
+  # action, so neither this rule's own probe nor any downstream consumer
+  # (rules/deno.bzl's every deno invocation used to) has to chmod an input.
+  out_dir = _download_and_extract(
+    ctx,
+    name,
+    ctx.attrs.url,
+    ctx.attrs.sha256,
+    ctx.attrs.archive,
+    _executable_bits([ctx.attrs.expected]),
+  )
   if not ctx.attrs.probe:
     return [DefaultInfo(default_outputs = [out_dir, _skipped_stamp(ctx, name)])]
   stamp = ctx.actions.declare_output(name + ".stamp")
@@ -112,7 +148,6 @@ def _version_probe_toolchain_impl(ctx: AnalysisContext) -> list[Provider]:
       "#!/bin/sh",
       "set -eu",
       "BIN=\"$1/%s\"" % ctx.attrs.expected,
-      "chmod +x \"$BIN\"",
       "\"$BIN\" %s >\"$2\" 2>&1 || { cat \"$2\" >&2; exit 1; }" % ctx.attrs.probe_arg,
     ],
     is_executable = True,
@@ -121,6 +156,7 @@ def _version_probe_toolchain_impl(ctx: AnalysisContext) -> list[Provider]:
     cmd_args(["/bin/sh", probe_script, out_dir, stamp.as_output()]),
     category = "probe_toolchain",
     identifier = name,
+    env = action_env(),
   )
   return [DefaultInfo(default_outputs = [out_dir, stamp])]
 
@@ -156,6 +192,7 @@ def _header_probe_toolchain_impl(ctx: AnalysisContext) -> list[Provider]:
     cmd_args(["/bin/sh", probe_script, out_dir, stamp.as_output()]),
     category = "probe_toolchain",
     identifier = name,
+    env = action_env(),
   )
   return [DefaultInfo(default_outputs = [out_dir, stamp])]
 
@@ -187,7 +224,17 @@ def _gcc_musl_toolchain_impl(ctx: AnalysisContext) -> list[Provider]:
     "  ln -s libc.so \"$LOADER\"",
     "fi",
   ]
-  out_dir = _download_and_extract(ctx, name, ctx.attrs.url, ctx.attrs.sha256, ctx.attrs.archive, normalize_loader)
+  out_dir = _download_and_extract(
+    ctx,
+    name,
+    ctx.attrs.url,
+    ctx.attrs.sha256,
+    ctx.attrs.archive,
+    # Loader normalization first (it replaces the symlink), then the exec
+    # bits every consumer of this toolchain relies on - g++/mold/the loader
+    # itself - restored once here rather than by each consumer's own action.
+    normalize_loader + _executable_bits([ctx.attrs.expected, ctx.attrs.mold, ctx.attrs.loader]),
+  )
   if not ctx.attrs.probe:
     return [DefaultInfo(default_outputs = [out_dir, _skipped_stamp(ctx, name)])]
   reflection_src = ctx.attrs.reflection_src[DefaultInfo].default_outputs[0]
@@ -202,7 +249,6 @@ def _gcc_musl_toolchain_impl(ctx: AnalysisContext) -> list[Provider]:
       "OUT=\"$3\"",
       "GXX=\"$ROOT/%s\"" % ctx.attrs.expected,
       "MOLD=\"$ROOT/%s\"" % ctx.attrs.mold,
-      "chmod +x \"$GXX\" \"$MOLD\"",
       "[ \"$(\"$GXX\" -dumpmachine)\" = \"%s\" ] || { echo 'compiler target mismatch' >&2; exit 1; }" % ctx.attrs.target_triple,
       "\"$MOLD\" --version | grep -q '^mold 2\\.41\\.0' || { echo 'mold capability probe failed' >&2; exit 1; }",
       "\"$GXX\" -std=gnu++26 -freflection -fsyntax-only \"$SRC\" >\"$OUT\" 2>&1 || { cat \"$OUT\" >&2; exit 1; }",
@@ -213,6 +259,7 @@ def _gcc_musl_toolchain_impl(ctx: AnalysisContext) -> list[Provider]:
     cmd_args(["/bin/sh", probe_script, out_dir, reflection_src, stamp.as_output()]),
     category = "probe_toolchain",
     identifier = name,
+    env = action_env(),
   )
   return [DefaultInfo(default_outputs = [out_dir, stamp])]
 
@@ -237,7 +284,16 @@ gcc_musl_toolchain = rule(
 # built output, so buck2 must build gcc-musl first.
 def _python_toolchain_impl(ctx: AnalysisContext) -> list[Provider]:
   name = ctx.label.name
-  out_dir = _download_and_extract(ctx, name, ctx.attrs.url, ctx.attrs.sha256, ctx.attrs.archive)
+  out_dir = _download_and_extract(
+    ctx,
+    name,
+    ctx.attrs.url,
+    ctx.attrs.sha256,
+    ctx.attrs.archive,
+    # The loader's own exec bit is the gcc-musl rule's responsibility (this
+    # rule only borrows it), so only the interpreter is restored here.
+    _executable_bits([ctx.attrs.expected]),
+  )
   if not ctx.attrs.probe:
     return [DefaultInfo(default_outputs = [out_dir, _skipped_stamp(ctx, name)])]
   gcc_out = ctx.attrs.gcc[DefaultInfo].default_outputs[0]
@@ -253,7 +309,6 @@ def _python_toolchain_impl(ctx: AnalysisContext) -> list[Provider]:
       "PY=\"$PYROOT/%s\"" % ctx.attrs.expected,
       "LOADER=\"$GCCROOT/%s\"" % ctx.attrs.loader,
       "LOADER_DIR=$(dirname \"$LOADER\")",
-      "chmod +x \"$PY\" \"$LOADER\"",
       "\"$LOADER\" --library-path \"$LOADER_DIR:$PYROOT/python/lib\" \"$PY\" -I -c " +
       "'import ctypes, hashlib, sqlite3, ssl, sys, zlib; print(sys.version)' >\"$OUT\" 2>&1 || { cat \"$OUT\" >&2; exit 1; }",
     ],
@@ -263,6 +318,7 @@ def _python_toolchain_impl(ctx: AnalysisContext) -> list[Provider]:
     cmd_args(["/bin/sh", probe_script, out_dir, gcc_out, stamp.as_output()]),
     category = "probe_toolchain",
     identifier = name,
+    env = action_env(),
   )
   return [DefaultInfo(default_outputs = [out_dir, stamp])]
 

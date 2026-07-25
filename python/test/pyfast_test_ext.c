@@ -17,6 +17,7 @@ VFUNC_KW(xor_bytes) {
   Py_ssize_t len;
   unsigned long key;
   VEXPECT(1);
+  VKW_NOEXTRA("key");
   if (!(src = VBYTES(0, &len))) return NULL;
   if (!VKWUINT("key", &key)) return NULL;
   if (key > 0xffU) {
@@ -33,6 +34,7 @@ VFUNC_KW(xor_bytes) {
 VFUNC_KW(xor_kwb) {
   const char *src;
   VEXPECT(0);
+  VKW_NOEXTRA("data", "key");
   Py_ssize_t len;
   unsigned long key;
   if (!(src = VKWBYTES("data", &len))) return NULL;
@@ -51,6 +53,7 @@ VFUNC_KW(xor_kwb) {
 VFUNC_KW(xor_kwb_buf) {
   unsigned long key;
   VEXPECT(0);
+  VKW_NOEXTRA("data", "key");
   VBUF_SCOPED(buf);
   if (!VKWBUFFER("data", &buf)) return NULL;
   if (!VKWUINT("key", &key)) return NULL;
@@ -67,38 +70,51 @@ VFUNC_KW(xor_kwb_buf) {
 }
 
 VFUNC_KW(greet) {
-  const char *name;
   VEXPECT(0);
+  VKW_NOEXTRA("name", "excited");
   Py_ssize_t name_len;
   int excited;
-  if (!(name = VKWSTR("name", &name_len))) return NULL;
+  PyObject *name = VKW("name");
+  if (!name) return NULL;
+  if (!_v_str(name, &name_len, "keyword 'name'")) return NULL;
   if (!VKWOPT_BOOL("excited", &excited, 0)) return NULL;
-  char buf[256];
-  int written =
-    snprintf(buf, sizeof buf, "Hello, %.*s%s", (int)name_len, name, excited ? "!!" : ".");
-  if (written < 0 || (size_t)written >= sizeof buf) {
+  /* The greeting used to be assembled with snprintf("%.*s") into a
+   * 256-byte buffer and handed to PyUnicode_FromString. Both halves
+   * truncate at the first NUL — the precision in "%.*s" is a maximum,
+   * not a count, so name='a\0b' produced "Hello, a." Formatting the str
+   * object itself with %U carries embedded NULs through intact. The
+   * length ceiling is kept (as an explicit check) so oversized names
+   * still raise instead of allocating without limit. */
+  if (name_len > 246) {
     PyErr_SetString(PyExc_OverflowError, "name is too long");
     return NULL;
   }
-  return PyUnicode_FromString(buf);
+  return PyUnicode_FromFormat("Hello, %U%s", name, excited ? "!!" : ".");
 }
 
 VFUNC_KW(prefix_join) {
   const char *prefix;
   Py_ssize_t prefix_len;
   VEXPECT(1);
+  VKW_NOEXTRA("prefix");
   PyObject *items = VA(0);
   if (!PyList_Check(items)) {
     _vtype_err("argument 0", "list", items);
     return NULL;
   }
   if (!VKWOPT_STR("prefix", &prefix, &prefix_len)) return NULL;
-  (void)prefix_len;
-  VREF_AUTO(result, VNEW_STR(prefix ? prefix : ""));
+  VREF_AUTO(result, prefix ? VNEW_STRN(prefix, prefix_len) : VNEW_STR(""));
   if (!result) return NULL;
-  Py_ssize_t count = PyList_GET_SIZE(items);
-  for (Py_ssize_t i = 0; i < count; i++) {
-    VREF_AUTO(item_str, PyObject_Str(PyList_GET_ITEM(items, i)));
+  /* PyObject_Str() below runs arbitrary Python (__str__), which may
+   * mutate `items`: shrinking the list frees the storage the borrowed
+   * PyList_GET_ITEM pointer lives in, and a size snapshotted before the
+   * loop lets the index run past the new end. Re-read the size every
+   * iteration, and own a reference across the PyObject_Str call. */
+  for (Py_ssize_t i = 0; i < PyList_GET_SIZE(items); i++) {
+    PyObject *borrowed = PyList_GET_ITEM(items, i);
+    Py_INCREF(borrowed);
+    VREF_AUTO(item, borrowed);
+    VREF_AUTO(item_str, PyObject_Str(item));
     if (!item_str) return NULL;
     VREF_AUTO(joined, PyUnicode_Concat(result, item_str));
     if (!joined) return NULL;
@@ -110,6 +126,7 @@ VFUNC_KW(prefix_join) {
 VFUNC_KW(xor_buffer) {
   unsigned long key;
   VEXPECT(1);
+  VKW_NOEXTRA("key");
   VBUF_SCOPED(buf);
   if (!VBUFFER(0, &buf)) return NULL;
   if (!VKWUINT("key", &key)) return NULL;
@@ -130,6 +147,7 @@ VFUNC_KW(repeat) {
   Py_ssize_t len;
   long times;
   VEXPECT(1);
+  VKW_NOEXTRA("times");
   if (!(src = VBYTES(0, &len))) return NULL;
   if (!VKWOPT_INT("times", &times, 1)) return NULL;
   if (times < 0) {
@@ -151,6 +169,12 @@ VFUNC(range_values) {
   long stop;
   VEXPECT(1);
   if (!VINT(0, &stop)) return NULL;
+  /* Unbounded stop turned a one-line Python typo into an allocate-until-
+   * OOM loop; cap it at a size a test fixture could plausibly want. */
+  if (stop > 1000000L) {
+    PyErr_SetString(PyExc_ValueError, "range: stop must not exceed 1000000");
+    return NULL;
+  }
   VREF_AUTO(list, PyList_New(0));
   if (!list) return NULL;
   for (long i = 0; i < stop; i++) {
@@ -198,6 +222,7 @@ static void Point_dealloc(PyObject *self) { Py_TYPE(self)->tp_free(self); }
 
 static PyObject *Point_dist(VMETHOD_SIG) {
   VSELF(Point);
+  VEXPECT(0);
   VRETURN_DOUBLE(sqrt(self->x * self->x + self->y * self->y));
 }
 
@@ -213,6 +238,10 @@ static PyObject *Point_scale(VMETHOD_SIG) {
 
 static PyObject *Point_move(VMETHOD_KW_SIG) {
   VSELF(Point);
+  /* move() is keyword-only. Without VEXPECT(0) the positional vector was
+   * never inspected, so p.move(100.0, 200.0) was a silent no-op. */
+  VEXPECT(0);
+  VKW_NOEXTRA("dx", "dy");
   double dx;
   double dy;
   VALL(VKWOPT_DOUBLE("dx", &dx, 0.0) && VKWOPT_DOUBLE("dy", &dy, 0.0));

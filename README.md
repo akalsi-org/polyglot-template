@@ -27,13 +27,30 @@ Editors use two-space indentation across the repository. Go source remains `gofm
 ./repo.sh test
 ```
 
+### Instantiating A New Repository From This Template
+
+This repository is a template. After cloning it as the starting point for a new
+project, rename its namespaces once, before writing project code:
+
+```bash
+./repo.sh init-project <new-project-name> [new-org-name]
+```
+
+`init-project` runs `tools/init_project.py` through the pinned interpreter. It
+rewrites the repository namespace, the Go module path
+(`github.com/<org>/<project>`), package catalog entries, and documentation
+references away from `polyglot-template`/`akalsi-org`. The organization argument
+is optional; omitting it keeps the current organization. Re-run bootstrap-backed
+commands afterward and verify with `./repo.sh doctor --deep` and
+`./repo.sh test`.
+
 Running `./repo.sh` starts an interactive shell with the exact pinned
 toolchain, runtime, cache, and source-root environment. Use `./repo.sh exec`
 to run one command in that same environment; `python`/`python3`, `go`,
 `deno`, and the binutils `ar`/`ranlib`/`nm`/`strip`/`objcopy`/`ld` resolve to
 repository wrappers, while `CC` and `CXX` name the pinned native compiler.
 
-CPython 3.14.6, CPU-native GCC 16.1+musl, bundled mold 2.41, Deno 2.9.2, Go 1.26.5, and Buck2 (2026-07-15) are pinned for x64 and ARM64 using immutable upstream URLs and verified SHA-256 values. The Python artifacts and C++ outputs are dynamically linked musl programs, so repository commands invoke them through the exact pinned loader/libc closure on glibc hosts.
+CPython 3.14.6, CPU-native GCC 16.1+musl, bundled mold 2.41.0, Deno 2.9.2, Go 1.26.5, and Buck2 (2026-07-15) are pinned for x64 and ARM64 using immutable upstream URLs and verified SHA-256 values. The Python artifacts and C++ outputs are dynamically linked musl programs, so repository commands invoke them through the exact pinned loader/libc closure on glibc hosts.
 
 The userdocs compiler source is intentional rather than historical accident. Against cross-tools release `20260515`, userdocs release `2628` is about half the compressed download and 22–24% smaller unpacked. Its ARM archive also contains an ARM64-hosted compiler suitable for `ubuntu-24.04-arm`; the cross-tools ARM64-target archive inspected during selection contains an x86-64-hosted compiler. See the parent architecture document for the measured table.
 
@@ -49,9 +66,15 @@ The committed `.vscode/` configuration mirrors those command-line roots: clangd 
 
 The checked-in GitHub workflow performs a real native bootstrap on Linux x64 and ARM64 runners. It restores only exact target/lock/bootstrap-keyed caches, installs on a miss, proves the second bootstrap succeeds offline, runs deep capability checks, and verifies every language lane. A `packages/<name>/v<version>` tag must name an in-graph Buck package target; CI assembles it independently on both native runners, executes clean-extraction consumer smoke, uploads separate target archives and checksums, records a GitHub artifact attestation for each archive, and publishes one package-specific GitHub Release using its changelog section.
 
+`./repo.sh package-list` prints every declared package's identity, Buck targets,
+and executables; `./repo.sh package-explain <name>` prints one package's catalog
+identity, runtime closure, and Buck target status, which is the direct way to see
+why a catalog-only declaration cannot be packaged. `./repo.sh package-target-check <name>`
+is the release-side gate that requires a `//packages:<name>` target.
+
 `polyglot-demo` is the complete consumer proof: one target archive contains the C++ executable and musl loader, static Go executable, Python application/native extension and exactly one CPython runtime, plus the React static bundle. Its package smoke runs every executable and validates every referenced web asset from an isolated extraction without host Python, Deno, Go, compiler, or source-tree state.
 
-The command surface is uniform across lanes: `cpp-build`/`cpp-test`, `python-build`/`python-test`, `ts-build`/`ts-test`, `go-build`/`go-test`, and `tsweb-build`/`tsweb-test`; each is a thin wrapper around a Buck2 target. `format` applies the pinned Deno and Go formatters and normalizes repository-owned C/C++, Python, Starlark, shell, and Buck source whitespace; `format --check` is its non-mutating counterpart. Python and Starlark blocks are structurally enforced at two spaces, C/C++ editors use the committed two-space clang-format policy, and Go preserves `gofmt` tabs rendered at width two. Aggregate `build` (every lane's primary outputs, discovered by rule kind) and `test` (`buck2 test //...`) run every lane's targets in one scheduler, in-graph, with Buck2 owning caching, incrementality, and cross-lane concurrency directly rather than through a coarse task runner plus a separate jobserver. `lint` runs `format --check`, `buck2 test //... --labels lint` (every lane's formatting/static-policy targets, selected by label), and a small set of infra checks (`bash -n` over the shell scripts, `tools/lint.py`) that live outside the buck2 graph. Every first-party rule lives under `rules/`; `config/defs.bzl` defines the `dbg`/`opt` `profile` configuration, selected via `--target-platforms //config:<arch>-<profile>` (`-m`/`--modifier` does not override a rule's own default target platform on the pinned buck2). Coverage is default-on for `dbg` (`./repo.sh coverage` discovers every test by rule kind and merges every lane's coverage into one lcov report); `opt` stays uninstrumented. See [the historical parallel-build spike](docs/spikes/parallel-build.md), which predates the Buck2 migration.
+The command surface is uniform across lanes: `cpp-build`/`cpp-test`, `python-build`/`python-test`, `ts-build`/`ts-test`, `go-build`/`go-test`, and `tsweb-build`/`tsweb-test`; each is a thin wrapper around a Buck2 target. `format` applies the pinned Deno and Go formatters and normalizes repository-owned C/C++, Python, Starlark, shell, and Buck source whitespace; `format --check` is its non-mutating counterpart. Python and Starlark blocks are structurally enforced at two spaces, C/C++ editors use the committed two-space clang-format policy, and Go preserves `gofmt` tabs rendered at width two. Aggregate `build` (every lane's primary outputs, discovered by rule kind) and `test` (`buck2 test //...`) run every lane's targets in one scheduler, in-graph, with Buck2 owning caching, incrementality, and cross-lane concurrency directly rather than through a coarse task runner plus a separate jobserver. `lint` runs `format --check`, `buck2 test //... --labels lint` (every lane's formatting/static-policy targets, selected by label), and a small set of infra checks (`bash -n` over the shell scripts, `tools/lint.py`) that live outside the buck2 graph. Every first-party rule lives under `rules/`; `config/defs.bzl` defines the `dbg`/`opt` `profile` configuration, selected via `--target-platforms //config:<arch>-<profile>` (`-m`/`--modifier` does not override a rule's own default target platform on the pinned buck2). Coverage is default-on for `dbg` (`./repo.sh coverage` discovers every test by rule kind and merges every lane's coverage into one lcov report, then renders `buck-out/coverage-report/coverage.html`, a single self-contained page with annotated sources that CI also publishes as a job summary); `opt` stays uninstrumented. See [the historical parallel-build spike](docs/spikes/parallel-build.md), which predates the Buck2 migration.
 
 For task-oriented source layout, command, and validation guidance by language,
 see the [language guide](docs/LANGUAGE-GUIDE.md).

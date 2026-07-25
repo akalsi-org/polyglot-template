@@ -20,12 +20,14 @@ repo/
 |- tools.lock.toml                 # exact bootstrap artifacts
 |- packages/catalog.bzl            # canonical package and runtime catalog
 |- BUCK, rules/, config/, platforms/, toolchains/  # Buck2 build graph
+|- bxl/                            # BXL queries (compdb.bxl, coverage.bxl)
 |- toolchain/                      # bootstrap, target, lock, doctor helpers
 |- cpp/{lib,app,test}/             # C++ sources (BUCK-owned targets)
 |- python/{lib,app,test}/          # Python and native extension sources
 |- go/{lib,app,test}/              # pure-Go lane
 |- ts/{lib,app,test}/              # Deno TypeScript lane
 |- tsweb/{lib,app,test}/           # React/Vite static application
+|- infra/deploy/                   # read-only deployment plan/observe contract
 |- tools/                          # package, lint, and smoke helpers
 |- test/                           # repository-contract tests
 |- .local/                         # ignored tools and caches
@@ -38,34 +40,50 @@ Each language owns `lib/<name>/`, `app/<name>/`, and `test/`. Use
 
 ## Public Commands
 
-Run `./repo.sh help` for the canonical, current list. The primary commands are:
+Run `./repo.sh help` for the canonical, current list, which `repo.sh`'s own
+`usage()` owns. Reproduced here:
 
 ```text
 shell
 exec <command> [args...]
+help
+target
 bootstrap [--offline] [--dry-run] [--repair]
 doctor [--deep]
 toolchain-lock [--check] | toolchain-qualify [--offline]
 buck2 [args...]
-target
+infra-lint
+format [--check]
 lint
 build [dbg|opt]
-test
 coverage
+test [dbg|opt]
 compile-commands [dbg|opt]
 cpp-build [dbg|opt] | cpp-run [dbg|opt] | cpp-test
 python [args...] | python-build | python-test
 deno [args...] | ts-build | ts-test | tsweb-build | tsweb-test
 go [args...] | go-build | go-test
+init-project <name> [org]
+infra-test
+package-list | package-explain <name>
 package-validate | package-resolve <name> [out]
+package-target-check <name>
 package <name> [dbg|opt] | package-smoke <archive> <name>
 release-check <name> <tag> | release-notes <tag>
 ci
 ```
 
+`format [--check]` applies, or checks, repository formatting for every lane;
+`lint` includes the non-mutating `format --check`, so `./repo.sh format --check`
+is the cheapest pre-handoff gate. `test` takes an optional `[dbg|opt]` profile
+and defaults to `dbg`. `init-project <name> [org]` renames this template into a
+new project (see the README). `package-list` and `package-explain <name>` are
+read-only discovery commands over `packages/catalog.bzl`, and
+`package-target-check <name>` is the release-side requirement that a
+`//packages:<name>` Buck target exists.
+
 `infra-lint` and `infra-test` are internal entrypoints used by `lint` and by
-repository tests respectively; they are intentionally omitted from this list
-but remain directly invocable. Every build/test/lint lane command above is a
+repository CI/tests respectively. Every build/test/lint lane command above is a
 thin wrapper around a Buck2 target invocation - see the Build And Test Graph
 section below.
 
@@ -112,8 +130,9 @@ task runner layered over a separate jobserver.
   `--target-platforms //config:<target>-opt`; `-m`/`--modifier` does not
   override a rule's own default target platform on the pinned buck2 - see
   `config/defs.bzl`).
-- `test` runs `buck2 test //...`, which builds and runs every lane's tests
-  including its lint-as-test targets.
+- `test [dbg|opt]` runs `buck2 test //...` in the selected profile (default
+  `dbg`), which builds and runs every lane's tests including its lint-as-test
+  targets.
 - `lint` runs `buck2 test //... --labels lint` (every lane's
   formatting/static-policy targets, selected by label) plus infra checks
   (`bash -n` over the shell scripts, `tools/lint.py`) that have no buck2
@@ -122,7 +141,13 @@ task runner layered over a separate jobserver.
   collects coverage as a normal build output under `dbg`, and
   `./repo.sh coverage` (bxl/coverage.bxl) discovers every test by rule
   kind and merges the collected data into one repo-relative lcov report
-  plus a per-file summary. `opt` builds stay uninstrumented.
+  plus a per-file summary. `opt` builds stay uninstrumented. The same
+  command then renders `buck-out/coverage-report/coverage.html`, a
+  self-contained browsable report (`tools/coverage_html.py`) with
+  annotated sources. That renderer is deliberately out-of-graph: it is a
+  view of the merged lcov plus the working tree, nothing depends on it,
+  and making it a Buck action would mean declaring every repository
+  source as an input to the merge just to annotate them.
 
 Every first-party Buck2 rule (there is no prelude in this repository) lives
 under `rules/`: `rules/cxx.bzl`, `rules/go.bzl`, `rules/python.bzl`,
@@ -178,9 +203,13 @@ third-party dependency adapters, fleet management, a deploy command or remote
 mutation path, certificate automation, cross-compilation, macOS/Windows
 support, sanitizers, or Zstandard packaging. Sanitizers remain explicitly
 deferred to preserve the hermetic Linux-musl closure; they require a separately
-evaluated host-debug toolchain. Tagged package archives do receive GitHub
-artifact attestations, but signed/annotated-tag requirements, SBOM publication,
-and separate release-provenance policy are incomplete. Documents describing
+evaluated host-debug toolchain. Tagged package archives receive GitHub artifact
+attestations, and `tools/release_evidence.py` writes the deterministic
+`.sbom.json` and `.provenance.json` sidecars that the package-release workflow
+publishes alongside each archive and the release manifest. What remains
+incomplete is release-tag signature verification: CI enforces an annotated tag
+but cannot hold the public-key trust root, so signature policy lives outside the
+repository (see [CI-RELEASE.md](CI-RELEASE.md)). Documents describing
 unimplemented capabilities retain their proposal or research status and must
 not be treated as executable contracts. See
 [CURRENT-CAPABILITIES.md](CURRENT-CAPABILITIES.md) for the readiness matrix.

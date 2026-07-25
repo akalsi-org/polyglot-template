@@ -253,8 +253,8 @@ the read-only tool accepts only `plan`, `status`, and `verify` operations.
 ```text
 ./repo.sh buck2 run //infra/deploy:example-plan
 ./repo.sh buck2 test //infra/deploy:readonly-contract
-python3 infra/deploy/readonly.py status --plan <plan.json> --observation <observed.json>
-python3 infra/deploy/readonly.py verify --plan <plan.json> --observation <observed.json>
+./repo.sh python infra/deploy/readonly.py status --plan <plan.json> --observation <observed.json>
+./repo.sh python infra/deploy/readonly.py verify --plan <plan.json> --observation <observed.json>
 ```
 
 `verify` fails closed when group/environment/target/digest differ, an expected

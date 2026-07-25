@@ -23,11 +23,15 @@ load("//rules:file.bzl", "export_file", "export_files")
 # ExternalRunnerTestInfo of its own, such as a group() of test deps, reports
 # "NO TESTS RAN" rather than running its deps' tests or erroring).
 #
-# Use `buck2 test //...` to run all 22 tests, including every lane's
-# lint-as-test targets (go:gofmt_check, go:go_vet, ts:fmt_check, ts:lint,
-# tsweb:fmt_check, tsweb:lint, python/test:compileall, the two
-# deno_graph_check drift checks - ts/test:graph_check, tsweb/test:graph_check
-# - plus the doctest and drift/manifest tests) - there is no separate "lint"
+# Use `buck2 test //...` to run every test in the graph (28 as of this
+# writing - deliberately not restated as a number anywhere a check could
+# assert on it, since the whole point of the discovery-by-rule-kind design
+# above is that the count changes whenever a target is added), including
+# every lane's lint-as-test targets (go:gofmt_check, go:go_vet,
+# go:graph_check, ts:fmt_check, ts:lint, tsweb:fmt_check, tsweb:lint,
+# python/test:compileall, python/test:pyright, the two deno_graph_check
+# drift checks - ts/test:graph_check, tsweb/test:graph_check - plus the
+# doctest, leak-check and drift/manifest tests) - there is no separate "lint"
 # verb in this buck2 graph, matching repo.sh's own lint lane being
 # per-language rather than a single command. To run one lane's tests
 # (including its lint-as-test targets) only, use that lane's own package
@@ -52,10 +56,11 @@ load("//rules:file.bzl", "export_file", "export_files")
 # lint targets and skipped greeting_test. So per-lane lint-only invocation
 # now works as a single invocation across the whole graph:
 #   buck2 test //... --labels lint
-# (verified: 11 lint-as-test targets ran - go:gofmt_check, go:go_vet,
-# ts:fmt_check, ts:lint, ts/test:graph_check, tsweb:fmt_check, tsweb:lint,
-# tsweb:tsconfig_drift, tsweb/test:graph_check, python/test:compileall,
-# python/test:lock_consistency - and nothing else).
+# (verified: 13 lint-as-test targets ran - go:gofmt_check, go:go_vet,
+# go:graph_check, ts:fmt_check, ts:lint, ts/test:graph_check,
+# tsweb:fmt_check, tsweb:lint, tsweb:tsconfig_drift, tsweb/test:graph_check,
+# python/test:compileall, python/test:pyright, python/test:lock_consistency -
+# and nothing else).
 # Coverage: DEFAULT-ON-FOR-dbg (see rules/coverage.bzl's module docstring
 # for the full design). `./repo.sh coverage` runs bxl/coverage.bxl, which
 # queries every instrumented-lane test by rule kind, skips any without a

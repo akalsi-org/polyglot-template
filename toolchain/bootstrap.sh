@@ -19,7 +19,7 @@ for arg in "$@"; do
   esac
 done
 [[ -f $POLYGLOT_LOCK_FILE ]] || { printf 'error: lock file not found: %s\n' "$POLYGLOT_LOCK_FILE" >&2; exit 1; }
-target=$($ROOT/toolchain/target.sh)
+target=$("$ROOT/toolchain/target.sh")
 
 extract_archive() {
   local archive=$1 cache=$2 destination=$3 expected=$4 listing
@@ -27,7 +27,21 @@ extract_archive() {
     *.tar.gz|*.tgz) listing=$(tar -tzf "$cache"); validate_members "$listing"; tar -xzf "$cache" -C "$destination" --no-same-owner --no-same-permissions ;;
     *.tar.xz) listing=$(tar -tJf "$cache"); validate_members "$listing"; tar -xJf "$cache" -C "$destination" --no-same-owner --no-same-permissions ;;
     *.tar.zst) listing=$(tar --zstd -tf "$cache"); validate_members "$listing"; tar --zstd -xf "$cache" -C "$destination" --no-same-owner --no-same-permissions ;;
-    *.zip|*.whl) command -v unzip >/dev/null; listing=$(unzip -Z1 "$cache"); validate_members "$listing"; unzip -q "$cache" -d "$destination" ;;
+    *.zip|*.whl)
+      command -v unzip >/dev/null 2>&1 || { printf 'error: bootstrap requires unzip for %s\n' "$archive" >&2; return 1; }
+      listing=$(unzip -Z1 "$cache"); validate_members "$listing"
+      # A symlink's TARGET is member DATA, not a member name, so
+      # validate_members cannot see it and the post-extraction escape scan
+      # below runs too late: unzip can create `foo -> /etc` and then write
+      # through it while extracting a later member named `foo/passwd`.
+      # Nothing this repository pins ships a symlink inside a zip/whl, so the
+      # audit is a refusal rather than a target check.
+      if unzip -Z "$cache" | awk 'NR > 1 && $1 ~ /^l/ { found = 1 } END { exit !found }'; then
+        printf 'error: archive contains a symlink member and cannot be extracted safely: %s\n' "$archive" >&2
+        return 1
+      fi
+      unzip -q "$cache" -d "$destination"
+      ;;
     *.zst)
       command -v zstd >/dev/null || { printf 'error: bootstrap requires zstd for %s\n' "$archive" >&2; return 1; }
       zstd -d -q -f -o "$destination/$expected" "$cache"
@@ -35,6 +49,23 @@ extract_archive() {
       ;;
     *) printf 'error: unsupported archive: %s\n' "$archive" >&2; return 1 ;;
   esac
+}
+
+# Content identity of an installed tree: every path's type and mode, every
+# symlink's target, and every regular file's SHA-256, folded into one digest.
+# The `.installed-*` stamp itself is excluded because it stores this digest.
+# One `xargs sha256sum` pass keeps it fast (sub-second on the ~270MB GCC tree
+# with a warm page cache).
+tree_content_hash() {
+  local root=$1
+  (
+    cd -- "$root" || exit 1
+    {
+      find . -mindepth 1 ! -path './.installed-*' -printf '%y %m %p\n'
+      find . -mindepth 1 ! -path './.installed-*' -type l -printf '%p\t' -exec readlink -- {} \;
+      find . -mindepth 1 ! -path './.installed-*' -type f -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum --
+    } | LC_ALL=C sort | sha256sum | awk '{ print $1 }'
+  )
 }
 
 validate_expected_artifact() {
@@ -114,7 +145,12 @@ probe_buck2() {
   local root=$1 expected=$2 declared_hash reported
   "$root/$expected" --version >/dev/null 2>&1 || { printf 'error: buck2 capability probe failed\n' >&2; return 1; }
   declared_hash=$(lock_value buck2 "$target" content_hash)
-  [[ -z $declared_hash ]] && return 0
+  # An absent content_hash used to skip the pin silently, so a lock-reader
+  # regression could disable buck2's strongest identity check while every
+  # probe still reported ok. buck2 must always carry one.
+  [[ -n $declared_hash ]] || {
+    printf 'error: tools.lock.toml declares no buck2 content_hash for %s\n' "$target" >&2; return 1;
+  }
   reported=$("$root/$expected" --version | awk '{ print $2 }')
   [[ $reported == "$declared_hash" ]] || {
     printf 'error: buck2 reported content hash %s does not match pinned %s\n' "$reported" "$declared_hash" >&2
@@ -171,7 +207,7 @@ write_bootstrap_wrappers() {
 }
 
 install_one() {
-  local tool=$1 version url sha archive expected kind install stamp cache tmp old link resolved
+  local tool=$1 version url sha archive expected kind install stamp cache tmp tmp_real old link resolved
   version=$(lock_value "$tool" "$target" version)
   url=$(lock_value "$tool" "$target" url)
   sha=$(lock_value "$tool" "$target" sha256)
@@ -185,9 +221,19 @@ install_one() {
   install="$LOCAL/toolchain/$target/$tool-$version"
   stamp="$install/.installed-$sha"
   cache="$LOCAL/downloads/$sha-$archive"
+  # The stamp records the installed tree's content hash, not just the archive
+  # sha256. A bare marker file short-circuited the install without ever
+  # re-hashing the tree, so a restored CI cache (loose restore-keys, and
+  # doctor --deep only ran in the lint job) never re-ran fetch_binary.sh's
+  # checksum gate on the path it actually used. Binding to content makes the
+  # cached path prove itself on every bootstrap.
   if ((repair == 0)) && [[ -f $stamp && (($kind == header && -f $install/$expected) || ($kind == executable && -x $install/$expected)) ]]; then
-    [[ $tool != go ]] || chmod -R u+w -- "$install"
-    printf 'bootstrap: %s %s already installed\n' "$tool" "$version"; return
+    if [[ $(<"$stamp") == "$(tree_content_hash "$install")" ]]; then
+      [[ $tool != go ]] || chmod -R u+w -- "$install"
+      printf 'bootstrap: %s %s already installed\n' "$tool" "$version"; return
+    fi
+    printf 'bootstrap: %s %s install tree does not match its recorded content hash; reinstalling\n' "$tool" "$version" >&2
+    rm -f -- "$stamp"
   fi
   if [[ $url == UNRESOLVED* || ! $sha =~ ^[0-9a-f]{64}$ ]]; then
     if ((dry_run)); then
@@ -215,9 +261,13 @@ install_one() {
   extract_archive "$archive" "$cache" "$tmp" "$expected"
   [[ $tool != go ]] || chmod -R u+w -- "$tmp"
   [[ $tool != gcc-musl ]] || normalize_gcc_loader "$tmp"
+  # Compare against the fully resolved staging root: realpath resolves every
+  # symlinked component, so a POLYGLOT_LOCAL_DIR containing one would make
+  # every in-tree link look like an escape.
+  tmp_real=$(realpath -- "$tmp")
   while IFS= read -r -d '' link; do
     resolved=$(realpath -m -- "$link")
-    case "$resolved" in "$tmp"/*) :;; *) printf 'error: archive contains escaping symlink: %s\n' "$link" >&2; return 1;; esac
+    case "$resolved" in "$tmp_real"/*) :;; *) printf 'error: archive contains escaping symlink: %s\n' "$link" >&2; return 1;; esac
   done < <(find "$tmp" -type l -print0)
   validate_expected_artifact "$tool" "$kind" "$tmp" "$expected"
   probe_artifact "$tool" "$kind" "$tmp" "$expected" "$version"
@@ -225,7 +275,7 @@ install_one() {
   [[ ! -e $install ]] || mv -- "$install" "$old"
   if ! mv -- "$tmp" "$install"; then [[ ! -e $old ]] || mv -- "$old" "$install"; return 1; fi
   rm -rf -- "$old"
-  : >"$stamp"
+  tree_content_hash "$install" >"$stamp"
   trap - RETURN
   printf 'bootstrap: installed %s %s for %s\n' "$tool" "$version" "$target"
 }
@@ -254,7 +304,7 @@ if ((dry_run == 0)); then
       # Buck owns the Deno source universe. Build only its manifest
       # subtarget: this does not run deno_cache or depend on an existing
       # seed, and prevents bootstrap from carrying a second entry list.
-      manifest_output=$(cd "$ROOT" && "$LOCAL/bin/buck2" build --show-output //:deno-cache[manifest])
+      manifest_output=$(cd "$ROOT" && "$LOCAL/bin/buck2" build --show-output '//:deno-cache[manifest]')
       manifest_path=$(printf '%s\n' "$manifest_output" | awk 'NF { print $NF }')
       [[ $manifest_path == /* ]] || manifest_path="$ROOT/$manifest_path"
       [[ $(printf '%s\n' "$manifest_path" | sed '/^$/d' | wc -l) == 1 && -f $manifest_path ]] || {

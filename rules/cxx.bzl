@@ -13,22 +13,14 @@ ExternalRunnerTestInfo rather than relying on a prelude-provided cxx_test.
 """
 
 load("//config:defs.bzl", "fail_if_cross_arch", "target_arch_attr")
-load("//config:flags.bzl", "COVERAGE_FLAG", "FORBIDDEN_FLAGS", "STANDARD", "profile_compile_flags", "profile_link_flags")
+load("//config:flags.bzl", "COVERAGE_FLAG", "STANDARD", "check_flags", "profile_compile_flags", "profile_link_flags")
 load("//rules:coverage.bzl", "CoverageInfo")
+load("//rules:env.bzl", "action_env")
+load("//rules:host.bzl", "native_target")
 load("//rules:pkg.bzl", "PACKAGE_LABELS_ATTR", "PackageEntry", "check_pkg_name", "package_info")
 load("//toolchains:lock.bzl", "TOOLCHAINS")
 
-def _native_target() -> str:
-  # Mirrors toolchains/defs.bzl's _native_target() / toolchain/target.sh:
-  # this repo only ever builds+runs the host's own musl output triplet.
-  arch = host_info().arch
-  if arch.is_x86_64:
-    return "x86_64-linux-musl"
-  if arch.is_aarch64:
-    return "aarch64-linux-musl"
-  fail("unsupported native CPU architecture")
-
-_NATIVE_TARGET = _native_target()
+_NATIVE_TARGET = native_target()
 _GCC = TOOLCHAINS["gcc-musl"][_NATIVE_TARGET]
 _DOCTEST = TOOLCHAINS["doctest"][_NATIVE_TARGET]
 _GCC_BIN_DIR = _GCC["expected"].rsplit("/", 1)[0]
@@ -169,13 +161,6 @@ def cxx_include_tree_args(ctx: AnalysisContext, deps: list) -> list:
     [],
   )
 
-def _check_flags(flags):
-  for flag in flags:
-    if flag in FORBIDDEN_FLAGS:
-      fail("forbidden C++ flag: {}".format(flag))
-    if flag.startswith("-fsanitize"):
-      fail("sanitizers are outside the pinned musl toolchain contract: {}".format(flag))
-
 def _toolchain_tools(ctx):
   fail_if_cross_arch(ctx, _NATIVE_TARGET)
   gcc_dir = ctx.attrs._gcc[DefaultInfo].default_outputs[0]
@@ -221,18 +206,8 @@ def _merge_deps(ctx, deps):
       tree_children.append(info.include_trees)
   return include_dirs, hdrs, objects, gcnos, tree_children
 
-def _dedupe_artifacts(artifacts):
-  seen = {}
-  ordered = []
-  for artifact in artifacts:
-    key = str(artifact)
-    if key not in seen:
-      seen[key] = True
-      ordered.append(artifact)
-  return ordered
-
-def _compile_one(ctx, tools, src, include_args, hdrs, compile_flags, extra_args, doctest, identifier):
-  _check_flags(compile_flags)
+def _compile_one(ctx, tools, src, include_args, hdrs, compile_flags, doctest, identifier):
+  check_flags(compile_flags)
   obj = ctx.actions.declare_output("__objects__/{}/{}.o".format(ctx.attrs.name, identifier))
   args = [
     tools.gxx,
@@ -242,7 +217,6 @@ def _compile_one(ctx, tools, src, include_args, hdrs, compile_flags, extra_args,
   if doctest:
     args.append(cmd_args(_doctest_include(ctx), format = "-I{}"))
   args += include_args
-  args += extra_args
   args += compile_flags
   args += ["-c", src, "-o", obj.as_output()]
   # --coverage makes gcc write a .gcno sidecar next to -o's path (same
@@ -256,6 +230,7 @@ def _compile_one(ctx, tools, src, include_args, hdrs, compile_flags, extra_args,
   ctx.actions.run(
     cmd_args(args, hidden = hdrs + ([gcno.as_output()] if gcno else [])),
     category = "cxx_compile",
+    env = action_env(),
     # Stable machine-readable source metadata for bxl/compdb.bxl. Buck's
     # aquery surface renders command arguments as display text, so compdb
     # must not infer the source position from a command-line convention.
@@ -264,10 +239,10 @@ def _compile_one(ctx, tools, src, include_args, hdrs, compile_flags, extra_args,
   return obj, gcno
 
 def _link(ctx, tools, objects, link_flags, identifier):
-  _check_flags(link_flags)
+  check_flags(link_flags)
   binary = ctx.actions.declare_output(ctx.attrs.name)
   args = [tools.gxx] + objects + [cmd_args(tools.bin_dir, format = "-B{}")] + link_flags + ["-o", binary.as_output()]
-  ctx.actions.run(cmd_args(args), category = "cxx_link", identifier = identifier)
+  ctx.actions.run(cmd_args(args), category = "cxx_link", identifier = identifier, env = action_env())
   return binary
 
 def _loader_launcher(ctx, tools, binary):
@@ -323,7 +298,7 @@ def _cxx_library_impl(ctx: AnalysisContext) -> list[Provider]:
   own_tree_tset = _own_include_tree_tset(ctx, ctx.attrs.hdrs, tree_children)
   include_args = _include_args(ctx, [own_tree_tset], _flatten_tset(include_dirs))
   compiled = [
-    _compile_one(ctx, tools, src, include_args, _flatten_tset(hdrs), ctx.attrs.compile_flags, [], False, src.short_path)
+    _compile_one(ctx, tools, src, include_args, _flatten_tset(hdrs), ctx.attrs.compile_flags, False, src.short_path)
     for src in ctx.attrs.srcs
   ]
   own_objects = [obj for obj, _gcno in compiled]
@@ -360,11 +335,17 @@ def _cxx_object_impl(ctx: AnalysisContext) -> list[Provider]:
   tools = _toolchain_tools(ctx)
   include_dirs, hdrs, _objects, _gcnos, tree_children = _merge_deps(ctx, ctx.attrs.deps)
   hdrs = ctx.actions.tset(CxxArtifactSet, value = list(ctx.attrs.hdrs), children = [hdrs])
-  # Deps' include trees still fold forward so a cxx_object with cxx_library
-  # deps compiles against and re-exports them correctly.
-  include_args = _include_args(ctx, tree_children, _flatten_tset(include_dirs))
-  obj, gcno = _compile_one(ctx, tools, ctx.attrs.src, include_args, _flatten_tset(hdrs), ctx.attrs.compile_flags, [], ctx.attrs.doctest, ctx.attrs.name)
-  tree_tset = ctx.actions.tset(IncludeTreeSet, children = tree_children) if tree_children else None
+  # Own hdrs are staged into this target's own include-tree node, exactly
+  # like cxx_library's - see _own_include_tree_tset. Before this, only
+  # cxx_library did so and the other three rules passed `tree_children`
+  # straight through, which made their own `hdrs` a silent no-op for
+  # resolution (added as hidden inputs, never reachable via any -I): a
+  # cxx_object/cxx_binary/cxx_test that declared a header and included it
+  # failed with "file not found" and nothing pointing at the real cause.
+  # Deps' include trees still fold forward as this node's children.
+  tree_tset = _own_include_tree_tset(ctx, ctx.attrs.hdrs, tree_children)
+  include_args = _include_args(ctx, [tree_tset], _flatten_tset(include_dirs))
+  obj, gcno = _compile_one(ctx, tools, ctx.attrs.src, include_args, _flatten_tset(hdrs), ctx.attrs.compile_flags, ctx.attrs.doctest, ctx.attrs.name)
   return [
     DefaultInfo(default_outputs = [obj]),
     CxxInfo(include_dirs = include_dirs, hdrs = hdrs, objects = ctx.actions.tset(CxxArtifactSet, value = [obj]), gcnos = ctx.actions.tset(CxxArtifactSet, value = [gcno] if gcno != None else []), include_trees = tree_tset),
@@ -387,9 +368,10 @@ def _cxx_binary_impl(ctx: AnalysisContext) -> list[Provider]:
   dep_include_dirs, dep_hdrs, dep_objects, _dep_gcnos, tree_children = _merge_deps(ctx, ctx.attrs.deps)
   include_dirs = ctx.actions.tset(CxxStringSet, value = list(ctx.attrs.include_dirs), children = [dep_include_dirs])
   hdrs = ctx.actions.tset(CxxArtifactSet, value = list(ctx.attrs.hdrs), children = [dep_hdrs])
-  include_args = _include_args(ctx, tree_children, _flatten_tset(include_dirs))
+  # Own hdrs get their own staged -I tree - see _cxx_object_impl's comment.
+  include_args = _include_args(ctx, [_own_include_tree_tset(ctx, ctx.attrs.hdrs, tree_children)], _flatten_tset(include_dirs))
   compiled = [
-    _compile_one(ctx, tools, src, include_args, _flatten_tset(hdrs), ctx.attrs.compile_flags, [], False, src.short_path)
+    _compile_one(ctx, tools, src, include_args, _flatten_tset(hdrs), ctx.attrs.compile_flags, False, src.short_path)
     for src in ctx.attrs.srcs
   ]
   own_objects = [obj for obj, _gcno in compiled]
@@ -437,7 +419,7 @@ _cxx_binary_rule = rule(
 # that depends on it, since buck2 shares identical configured subgraphs) and
 # provides ExternalRunnerTestInfo so `buck2 test` can run it.
 
-def _coverage_collect_action(ctx, tools, binary, gcnos):
+def _coverage_collect_action(ctx, tools, binary):
   # Runs the test binary a second time (separately from the
   # ExternalRunnerTestInfo/RunInfo path `buck2 test` uses for pass/fail
   # reporting) as a normal ctx.actions.run() build action, so its coverage
@@ -480,6 +462,7 @@ def _coverage_collect_action(ctx, tools, binary, gcnos):
     cmd_args(["/bin/sh", script, gcov_dir.as_output()], hidden = [binary, tools.dir] + written),
     category = "cxx_test_coverage",
     identifier = ctx.attrs.name,
+    env = action_env(),
   )
   return gcov_dir
 
@@ -490,9 +473,10 @@ def _cxx_test_impl(ctx: AnalysisContext) -> list[Provider]:
   runner_gcnos = ctx.attrs._runner[CxxInfo].gcnos
   include_dirs = ctx.actions.tset(CxxStringSet, value = list(ctx.attrs.include_dirs), children = [dep_include_dirs])
   hdrs = ctx.actions.tset(CxxArtifactSet, value = list(ctx.attrs.hdrs), children = [dep_hdrs])
-  include_args = _include_args(ctx, tree_children, _flatten_tset(include_dirs))
+  # Own hdrs get their own staged -I tree - see _cxx_object_impl's comment.
+  include_args = _include_args(ctx, [_own_include_tree_tset(ctx, ctx.attrs.hdrs, tree_children)], _flatten_tset(include_dirs))
   compiled = [
-    _compile_one(ctx, tools, src, include_args, _flatten_tset(hdrs), ctx.attrs.compile_flags, [], True, src.short_path)
+    _compile_one(ctx, tools, src, include_args, _flatten_tset(hdrs), ctx.attrs.compile_flags, True, src.short_path)
     for src in ctx.attrs.srcs
   ]
   own_objects = [obj for obj, _gcno in compiled]
@@ -512,7 +496,7 @@ def _cxx_test_impl(ctx: AnalysisContext) -> list[Provider]:
   ]
   if COVERAGE_FLAG in ctx.attrs.compile_flags:
     gcnos = _flatten_tset(ctx.actions.tset(CxxArtifactSet, value = own_gcnos, children = [runner_gcnos, dep_gcnos]))
-    gcov_dir = _coverage_collect_action(ctx, tools, binary, gcnos)
+    gcov_dir = _coverage_collect_action(ctx, tools, binary)
     providers.append(CoverageInfo(
       kind = "cxx_gcov",
       primary = gcov_dir,

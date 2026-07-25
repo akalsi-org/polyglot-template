@@ -5,8 +5,23 @@ namespace {
 
 PyObject* xor_bytes(PyObject*, PyObject* args) {
   Py_buffer input{};
-  unsigned int key = 0;
-  if (!PyArg_ParseTuple(args, "y*I:xor_bytes", &input, &key)) {
+  PyObject* key_object = nullptr;
+  if (!PyArg_ParseTuple(args, "y*O:xor_bytes", &input, &key_object)) {
+    return nullptr;
+  }
+  // The "I" converter is PyLong_AsUnsignedLongMask: it wraps silently
+  // instead of raising, so 2**32 arrived here as 0 and the range check
+  // below saw an in-range key. Convert explicitly — PyLong_AsUnsignedLong
+  // raises OverflowError for negative and oversized values, and anything
+  // that survives that is a real value the byte-range check can judge.
+  if (!PyLong_Check(key_object)) {
+    PyBuffer_Release(&input);
+    PyErr_SetString(PyExc_TypeError, "key must be an int");
+    return nullptr;
+  }
+  const unsigned long key = PyLong_AsUnsignedLong(key_object);
+  if (key == static_cast<unsigned long>(-1) && PyErr_Occurred() != nullptr) {
+    PyBuffer_Release(&input);
     return nullptr;
   }
   if (key > 0xffU) {

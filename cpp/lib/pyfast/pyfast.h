@@ -77,12 +77,19 @@ static inline void _vtype_err(const char *ctx, const char *expected, PyObject *o
  * functions (methods use it via VSELF; module functions never do) —
  * marked maybe-unused so -Wextra doesn't force every VFUNC body to
  * `(void)_s;` for a parameter it structurally can't omit. */
-#define VFUNC(name) \
-  static PyObject *name(PyObject *_s __attribute__((unused)), PyObject *const *_a, Py_ssize_t _n)
+/* `_a` gets the same treatment for the same reason: a zero-argument
+ * VFUNC (VEXPECT(0) and keywords only) never names `_a`, and -Wextra
+ * flagged every one of them. */
+#define VFUNC(name)                                           \
+  static PyObject *name(PyObject *_s __attribute__((unused)), \
+                        PyObject *const *_a __attribute__((unused)), Py_ssize_t _n)
 
-#define VFUNC_KW(name)                                                                            \
-  static PyObject *name(PyObject *_s __attribute__((unused)), PyObject *const *_a, Py_ssize_t _n, \
-                        PyObject *_k)
+/* A VFUNC_KW body must call VKW_NOEXTRA(...) in its prologue (see the
+ * keyword section below) — without it, unknown keywords are silently
+ * dropped. */
+#define VFUNC_KW(name)                                        \
+  static PyObject *name(PyObject *_s __attribute__((unused)), \
+                        PyObject *const *_a __attribute__((unused)), Py_ssize_t _n, PyObject *_k)
 
 /* ── Bounds-Checked Argument Access ──────────────────────────────────
  *
@@ -144,6 +151,56 @@ static inline PyObject *_vkw(const char *key, PyObject *kwnames, PyObject *const
 
 #define VKW(k) _vkw(k, _k, _a, _n, 1)
 #define VKW_OPT(k) _vkw(k, _k, _a, _n, 0)
+
+/* ── Unknown-Keyword Rejection ─────────────────────────────────────
+ *
+ * VKW(k)/VKW_OPT(k) only ever ASK for keywords; nothing in the lookup
+ * path notices a keyword the body never asks about. That made every
+ * keyword-taking function silently accept (and discard) typos and
+ * unsupported options — `greet(name='World', excite=True)` returned
+ * "Hello, World." with no error at all, because `excite` was simply
+ * never looked at.
+ *
+ * VKW_NOEXTRA declares the complete set of keywords a body understands
+ * and rejects anything else:
+ *
+ *   VFUNC_KW(greet) {
+ *     VEXPECT(0);
+ *     VKW_NOEXTRA("name", "excited");
+ *     ...
+ *   }
+ *
+ * Every VFUNC_KW / VMETHOD_KW_SIG body is required to call it in its
+ * prologue. It is spelled as an explicit allow-list rather than a
+ * "count what VKW matched, compare against PyTuple_GET_SIZE(_k)"
+ * counter because the allow-list needs no hidden per-call state
+ * threaded through the signature macros (VMETHOD_KW_SIG expands to a
+ * parameter list, which cannot declare one) and because it can name
+ * the offending keyword exactly, the way CPython does.
+ */
+
+static inline int _vkw_noextra(PyObject *kwnames, const char *const *known, Py_ssize_t nknown,
+                               const char *func) {
+  if (!kwnames) return 1;
+  Py_ssize_t nkw = PyTuple_GET_SIZE(kwnames);
+  for (Py_ssize_t i = 0; i < nkw; i++) {
+    PyObject *name = PyTuple_GET_ITEM(kwnames, i);
+    int found = 0;
+    for (Py_ssize_t j = 0; j < nknown && !found; j++)
+      if (!PyUnicode_CompareWithASCIIString(name, known[j])) found = 1;
+    if (!found) {
+      PyErr_Format(PyExc_TypeError, "%s: unexpected keyword argument '%U'", func, name);
+      return 0;
+    }
+  }
+  return 1;
+}
+
+#define VKW_NOEXTRA(...)                                                                          \
+  do {                                                                                            \
+    static const char *const _vkn[] = {__VA_ARGS__};                                              \
+    if (!_vkw_noextra(_k, _vkn, (Py_ssize_t)(sizeof _vkn / sizeof *_vkn), __func__)) return NULL; \
+  } while (0)
 
 /* ── Argument Validation ─────────────────────────────────────────── */
 
@@ -280,18 +337,29 @@ static inline int _v_buffer(PyObject *obj, Py_buffer *buf, const char *ctx) {
     (bufptr)->obj = NULL;     \
   } while (0)
 
-#define VNUL(i) (VA(i) == Py_None)
+/* VNUL takes an already-obtained PyObject*, not an index. It used to be
+ * `VNUL(i) (VA(i) == Py_None)`: for an out-of-range i, VA() sets a
+ * TypeError and returns NULL, `NULL == Py_None` quietly evaluates to 0,
+ * and the caller — seeing only "not None" — carries on with a live
+ * exception that surfaces later at some unrelated call. Comparing a
+ * value the caller has already null-checked has no such failure mode. */
+#define VNUL(obj) ((PyObject *)(obj) == Py_None)
 
 /* ── Type Cast ───────────────────────────────────────────────────── */
 
 /* ctx names the value being cast in the error message ("argument 2",
  * "keyword 'point'", ...) — a hardcoded "argument 0" here was simply
  * wrong for every cast of anything else. */
-#define VTYPE_CAST(obj, T, ctx)                                                         \
-  (__extension__({                                                                      \
-    PyObject *_vc_o = (PyObject *)(obj);                                                \
-    (_vc_o && Py_TYPE(_vc_o) == &T##_type) ? (T *)_vc_o                                 \
-                                           : (_vtype_err((ctx), #T, _vc_o), (T *)NULL); \
+/* A NULL obj means an earlier step (typically VA(i) with an
+ * out-of-range index) already raised; reporting "expected T, got NULL"
+ * on top of it would overwrite the more specific error with a less
+ * specific one. Propagate instead. */
+#define VTYPE_CAST(obj, T, ctx)                                                     \
+  (__extension__({                                                                  \
+    PyObject *_vc_o = (PyObject *)(obj);                                            \
+    (_vc_o && Py_TYPE(_vc_o) == &T##_type)                                          \
+      ? (T *)_vc_o                                                                  \
+      : (PyErr_Occurred() ? (T *)NULL : (_vtype_err((ctx), #T, _vc_o), (T *)NULL)); \
   }))
 
 /* ── Keyword Unpacker Shortcuts ────────────────────────────────────
@@ -315,7 +383,11 @@ static inline int _v_buffer(PyObject *obj, Py_buffer *buf, const char *ctx) {
  * conversion error.
  *
  * String/bytes required variants return const char* (NULL on error).
- * Optional variants write NULL to *ptr when keyword absent, return 1/0.
+ * Optional variants write NULL to *ptr AND 0 to *out_len when the
+ * keyword is absent, and return 1/0. Leaving *out_len untouched in the
+ * absent case (as they used to) left callers holding an uninitialized
+ * length beside a NULL pointer — readable only by accident, and only
+ * "safe" as long as every caller remembered to check the pointer first.
  *
  * The keyword name k must be a string literal.
  */
@@ -398,16 +470,18 @@ static inline int _v_buffer(PyObject *obj, Py_buffer *buf, const char *ctx) {
     _v ? _v_bool(_v, out, _VKW_CTX(k)) : (*(out) = (def), 1); \
   })
 
-#define VKWOPT_STR(k, out_ptr, out_len)                                                      \
-  ({                                                                                         \
-    PyObject *_v = VKW_OPT(k);                                                               \
-    _v ? ((*(out_ptr) = _v_str(_v, out_len, _VKW_CTX(k))) != NULL) : (*(out_ptr) = NULL, 1); \
+#define VKWOPT_STR(k, out_ptr, out_len)                            \
+  ({                                                               \
+    PyObject *_v = VKW_OPT(k);                                     \
+    _v ? ((*(out_ptr) = _v_str(_v, out_len, _VKW_CTX(k))) != NULL) \
+       : (*(out_ptr) = NULL, *(out_len) = 0, 1);                   \
   })
 
-#define VKWOPT_BYTES(k, out_ptr, out_len)                                                      \
-  ({                                                                                           \
-    PyObject *_v = VKW_OPT(k);                                                                 \
-    _v ? ((*(out_ptr) = _v_bytes(_v, out_len, _VKW_CTX(k))) != NULL) : (*(out_ptr) = NULL, 1); \
+#define VKWOPT_BYTES(k, out_ptr, out_len)                            \
+  ({                                                                 \
+    PyObject *_v = VKW_OPT(k);                                       \
+    _v ? ((*(out_ptr) = _v_bytes(_v, out_len, _VKW_CTX(k))) != NULL) \
+       : (*(out_ptr) = NULL, *(out_len) = 0, 1);                     \
   })
 
 /* ── Module Definition ─────────────────────────────────────────────
@@ -443,7 +517,13 @@ static inline PyObject *_vmod_no_init(PyObject *module) { return module; }
     PyModuleDef_HEAD_INIT, #mod, doc, -1, _vmt_##mod, NULL, NULL, NULL, NULL}; \
   PyMODINIT_FUNC PyInit_##mod(void) {                                          \
     PyObject *_module = PyModule_Create(&_vmd_##mod);                          \
-    return _module ? init_hook(_module) : NULL;                                \
+    if (!_module) return NULL;                                                 \
+    /* A hook that fails (a type that won't PyType_Ready, a failed          */ \
+    /* PyModule_AddObject) owns no reference to _module; returning NULL     */ \
+    /* straight through leaked the module object it was handed.            */  \
+    PyObject *_ready = init_hook(_module);                                     \
+    if (!_ready) Py_DECREF(_module);                                           \
+    return _ready;                                                             \
   }
 
 /* ── Types with Vectorcall ─────────────────────────────────────────
@@ -496,7 +576,18 @@ static inline PyObject *_vmod_no_init(PyObject *module) { return module; }
   }                  \
   T;
 
-#define VTYPE_FLAGS (Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_VECTORCALL | Py_TPFLAGS_METHOD_DESCRIPTOR)
+/* Py_TPFLAGS_METHOD_DESCRIPTOR is deliberately NOT here. It is a claim
+ * about a DESCRIPTOR type ("my instances, found on a class, behave like
+ * unbound methods"), and CPython acts on that claim: _PyObject_GetMethod
+ * takes the meth_found path for any class attribute whose type carries
+ * the flag, so `obj.attr(x)` is compiled to a call that prepends `obj`.
+ * For an ordinary value type — a Point stored as a class attribute —
+ * that silently turns p(1.0, 2.0) into p(owner, 1.0, 2.0). */
+#define VTYPE_FLAGS (Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_VECTORCALL)
+
+/* Opt in explicitly, and only for a type that really is a descriptor
+ * (tp_descr_get set, instances meant to bind like methods do). */
+#define VTYPE_FLAGS_DESCRIPTOR (VTYPE_FLAGS | Py_TPFLAGS_METHOD_DESCRIPTOR)
 
 #define VTOBJ_DEF(T, ...)                                                                         \
   static PyTypeObject T##_type = {PyVarObject_HEAD_INIT(NULL, 0).tp_basicsize = sizeof(T),        \
@@ -559,6 +650,7 @@ static inline PyObject *_vmod_no_init(PyObject *module) { return module; }
 #define VCALL_BEGIN                                                              \
   Py_ssize_t _n = PyVectorcall_NARGS(_nf);                                       \
   do {                                                                           \
+    (void)_n; /* a vc_call body may legitimately ignore its arguments */         \
     if (_k != NULL && PyTuple_GET_SIZE(_k) > 0) {                                \
       PyErr_Format(PyExc_TypeError, "%s: takes no keyword arguments", __func__); \
       return NULL;                                                               \
@@ -591,6 +683,10 @@ static inline PyObject *_vmod_no_init(PyObject *module) { return module; }
 #define VMETHOD_SIG \
   PyObject *_s, PyObject *const *_a __attribute__((unused)), Py_ssize_t _n __attribute__((unused))
 
+/* Like VFUNC_KW, a VMETHOD_KW_SIG body must call VKW_NOEXTRA(...) in
+ * its prologue, plus VEXPECT(n) for the positional arity it accepts —
+ * a keyword-only method without VEXPECT(0) silently swallows
+ * positional arguments. */
 #define VMETHOD_KW_SIG                                       \
   PyObject *_s, PyObject *const *_a __attribute__((unused)), \
     Py_ssize_t _n __attribute__((unused)), PyObject *_k __attribute__((unused))

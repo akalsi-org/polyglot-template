@@ -2,11 +2,19 @@
 set -euo pipefail
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+python=${POLYGLOT_LOCAL_DIR:-$root/.local}/bin/python3
+[[ -x $python ]] || { printf 'pinned Python is not installed; run ./repo.sh bootstrap\n' >&2; exit 1; }
 compdb=$root/compile_commands.json
 had_compdb=0
+# The developer's compile_commands.json is repository state, so its backup
+# stays beside it under buck-out rather than in /tmp: an EXIT trap does not
+# fire on SIGKILL, and a recoverable copy next to the file is far easier to
+# find than an anonymous /tmp name on a tmpfs that a reboot clears.
+backup_dir=$root/buck-out/v2/tmp
 if [[ -e $compdb ]]; then
   had_compdb=1
-  backup=$(mktemp)
+  mkdir -p "$backup_dir"
+  backup=$backup_dir/compile_commands.json.contract-backup
   cp -- "$compdb" "$backup"
 else
   backup=''
@@ -24,7 +32,7 @@ trap cleanup EXIT
 # Exercise the BXL query and inspect its generated behavior, rather than
 # trusting comments or the presence of a hand-written source list.
 "$root/repo.sh" compile-commands
-python3 - "$root" "$compdb" <<'PY'
+"$python" - "$root" "$compdb" <<'PY'
 import json
 import sys
 from pathlib import Path

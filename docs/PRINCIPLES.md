@@ -1,5 +1,13 @@
 # Principles And Meta-Rules
 
+Status: mixed. This is durable reasoning guidance, not a uniform enforcement
+contract. Some principles are enforced by an executable gate in this checkout,
+some are only partly enforced, some describe capabilities that do not exist
+here, and one records a deliberate standing exception. Every block below carries
+an `enforcement:` line stating which of those it is; read that line before
+treating a principle as a current repository guarantee. The executable boundary
+is [CURRENT-CAPABILITIES.md](CURRENT-CAPABILITIES.md).
+
 These principles were extracted from the Flow ADRs, this repository's engineering skills, upstream tool research, and the Please feasibility spike. Each rule records the invariant, evidence, boundary, cheapest validation, and falsifier.
 
 ## Decision Tree
@@ -45,6 +53,11 @@ Need cheap co-located services?
   -> immutable package version vector + systemd group before adopting a scheduler
 ```
 
+The zstd, subdomain-compiler, HAProxy, and systemd-group branches above are
+proposed, not implemented. The implemented package format is deterministic
+`.tar.gz` and there is no deployment mutation path. See each principle's
+`enforcement:` line.
+
 ## P1. One Public Surface, Several Semantic Owners
 
 ```text
@@ -54,6 +67,7 @@ boundary: repo.sh owns dispatch; Buck2 owns build/test graph ordering and cachin
 validate: help lists every canonical command and each executes through the same environment
 falsifier: a single lower-level tool genuinely and maintainably owns all required language/package semantics
 avoid: copying build logic into repo.sh or first-party Buck2 rules
+enforcement: enforced - `./repo.sh help` is the canonical list and every lane command dispatches through the same pinned environment
 ```
 
 ## P2. One Truth Per Artifact Class
@@ -65,6 +79,7 @@ boundary: BUCK targets own compile actions, generated code contracts, package id
 validate: deterministic regeneration produces no diff and drift checks compare normalized models
 falsifier: the derived artifact contains independent user-authored information that cannot live in the source
 avoid: separately maintaining compile source lists, compdb commands, tests, and package file lists
+enforcement: enforced - `toolchain-lock --check` and `package-validate` are drift gates; the compdb is derived, never hand-maintained
 ```
 
 ## P3. Tooling Products Are Build Correctness
@@ -76,6 +91,7 @@ boundary: compdb is derived on demand from the same Buck2 action graph that buil
 validate: every executed compile action has an equivalent compdb entry and clangd checks representative sources
 falsifier: no consumer uses the artifact and its absence cannot affect development or verification
 avoid: a manual compile-commands step developers must remember
+enforcement: enforced - `bxl/compdb.bxl` derives the database from the action graph and `test/graph-compdb-contract.sh` gates it in CI
 ```
 
 ## P4. Third-Party Code Is Part Of The Effective Graph
@@ -87,6 +103,7 @@ boundary: compdb is complete by default; lint scope remains separately selectabl
 validate: dependency compile counts equal normalized compdb counts
 falsifier: dependency is consumed only as a verified prebuilt binary and no source is compiled
 avoid: excluding upstream source merely to reduce editor noise
+enforcement: not exercised - this checkout compiles no third-party source, so the completeness claim covers first-party C++ and Python-extension actions only
 ```
 
 ## P5. Prefer Upstream Semantics, Not Upstream Global State
@@ -98,6 +115,7 @@ boundary: CMake/Meson/Autotools may configure selected dependencies into private
 validate: locked source + patches + options + toolchain reproduce declared artifacts offline
 falsifier: source topology is small and more stable than the upstream configuration layer
 avoid: making CMake mandatory because one optional dependency uses it
+enforcement: not implemented - no dependency adapter exists; ARCHITECTURE.md lists third-party dependency adapters as deliberately unimplemented
 ```
 
 ## P6. Current Is A Discovery Policy; Reproducible Is A Lock
@@ -109,6 +127,7 @@ boundary: check-updates is read-only; update creates a tested reviewable lock di
 validate: old lock rebuilds offline and candidate update passes capability plus consumer tests
 falsifier: the upstream artifact is content-addressed and immutable by construction
 avoid: resolving latest during normal bootstrap
+enforcement: enforced - `tools.lock.toml` pins immutable URLs and SHA-256 values; bootstrap is the only fetching command and `bootstrap --offline` plus CI's cold-graph replay prove it. There is no `check-updates` command: lock changes go through the manual `toolchain-lock`/`toolchain-qualify` lifecycle
 ```
 
 ## P7. Stamps Follow Capability, Not Existence
@@ -120,6 +139,7 @@ boundary: temp extraction -> probes -> atomic rename -> stamp
 validate: corrupt archive, wrong binary, interrupted extraction, and stale stamp fixtures
 falsifier: artifact identity cryptographically implies all required capabilities and layout
 avoid: touching a version file immediately after extraction
+enforcement: enforced - bootstrap probes each artifact before stamping, and `./repo.sh doctor --deep` plus `toolchain-qualify` re-probe capability rather than presence
 ```
 
 ## P8. Separate Stable Defaults From Experiments
@@ -131,6 +151,8 @@ boundary: stable release profile differs from cxx26/jsonv2/python-jit profiles
 validate: tests and benchmarks compare default and experimental lanes
 falsifier: upstream graduates the feature and removes the compatibility distinction
 avoid: global GOEXPERIMENT or PYTHON_JIT settings
+exception: Go jsonv2 is a recorded, deliberate violation of the boundary and the avoid clause. `GOEXPERIMENT=jsonv2` is set globally for every Go command by `repo.sh` and `rules/go.bzl`, there is no non-jsonv2 profile, and no comparison lane satisfies the validate clause. README and ARCHITECTURE.md both describe this as the repository's single Go configuration. Treat it as an accepted debt with MR5 exit criteria, not as evidence that P8 holds. The pinned CPython side of the principle does hold: the standalone runtime makes no JIT claim and `PYTHON_JIT` is not set anywhere
+enforcement: exception recorded - partly enforced for CPython, deliberately violated for Go jsonv2 as described above
 ```
 
 ## P9. Runtime Cost Is Per Bundle, Not Per Script
@@ -142,6 +164,7 @@ boundary: package metadata references at most one compatible Deno and one compat
 validate: stage manifest rejects duplicate runtime identities and every launcher runs without host runtimes
 falsifier: a tool is distributed independently and zero-install single-file UX outweighs duplication
 avoid: compiling every small Deno or Python command into its own runtime-bearing executable
+enforcement: partly enforced - `polyglot-demo` does stage exactly one CPython runtime and its launchers run from a clean extraction without host runtimes, but the "stage manifest rejects duplicate runtime identities" validation does not exist. `package_smoke` supports only `commands`/`checks` plus an optional `smoke_script`; nothing scans the staged manifest for duplicate runtime identities
 ```
 
 ## P10. Remove Entropy Before Compressing
@@ -153,6 +176,7 @@ boundary: compression begins only after stage is sealed and normalized
 validate: component size report, duplicate-runtime check, package budget, and compression knee benchmark
 falsifier: input is already irreducibly compressed and packaging latency is irrelevant
 avoid: using level 22 as a substitute for package ownership
+enforcement: not implemented - the zstd reference is aspirational. No zstd exists in `rules/`, `tools/`, or `repo.sh`; the implemented package format is deterministic `.tar.gz`, and ARCHITECTURE.md lists Zstandard packaging as deliberately unimplemented. There is no component size report, duplicate-runtime check, package budget, or compression knee benchmark. What does hold is the sealed single staging truth: `package()` stages in-graph before archiving
 ```
 
 ## P11. Optimize Repeated Work By Identity
@@ -164,6 +188,7 @@ boundary: package cache key includes stage, tool, runtime, epoch, and compressio
 validate: second identical package publishes the cached artifact and has the same SHA-256
 falsifier: package intentionally contains nondeterministic signing or timestamps
 avoid: recompressing an unchanged 150 MiB runtime bundle
+enforcement: partly enforced - archives are deterministic, so an unchanged package reproduces the same SHA-256, and Buck2 owns action-level caching for the staged content. The "compression policy digest" in the boundary clause does not exist: there is no compression policy and no separate package cache key composed of stage/tool/runtime/epoch/compression digests
 ```
 
 ## P12. Validate From The Consumer Side
@@ -175,6 +200,7 @@ boundary: package is unpacked under a clean root with host runtimes, source tree
 validate: execute all entrypoints, compile/link SDK consumer, inspect ELF closure, verify hashes and licenses
 falsifier: artifact never crosses a process, machine, package, or ownership boundary
 avoid: declaring packaging successful after archive creation alone
+enforcement: partly enforced - `./repo.sh package-smoke` and the in-graph `package_smoke` targets do extract into a clean temporary root and execute the declared entrypoints without host Python, Deno, Go, compiler, or source-tree state, and `polyglot-demo`'s smoke script additionally validates every referenced web asset. The rest of the validate clause is not implemented: nothing compiles or links an SDK consumer, inspects the ELF closure, or verifies licenses. `package_smoke` accepts only `commands`/`checks` and an optional `smoke_script`
 ```
 
 ## P13. Complete Observability Does Not Mean Universal Policy Enforcement
@@ -186,6 +212,7 @@ boundary: complete compdb always; ordinary lint targets owned code; explicit thi
 validate: editor navigation works in dependency code and CI lint remains actionable
 falsifier: upstream source is locally maintained and subject to repository policy
 avoid: making the compdb incomplete to keep lint quiet
+enforcement: enforced for the code this repository owns - the compdb covers every buck2-built C++ and Python-extension action and `lint` scope is selected separately by the `lint` label. The third-party half of the boundary is untested here because no third-party source is compiled
 ```
 
 ## P14. AI Instructions Are Source; AI State Is Liability
@@ -197,6 +224,7 @@ boundary: .agents/md and .agents/skills tracked; .claude/.codex/.grok/.omx and .
 validate: skill/frontmatter/link checks plus clean worktree after agent and CI workflows
 falsifier: a vendor-specific config is deliberately portable, reviewed, secret-free, and required by every clone
 avoid: committing sessions or duplicating the canonical overview into vendor trees
+enforcement: enforced - `.agents/md/overview.md` is tracked and exposed through the root `AGENTS.md` symlink while vendor and runtime agent state stays ignored. `.agents/skills/` has no repository-owned skills yet, so the skill/frontmatter/link part of the validate clause has nothing to check
 ```
 
 ## P15. Applications Declare Intent, Environments Bind Infrastructure
@@ -208,6 +236,7 @@ boundary: app owns subdomain/scope/port; environment owns zone/certificate/place
 validate: compile one app manifest under two environments and prove only derived infrastructure state changes
 falsifier: the domain name is an application-level protocol identity that must be compiled or signed into the product
 avoid: embedding a TLD, Cloudflare token, certificate path, or host IP in an app package
+enforcement: proposed - P15 through P18 describe the deployment and fleet design in docs/proposals/. Only the read-only `//infra/deploy` plan/observation contract exists; there is no deployment compiler, environment binding, HAProxy integration, certificate controller, or systemd group in this checkout
 ```
 
 ## P16. Hot State Must Also Be Durable State
@@ -219,6 +248,7 @@ boundary: deployment compiler updates durable file and runtime transaction; rece
 validate: compare disk/runtime state, probe Host/SNI, restart HAProxy in a test fixture, and probe again
 falsifier: the runtime reconstructs all desired state transactionally from the canonical store on every start
 avoid: declaring success after only set-map, set-server, or set-ssl-cert
+enforcement: proposed - no runtime mutation path exists; see P15
 ```
 
 ## P17. Compose Packages Before Introducing A Scheduler
@@ -230,6 +260,7 @@ boundary: repo manifests select packages; systemd supervises processes; HAProxy 
 validate: install, activate, health-check, drain, and rollback one multi-package group across a bounded selected inventory
 falsifier: host churn, autoscaling, bin-packing, or automatic replacement becomes an operational requirement
 avoid: adopting a scheduler solely because inventory contains multiple hosts
+enforcement: proposed - no deployment group, systemd unit, or install/activate/drain/rollback path exists; see P15
 ```
 
 ## P18. High-Impact Credentials Stay At The Narrowest Controller
@@ -241,13 +272,15 @@ boundary: certificate controller holds zone-scoped Cloudflare token and ACME key
 validate: scan packages/hosts/logs for token absence, exercise renewal, rotate token, and verify edges continue serving existing certificates
 falsifier: a provider supplies narrowly scoped short-lived per-host credentials with lower aggregate exposure
 avoid: installing a DNS-edit token on every reverse proxy
+enforcement: proposed - no certificate controller or credential distribution exists; see P15
 ```
 
 ## Meta-Rules
 
 ### MR1. Extract The Boundary, Not The Proper Noun
 
-`repo.sh`, Buck2, Deno, and zstd are current anchors. Durable guidance states what they own and the validation they enable. Replace an anchor when another tool satisfies the same boundary with less liability.
+`repo.sh`, Buck2, and Deno are current anchors; zstd is a proposed one and is not
+used anywhere in this checkout. Durable guidance states what they own and the validation they enable. Replace an anchor when another tool satisfies the same boundary with less liability.
 
 ### MR2. Add Abstraction Only For Two Consumers Or One Safety Invariant
 

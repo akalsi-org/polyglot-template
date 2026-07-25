@@ -1,28 +1,66 @@
 # CI Packaging And Releases
 
-The checked-in workflow is
-[ci-release.yml](../.github/workflows/ci-release.yml). GitHub Actions calls
-`./repo.sh`; it does not implement a separate build or packaging path.
+There are three checked-in workflows, and all of them call `./repo.sh`; none
+implements a separate build or packaging path.
+
+- [verify.yml](../.github/workflows/verify.yml) holds every verification job.
+  It is a reusable `workflow_call` workflow and is never triggered directly.
+- [ci-release.yml](../.github/workflows/ci-release.yml) is the entrypoint for
+  pull requests, pushes to `main`, and manual dispatch. It contains no logic of
+  its own: it only calls `verify.yml`.
+- [package-release.yml](../.github/workflows/package-release.yml) is the
+  entrypoint for `packages/<name>/v*` tags. It calls the same `verify.yml` and
+  then publishes the GitHub Release from the verified assets.
 
 ## Verification Contract
 
-Pull requests, pushes to `main`, matching release tags, and manual dispatches
-run the native x64 and ARM64 matrix. Each job:
+`verify.yml` runs three independent jobs — `lint`, `test-dbg`, and `test-opt` —
+each across the native x64 (`ubuntu-24.04`) and ARM64 (`ubuntu-24.04-arm`)
+runners. Every job first checks that `./repo.sh target` matches its native
+runner, restores exact-key caches for the toolchain, Deno dependency graph,
+`node_modules`, the Buck2 trees (`buck-out/v2/art`, `buck-out/v2/art-bxl`,
+`buck-out/v2/cache`), and the Go build cache, enables unprivileged user
+namespaces, and bootstraps with `./repo.sh bootstrap --offline` falling back to
+a live `./repo.sh bootstrap`.
 
-1. checks that `./repo.sh target` matches its native runner;
-2. restores exact-key caches for the toolchain, Deno dependency graph, and the
-   Buck2 toolchain tree (`buck-out/v2/art` + `buck-out/v2/cache`);
-3. runs live bootstrap, offline bootstrap, and `./repo.sh doctor --deep`;
-4. enables unprivileged user and network namespaces, which the Buck Deno cache
-   action requires to enforce offline resolution;
-5. builds `//toolchains:native` twice to prove the second build is a zero-network
-   cache hit, then runs `buck2 test //...` (the primary gate: every lane's
-   build, test, and lint-as-test targets in one pass);
-6. runs `./repo.sh lint`, `./repo.sh package-validate`,
-   `./repo.sh build`, and `./repo.sh test` (each buck2-backed, as a repo.sh
-   command-surface check on top of step 5's direct buck2 invocation);
-7. builds and runs both C++ profiles; and
-8. exercises the pinned Python runtime.
+The `lint` job then:
+
+1. runs `./repo.sh doctor --deep` after bootstrap;
+2. builds `//toolchains:native` once and fails if the build log records any
+   network download, proving the restored cache is a zero-network cache hit;
+3. proves offline replay: inside an unprivileged network namespace with no
+   route, it runs `buck2 clean` then `./repo.sh build` and `./repo.sh test` over
+   a cold `buck-out`; and
+4. runs the repository quality gates and infra tests — `./repo.sh lint`,
+   `./repo.sh package-validate`, and `./repo.sh infra-test`, which itself runs
+   the graph/compdb and Deno manifest contracts.
+
+The `test-dbg` job runs `./repo.sh test dbg`, builds and runs the C++ `dbg`
+profile, then regenerates the merged coverage report from a cold Buck output
+tree (`buck2 clean` followed by `./repo.sh coverage`) and uploads it.
+
+That upload carries three artifacts: the merged `lcov`, the plain-text
+summary, and `coverage.html` — one self-contained interactive page
+(`tools/coverage_html.py`) with per-file navigation, annotated sources
+coloured by hit/miss/uninstrumented, and <kbd>n</kbd>/<kbd>p</kbd> stepping
+through uncovered lines. It embeds its sources and carries no external
+stylesheet, script, or font, so it opens over `file://` with no server and no
+network.
+
+The same generator writes the GitHub **job summary**: a headline total, a
+per-directory rollup, and an expandable per-file table listing each file's
+uncovered line ranges, worst-covered first, with a link to the artifact
+holding the interactive page. Both renderings come from one in-memory model,
+so the summary cannot disagree with the report it links to. The job summary is
+Markdown because GitHub strips `<script>` and `<style>` from summaries — the
+page itself cannot be inlined there. Both are published with `if: always()`,
+so a run that fails the coverage floor still shows which lines are missing.
+
+The `test-opt` job runs `./repo.sh test opt`, builds and runs the C++ `opt`
+profile, runs the opt `pyfast` extension test directly against
+`//config:<target>-opt`, exercises the pinned Python runtime, and owns the
+release path below. On non-tag refs it rehearses a full release for
+`polyglot-demo` without publishing.
 
 The cache keys include the target, relevant lock files, and bootstrap or
 Buck2-graph inputs. A cache hit remains untrusted until bootstrap and doctor
@@ -30,10 +68,13 @@ revalidate it.
 
 ## Release Tags
 
-A pushed ref matching `packages/<name>/v*` triggers the release path. The
-workflow derives `<name>` from that ref, then executes:
+A pushed ref matching `packages/<name>/v*` triggers the release path through
+`package-release.yml`. Inside `verify.yml`'s `test-opt` job, the tag object is
+first checked to be annotated, then `<name>` is derived from the ref and the job
+executes:
 
 ```bash
+./repo.sh package-target-check <name>
 ./repo.sh package <name> opt
 ./repo.sh release-check <name> packages/<name>/v<version>
 ```

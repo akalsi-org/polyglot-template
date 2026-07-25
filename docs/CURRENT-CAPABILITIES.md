@@ -2,8 +2,8 @@
 
 This is the compatibility and readiness contract for the executable repository
 slice. A command or guarantee is current only when this page identifies its
-verification. Design material in [DEPLOYMENT.md](DEPLOYMENT.md),
-[FLEET.md](FLEET.md), and [DESIGN-README.md](DESIGN-README.md) remains a
+verification. Design material in [DEPLOYMENT.md](proposals/DEPLOYMENT.md),
+[FLEET.md](proposals/FLEET.md), and [DESIGN-README.md](DESIGN-README.md) remains a
 proposal unless it is listed here.
 
 | Area | Current, verified contract | Boundary / deferred work | Evidence |

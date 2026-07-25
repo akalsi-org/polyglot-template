@@ -22,10 +22,34 @@ same as any other cpp lane build).
 def _parse_rendered_list(value: str) -> list[str]:
   # aquery's attrs.cmd.value() renders a cmd_args list as its Starlark
   # repr, "[a, b, c]" (comma-space joined); parse it back into tokens.
+  #
+  # This is LOSSY and cannot be made exact from here: buck2's aquery surface
+  # exposes the command only as rendered display text, so any argument that
+  # itself contains ", " splits into two bogus tokens with nothing to
+  # distinguish it from a real separator. That is why the `file` field is
+  # NOT recovered this way - it comes from the structured
+  # `source=<path>;...` action identifier instead (see
+  # _source_from_identifier below and the identifier contract in
+  # rules/cxx.bzl's _compile_one).
+  #
+  # compile_commands.json feeds clangd, so a silently mangled argument list
+  # surfaces as phantom IDE diagnostics with no build-side signal at all -
+  # the worst possible failure shape. Since the split cannot be made
+  # correct, it is made LOUD: a token carrying an unbalanced quote is the
+  # observable fingerprint of a mis-split argument, and fails the generator
+  # rather than writing a database that lies.
   inner = value[1:-1]
   if not inner:
     return []
-  return [item.strip() for item in inner.split(", ")]
+  tokens = [item.strip() for item in inner.split(", ")]
+  for token in tokens:
+    if token.count("\"") % 2 != 0 or token.count("'") % 2 != 0:
+      fail(
+        ("compdb: cannot faithfully recover this cxx_compile command from aquery's rendered text - " +
+         "token {!r} has an unbalanced quote, which means an argument containing \", \" was split. " +
+         "Rendered command: {}").format(token, value),
+      )
+  return tokens
 
 def _source_from_identifier(value: str) -> str:
   prefix = "source="

@@ -10,7 +10,7 @@ export POLYGLOT_LOCK_FILE
 (($# <= 1)) || { printf 'usage: ./repo.sh doctor [--deep]\n' >&2; exit 2; }
 deep=0
 case ${1:-} in --deep) deep=1;; '') :;; *) printf 'error: unknown doctor option: %s\n' "$1" >&2; exit 2;; esac
-target=$($ROOT/toolchain/target.sh)
+target=$("$ROOT/toolchain/target.sh")
 printf 'ok: target %s\n' "$target"
 
 artifact_is_installed() {
@@ -83,7 +83,11 @@ deep_validate_buck2() {
   local install=$1 expected=$2 declared_hash reported
   "$install/$expected" --version >/dev/null
   declared_hash=$(lock_value buck2 "$target" content_hash)
-  [[ -z $declared_hash ]] && return 0
+  # See toolchain/bootstrap.sh's probe_buck2: a missing content_hash is a lock
+  # defect, not a licence to skip the pin.
+  [[ -n $declared_hash ]] || {
+    printf 'invalid: tools.lock.toml declares no buck2 content_hash for %s\n' "$target" >&2; return 1;
+  }
   reported=$("$install/$expected" --version | awk '{ print $2 }')
   [[ $reported == "$declared_hash" ]] || {
     printf 'invalid: buck2 reported content hash %s does not match pinned %s\n' "$reported" "$declared_hash" >&2

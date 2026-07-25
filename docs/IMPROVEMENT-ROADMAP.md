@@ -32,8 +32,9 @@ fully release-ready.
 ## Phase 1 — Package and release truth
 
 Status: the canonical catalog, in-graph target gate, target-native package and
-smoke path, idempotent publication, checksums, and GitHub artifact attestations
-are complete. SBOM publication and a broader release-provenance policy remain.
+smoke path, idempotent publication, checksums, GitHub artifact attestations, and
+SBOM/provenance sidecar publication are complete. Release-tag signature trust
+remains outside repository ownership.
 
 1. Complete: `packages/catalog.bzl` defines the package lifecycle inputs,
    runtime closure, archive identity, smoke contract, and release tag.
@@ -45,9 +46,12 @@ are complete. SBOM publication and a broader release-provenance policy remain.
    commands on each supported native target.
 4. Complete: immutable tag publication does not auto-cancel, reconciles an
    existing release, and uploads only verified missing assets.
-5. Partial: checksums and GitHub artifact attestations bind each target archive
-   to the workflow; SBOM publication and a separate release-provenance policy
-   are still required.
+5. Complete: checksums and GitHub artifact attestations bind each target archive
+   to the workflow, and `tools/release_evidence.py` writes the deterministic
+   `.sbom.json` and `.provenance.json` sidecars that `package-release.yml`
+   publishes with the archives and `release-manifest.json`. Remaining: release
+   tags must be signed and the public-key trust root configured on the release
+   host/organization, which repository code cannot declare.
 
 ## Phase 2 — Developer and agent workflow
 
@@ -57,12 +61,18 @@ proceed independently after Phase 0's editor-path contract settles.
 
 1. Complete: README has a bootstrap-first Quick Start and points to the current
    capability matrix, including Linux host scope and raw Go/Deno network bounds.
-2. Add VS Code tasks and launch configurations for bootstrap, doctor, each lane
-   build/test, compdb refresh, and Python extension staging.
-3. Provide `editor-sync` and `doctor --editor` with actionable diagnostics for
-   tool wrappers, compdb age, Deno cache, interpreter path, and native imports.
-4. Add package discovery/explanation commands and one troubleshooting guide for
-   bootstrap, Buck daemon, caches, compdb, and native modules.
+2. Partial: `.vscode/tasks.json` covers bootstrap, editor-prerequisite
+   verification, compdb refresh, Python native-extension build, running the
+   active Python file, Deno type check, React site build, and Go test. Still
+   missing tasks for `doctor`, the C++ build/test lane, `ts-test`, and
+   `tsweb-test`, and there are no launch configurations.
+3. Not started: `editor-sync` and `doctor --editor` do not exist in `repo.sh`.
+   Provide them with actionable diagnostics for tool wrappers, compdb age, Deno
+   cache, interpreter path, and native imports.
+4. Complete: `./repo.sh package-list` and `./repo.sh package-explain <name>`
+   provide package discovery and explanation, and
+   [TROUBLESHOOTING.md](TROUBLESHOOTING.md) covers bootstrap, Buck daemon,
+   caches, compdb, and native modules.
 5. Generate command reference material from `repo.sh help` rather than
    duplicating it across prose documents.
 

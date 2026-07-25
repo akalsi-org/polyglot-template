@@ -1,5 +1,5 @@
 import sys, gc
-import vcall_demo as m
+import pyfast_test_ext as m
 
 class Boxed:
   def __init__(self, v): self.v = v

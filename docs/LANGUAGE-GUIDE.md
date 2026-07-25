@@ -51,7 +51,7 @@ Do not use host `python`, `pip`, or a virtual environment for repository work.
 `build/python/<target>/lib`; `python-build` also updates the canonical compilation
 database. Keep each extension's `.pyi` stub and `py.typed` marker in a checked-in
 source root so editor typing stays independent of the host target. Keep pure Python tests under
-`python/test/` as top-level `test_*` functions; `py_tests()` discovers them
+`python/test/` as top-level `test_*` functions; `py_test()` discovers them
 with the repository's readable stdlib-only runner. Use `@parametrize`, `@skip`,
 `@skip_if`, and `@xfail` from `test_helpers` for function-test annotations.
 `@xfail("reason")` reports a failing test as `XFAIL` with its reason; an xfail

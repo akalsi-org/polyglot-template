@@ -134,11 +134,26 @@ def test_prefix_join_and_cleanup_replacement() -> None:
   items = [Boxed(index) for index in range(2000)]
   result = pyfast_test_ext.prefix_join(items, prefix="x=")
   assert result == "x=" + "".join(str(index) for index in range(2000))
-  # The runner may retain a temporary reference while reporting a test;
-  # assert the result is not pinned by one reference per loop iteration.
-  assert sys.getrefcount(result) <= 3
   del result
   gc.collect()
+
+  # The old guard here was `sys.getrefcount(result) <= 3`, which cannot
+  # observe the leak it was written for: the intermediates leaked by a
+  # VSTEAL-without-release loop hold no reference to the final result, so
+  # the count is the same in a leaking and a fixed build. Measure the
+  # live-block delta across repeated calls instead -- a per-iteration
+  # leak scales with call count, a correct build does not.
+  small = [Boxed(index) for index in range(50)]
+  for _ in range(20):
+    pyfast_test_ext.prefix_join(small, prefix="x=")
+  gc.collect()
+  before = sys.getallocatedblocks()
+  for _ in range(200):
+    pyfast_test_ext.prefix_join(small, prefix="x=")
+  gc.collect()
+  delta = sys.getallocatedblocks() - before
+  # A leak of one intermediate str per item would be ~200 * 49 blocks.
+  assert delta < 200, f"prefix_join leaked {delta} blocks over 200 calls"
 
   assert pyfast_test_ext.prefix_join([]) == ""
   try:
@@ -147,6 +162,132 @@ def test_prefix_join_and_cleanup_replacement() -> None:
     assert "argument 0: expected list, got tuple" in str(error)
   else:
     raise AssertionError("tuple was accepted as item list")
+
+
+def test_prefix_join_survives_a_list_mutated_by_str() -> None:
+  # __str__ runs arbitrary Python and may shrink the list mid-iteration.
+  # A snapshotted count plus an unchecked PyList_GET_ITEM read freed
+  # memory here (segfault); the item count must be re-read every step and
+  # the borrowed item owned across the PyObject_Str call.
+  items: list[object] = []
+
+  class Evil:
+    def __str__(self) -> str:
+      del items[1:]
+      return "E"
+
+  items.extend([Evil()] + [object() for _ in range(200)])
+  assert pyfast_test_ext.prefix_join(items) == "E"
+  assert items == [items[0]]
+
+  # Growing the list mid-iteration must not read past the vector either.
+  grown: list[object] = []
+
+  class Grower:
+    def __str__(self) -> str:
+      if len(grown) < 50:
+        grown.append(1)
+      return "g"
+
+  grown.extend([Grower()])
+  assert set(pyfast_test_ext.prefix_join(grown)) <= {"g", "1"}
+
+
+def test_unknown_keyword_arguments_are_rejected() -> None:
+  calls = [
+    (lambda: pyfast_test_ext.greet(name="World", excite=True), "excite"),
+    (lambda: pyfast_test_ext.xor_bytes(b"abc", key=1, keys=2), "keys"),
+    (lambda: pyfast_test_ext.xor_kwb(data=b"abc", key=1, extra=0), "extra"),
+    (lambda: pyfast_test_ext.xor_kwb_buf(data=b"abc", key=1, extra=0), "extra"),
+    (lambda: pyfast_test_ext.xor_buffer(b"abc", key=1, extra=0), "extra"),
+    (lambda: pyfast_test_ext.prefix_join([], prefixx=""), "prefixx"),
+    (lambda: pyfast_test_ext.repeat(b"ab", time=2), "time"),
+  ]
+  for call, keyword in calls:
+    try:
+      call()
+    except TypeError as error:
+      assert f"unexpected keyword argument '{keyword}'" in str(error)
+    else:
+      raise AssertionError(f"unknown keyword {keyword!r} was accepted")
+
+
+def test_greet_preserves_embedded_nul_and_rejects_long_names() -> None:
+  assert pyfast_test_ext.greet(name="a\x00b") == "Hello, a\x00b."
+  assert pyfast_test_ext.greet(name="a\x00b", excited=True) == "Hello, a\x00b!!"
+
+  try:
+    pyfast_test_ext.greet(name="x" * 512)
+  except OverflowError as error:
+    assert "too long" in str(error)
+  else:
+    raise AssertionError("an oversized name was accepted")
+
+
+def test_missing_required_keyword_data() -> None:
+  for function in [pyfast_test_ext.xor_kwb, pyfast_test_ext.xor_kwb_buf]:
+    try:
+      function(key=1)
+    except TypeError as error:
+      assert "missing required keyword argument 'data'" in str(error)
+    else:
+      raise AssertionError("missing data keyword was accepted")
+
+
+def test_repeat_rejects_results_that_would_overflow() -> None:
+  # Large enough to trip the len * times overflow guard, small enough to
+  # still convert to a C long (10**100 exercises the conversion instead).
+  try:
+    pyfast_test_ext.repeat(b"ab", times=2**62)
+  except OverflowError as error:
+    assert "too large" in str(error)
+  else:
+    raise AssertionError("an overflowing repeat count was accepted")
+
+
+def test_range_rejects_an_unbounded_stop() -> None:
+  try:
+    pyfast_test_ext.range(10**9)
+  except ValueError as error:
+    assert "1000000" in str(error)
+  else:
+    raise AssertionError("an unbounded range was accepted")
+
+
+def test_point_is_not_a_method_descriptor() -> None:
+  # Py_TPFLAGS_METHOD_DESCRIPTOR on a value type makes CPython treat a
+  # Point held as a class attribute like an unbound method and prepend
+  # the owner instance to the call.
+  point = pyfast_test_ext.Point(1.0, 1.0)
+
+  class Holder:
+    attr = point
+
+  holder = Holder()
+  assert holder.attr is point
+  translated = holder.attr(2.0, 3.0)
+  assert isinstance(translated, pyfast_test_ext.Point)
+  assert abs(translated.dist() - (3.0**2 + 4.0**2) ** 0.5) < 1e-9
+
+
+def test_point_keyword_only_methods_reject_positional_arguments() -> None:
+  point = pyfast_test_ext.Point(1.0, 2.0)
+  for call in [lambda: point.move(100.0, 200.0), lambda: point.dist(1.0)]:
+    try:
+      call()
+    except TypeError as error:
+      assert "expected 0 arguments" in str(error)
+    else:
+      raise AssertionError("keyword-only Point method accepted positional arguments")
+  # The discarded-positional bug made move() a silent no-op.
+  assert abs(point.dist() - (5.0**0.5)) < 1e-9
+
+  try:
+    point.move(dx=1.0, dz=2.0)
+  except TypeError as error:
+    assert "unexpected keyword argument 'dz'" in str(error)
+  else:
+    raise AssertionError("Point.move accepted an unknown keyword")
 
 
 def test_point_methods_repr_and_instance_vectorcall() -> None:

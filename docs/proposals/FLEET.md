@@ -38,7 +38,12 @@ Repositories with no production hosts never download OpenTofu, Ansible, ACME, pr
 11. Controllers use separated identities for provisioning, convergence, deployment, certificate issuance, release publication, and observation even if they initially run on one workstation.
 12. Use a pinned standalone ACME client with maintained Cloudflare DNS support; prefer `lego` over custom DNS hook code. Its controller-only binary size is less important than eliminating custom credential-sensitive automation.
 
-## Authoritative Inventory
+## Authoritative Inventory (Proposed; None Of These Paths Exist)
+
+The layout below is the proposed inventory contract, not a description of this
+checkout. `infra/` currently contains only `infra/deploy/BUCK` and
+`infra/deploy/readonly.py` — the read-only plan/observation contract. No file or
+directory named below exists, and nothing reads them.
 
 ```text
 infra/fleet.toml                 logical desired hosts and profiles

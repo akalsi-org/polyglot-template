@@ -4,6 +4,23 @@ set -euo pipefail
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 tmp=$(mktemp -d); trap 'rm -rf -- "$tmp"' EXIT
 export POLYGLOT_LOCAL_DIR="$tmp/local"
+# The resolved-lock fixture below is served over file://, which
+# toolchain/fetch_binary.sh only accepts under this explicit test-only opt-in.
+export POLYGLOT_ALLOW_FILE_URL=1
+
+# fetch_binary.sh's scheme allowlist: only https:// is fetchable without the
+# opt-in above, and no other scheme is fetchable at all.
+expect_fetch_rejection() {
+  local url=$1
+  if env -u POLYGLOT_ALLOW_FILE_URL "$ROOT/toolchain/fetch_binary.sh" "$url" \
+    0000000000000000000000000000000000000000000000000000000000000000 "$tmp/rejected" >/dev/null 2>&1; then
+    printf 'fetch_binary.sh accepted a disallowed URL scheme: %s\n' "$url" >&2; exit 1
+  fi
+  [[ ! -e $tmp/rejected ]] || { printf 'fetch_binary.sh wrote output for a rejected URL: %s\n' "$url" >&2; exit 1; }
+}
+expect_fetch_rejection 'http://example.invalid/tool.tar.gz'
+expect_fetch_rejection 'ftp://example.invalid/tool.tar.gz'
+expect_fetch_rejection "file://$tmp/nothing.tar.gz"
 
 [[ $($ROOT/repo.sh target) =~ ^(x86_64|aarch64)-linux-musl$ ]]
 [[ $(POLYGLOT_TEST_MACHINE=amd64 "$ROOT/repo.sh" target) == x86_64-linux-musl ]]

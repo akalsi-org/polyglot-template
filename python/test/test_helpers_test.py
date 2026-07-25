@@ -1,5 +1,6 @@
 import sys
 import tempfile
+from pathlib import Path
 from test_helpers import (
     MagicMock,
     TestContext,
@@ -35,20 +36,70 @@ def test_parametrize_dicts(name: str, greeting: str) -> None:
   assert f"hello, {name}" == greeting
 
 
-def test_smart_add_cleanup(ctx: TestContext) -> None:
-  # 1. Smart add_cleanup with a ContextManager (__enter__ / __exit__)
-  td = ctx.add_cleanup(tempfile.TemporaryDirectory())
-  assert isinstance(td, str) and len(td) > 0
+class CallableCloseable:
+  """Both callable and closeable: pins which branch add_cleanup picks."""
 
-  # 2. Smart add_cleanup with a closeable object
+  def __init__(self) -> None:
+    self.closed = False
+    self.called = False
+
+  def __call__(self) -> None:
+    self.called = True
+
+  def close(self) -> None:
+    self.closed = True
+
+
+def test_smart_add_cleanup() -> None:
+  # Teardown is what this is about, so run the registrations inside their
+  # own context and assert the effects after it exits. Asserting before
+  # teardown (the previous shape of this test) only ever observed
+  # "nothing has happened yet", which is equally true of a TestContext
+  # that runs no cleanups at all.
+  cleaned: list[bool] = []
   closeable = DummyCloseable()
-  ctx.add_cleanup(closeable)
-  assert not closeable.closed
+  both = CallableCloseable()
 
-  # 3. Smart add_cleanup with a callback function
-  cleaned = []
-  ctx.add_cleanup(lambda: cleaned.append(True))
-  assert not cleaned
+  with TestContext() as ctx:
+    # 1. Context manager: entered now, exited on teardown.
+    td = ctx.add_cleanup(tempfile.TemporaryDirectory())
+    assert isinstance(td, str) and Path(td).is_dir()
+
+    # 2. Closeable object: close() registered, item returned.
+    assert ctx.add_cleanup(closeable) is closeable
+
+    # 3. Plain callable: invoked on teardown.
+    assert not cleaned
+    ctx.add_cleanup(lambda: cleaned.append(True))
+
+    # 4. Callable *and* closeable resolves to close(), not the call.
+    assert ctx.add_cleanup(both) is both
+
+  assert not Path(td).exists(), "TemporaryDirectory was not exited"
+  assert closeable.closed, "close() was never called"
+  assert cleaned == [True], "callback was never called"
+  assert both.closed and not both.called, "closeable branch must outrank callable"
+
+
+def test_add_cleanup_returns_mocks_unchanged() -> None:
+  # A MagicMock answers hasattr() for every name, so an instance-level
+  # __enter__/__exit__ probe used to route it into enter_context and
+  # return mock.__enter__() -- an unrelated child mock -- instead of the
+  # mock under test.
+  mocked = MagicMock()
+  with TestContext() as ctx:
+    assert ctx.add_cleanup(mocked) is mocked
+    mocked.__enter__.assert_not_called()
+
+
+def test_add_cleanup_rejects_unsupported_objects() -> None:
+  with TestContext() as ctx:
+    try:
+      ctx.add_cleanup(object())
+    except TypeError as error:
+      assert "Cannot register cleanup" in str(error)
+    else:
+      raise AssertionError("add_cleanup accepted a non-resource object")
 
 
 def test_context_mock_and_tempdir(ctx: TestContext) -> None:

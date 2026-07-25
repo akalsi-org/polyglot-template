@@ -109,28 +109,15 @@ def package_info(ctx: AnalysisContext, entries: list = [], needs: list = [], dep
 
   return PackageInfo(entries = entries_tset, needs = needs_tset)
 
-def flatten_package_entries(info: [PackageInfo, None]) -> list:
-  # Traversal order is not guaranteed stable/sorted; rules/package.bzl's
-  # package() rule sorts by `dest` itself before staging, so callers here
-  # don't need to care about order.
-  if info == None or info.entries == None:
-    return []
-  out = []
-  for value in info.entries.traverse():
-    out += value
-  return out
-
-def flatten_package_needs(info: [PackageInfo, None]) -> list:
-  if info == None or info.needs == None:
-    return []
-  seen = {}
-  out = []
-  for value in info.needs.traverse():
-    for need in value:
-      if need not in seen:
-        seen[need] = True
-        out.append(need)
-  return out
+# NOTE: the single-info flatten_package_entries()/flatten_package_needs()
+# helpers that used to live here were DELETED, not merely unused. Nothing
+# called them - every consumer goes through the _merged_ variants below -
+# and keeping them was actively harmful rather than neutral: they are the
+# exact per-info-then-concatenate shape whose diamond-dep bug
+# flatten_merged_package_entries()'s docstring exists to explain. A future
+# rule author reaching for the obvious-looking single-info helper would have
+# reintroduced that bug with no error anywhere. If a genuine single-info
+# need appears, call the merged variant with a one-element list.
 
 def flatten_merged_package_entries(ctx: AnalysisContext, infos: list) -> list:
   """Same result shape as calling flatten_package_entries() once per `infos`

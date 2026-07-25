@@ -17,6 +17,7 @@ Prints the ensured merged.lcov and summary.txt paths under buck-out.
 """
 
 load("//rules:coverage.bzl", "CoverageInfo", "coverage_merge_actions")
+load("//rules:host.bzl", "native_target")
 
 def _first_default_output(ctx: bxl.Context, pattern: str):
   for node in ctx.cquery().eval(pattern):
@@ -41,8 +42,14 @@ def _impl(ctx: bxl.Context):
   gomod = _first_default_output(ctx, "//:go.mod")
   # coverage_merge.py is a Python action too: resolve both pinned toolchain
   # roots so the shared helper can invoke CPython through the musl loader.
-  python_dir = _first_default_output(ctx, "//toolchains:python-x86_64-linux-musl" if host_info().arch.is_x86_64 else "//toolchains:python-aarch64-linux-musl")
-  gcc_dir = _first_default_output(ctx, "//toolchains:gcc-musl-x86_64-linux-musl" if host_info().arch.is_x86_64 else "//toolchains:gcc-musl-aarch64-linux-musl")
+  # native_target() (rules/host.bzl) rather than an inline
+  # `host_info().arch.is_x86_64 ? ... : ...`: that conditional silently
+  # resolved the aarch64 label on ANY non-x86_64 host, including ones every
+  # other copy of this logic rejects with fail(). One definition, one
+  # answer.
+  target = native_target()
+  python_dir = _first_default_output(ctx, "//toolchains:python-" + target)
+  gcc_dir = _first_default_output(ctx, "//toolchains:gcc-musl-" + target)
   merged, summary = coverage_merge_actions(ctx.bxl_actions().actions, merge_tool, gomod, infos, python_dir, gcc_dir)
   ctx.output.print(ctx.output.ensure(merged))
   ctx.output.print(ctx.output.ensure(summary))

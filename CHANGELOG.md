@@ -12,8 +12,10 @@
 
 ## packages/gateway/v1.4.0
 
-- Establishes the gateway application package contract with exact CPython runtime closure metadata.
+- RESERVED, NOT RELEASED. `gateway` is a catalog-only declaration in `packages/catalog.bzl` with no `//packages:gateway` Buck target, so `./repo.sh package gateway` and the tagged release path fail closed by design.
+- Reserves the intended gateway application package contract with exact CPython runtime closure metadata. This section exists because a changelog section is a `release-check` precondition; it becomes a real release only once the in-graph `package()` target exists.
 
 ## packages/schema-cli/v0.8.2
 
-- Establishes the schema CLI native package contract.
+- RESERVED, NOT RELEASED. `schema-cli` is a catalog-only declaration with no `//packages:schema-cli` Buck target and fails closed the same way.
+- Reserves the intended schema CLI native package contract, on the same terms as `gateway` above.

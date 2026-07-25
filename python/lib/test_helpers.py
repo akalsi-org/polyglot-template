@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import contextlib
-import inspect
 import tempfile
 import unittest
 import unittest.mock as mock
@@ -18,9 +17,7 @@ from unittest.mock import (
     patch,
 )
 from pathlib import Path
-from typing import Any, Callable, Sequence, TypeVar
-
-T = TypeVar("T")
+from typing import Any, Callable, Sequence
 
 # Re-export unittest SkipTest
 SkipTest = unittest.SkipTest
@@ -37,17 +34,34 @@ class TestContext(contextlib.ExitStack):
   def add_cleanup(self, item: Any, *args: Any, **kwargs: Any) -> Any:
     """Smart cleanup and resource registration.
 
-    - If item has __enter__ and __exit__ (context manager), automatically calls
-      __enter__() and registers __exit__() for automatic teardown.
-    - If item is a callable, registers it to be called on test teardown.
-    - If item has a close() method, registers item.close() for teardown.
+    Dispatch order, first match wins:
+
+    1. Context manager -- item's *type* defines both __enter__ and __exit__,
+       and item is not a unittest.mock object. Enters it now, exits it on
+       teardown, and returns __enter__()'s value. Mocks are excluded on
+       purpose: a MagicMock answers hasattr() for every name, so testing the
+       instance captured every mock here and handed back mock.__enter__()
+       instead of the mock the caller passed in.
+    2. Closeable -- item has a callable close(). Registers close() and
+       returns item. This outranks the callable branch so an object that is
+       both callable and closeable is actually closed rather than called.
+    3. Callable -- registers item(*args, **kwargs) as a teardown callback
+       and returns item. Last, because "has close()" is the more specific
+       claim about how a resource is released.
+
+    Anything matching none of the three raises TypeError.
     """
-    if hasattr(item, "__enter__") and hasattr(item, "__exit__"):
-      return self.enter_context(item)
+    if not isinstance(item, mock.NonCallableMock):
+      item_type = type(item)
+      if hasattr(item_type, "__enter__") and hasattr(item_type, "__exit__"):
+        return self.enter_context(item)
+    close = getattr(item, "close", None)
+    if callable(close):
+      self.callback(close)
+      return item
     if callable(item):
-      return self.callback(item, *args, **kwargs)
-    if hasattr(item, "close") and callable(getattr(item, "close")):
-      return self.callback(getattr(item, "close"))
+      self.callback(item, *args, **kwargs)
+      return item
     raise TypeError(f"Cannot register cleanup for object of type {type(item).__name__}")
 
   def enter(self, item: Any, *args: Any, **kwargs: Any) -> Any:

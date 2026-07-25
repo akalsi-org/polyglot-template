@@ -1,6 +1,17 @@
 # Next Design Domain: VPS Fleet And Host Administration
 
-The minimum fleet substrate is now decided in [FLEET.md](FLEET.md), and application activation/routing is defined in [DEPLOYMENT.md](DEPLOYMENT.md). This file contains only decisions that remain workload- or implementation-specific.
+Status: proposed, and open questions only. Nothing here is implemented; the
+fleet substrate itself remains a proposal in [FLEET.md](FLEET.md), and
+application activation/routing in [DEPLOYMENT.md](DEPLOYMENT.md). The only
+executable deployment surface in this repository is the read-only
+`//infra/deploy` plan/observation contract.
+
+[FLEET.md](FLEET.md) settles the substrate and [PRINCIPLES.md](../PRINCIPLES.md)
+P15-P18 state the durable rules. This file adds nothing to either: it holds only
+the workload- and implementation-specific choices that those documents
+deliberately leave open. Do not restate an accepted decision here. Where a
+question below touches a settled decision, it asks only which implementation
+satisfies it.
 
 ## Questions To Resolve Together
 
@@ -14,15 +25,21 @@ The minimum fleet substrate is now decided in [FLEET.md](FLEET.md), and applicat
 
 ### Trust Implementation
 
-- Which SSH CA/short-lived credential implementation and secret store satisfy the accepted trust contract?
+FLEET.md scopes the trust contract and states that the exact SSH CA
+implementation and credential store remain selections. Those selections are:
+
+- Which SSH CA/short-lived credential implementation and secret store satisfy that contract?
 - How often are controller identities, provider tokens, and certificate keys rotated?
 - What independent remote sink provides tamper-evident receipt custody?
 
 ### Host Implementation Selections
 
+FLEET.md already accepts pinned isolated Ansible under `.local/infra/` and
+OpenTofu for supported providers. Only the exact versions and coverage remain:
+
 - Which base distribution/version is pinned?
 - Which OpenTofu providers cover selected hosts, and which remain externally provisioned?
-- Which standalone Python and Ansible versions are pinned under `.local/infra/`?
+- Which exact standalone Python and Ansible releases are pinned under `.local/infra/`?
 - Which host profiles and tuning policies are required by measured workloads?
 
 ### Stateful Workloads And Migrations
@@ -64,23 +81,20 @@ The minimum fleet substrate is now decided in [FLEET.md](FLEET.md), and applicat
 - SLOs and rollback triggers?
 - Audit evidence for administrative actions?
 
-## Preliminary Principles
+## Principles
 
-1. Desired state and observed state are separate artifacts.
-2. Installation is content-addressed and immutable; activation is atomic.
-3. A deployment is incomplete until health and version evidence converge.
-4. Parallel fleet work has bounded concurrency, per-host timeouts, and aggregate stop conditions.
-5. Rollback is designed before rollout, but migrations may make it asymmetric.
-6. Host bootstrap and product deployment are separate lifecycles.
-7. Administration commands default to read-only plans and require explicit mutation modes.
-8. Every host operation records actor, target, intent, result, and repair path.
-9. Secrets never enter product archives or generic logs.
-10. Multi-version support includes configs, data formats, protocols, services, and observability—not only directories.
+There are no separate principles for this domain. The durable rules are
+[PRINCIPLES.md](../PRINCIPLES.md) P15-P18 plus FLEET.md's accepted decisions;
+restating them here would create a second source of truth. Two rules that are
+specific to answering the questions above, and are not stated elsewhere:
+
+1. Multi-version support includes configs, data formats, protocols, services, and observability—not only directories.
+2. Migrations may make rollback asymmetric, so each stateful workload declares its own rollback limit rather than inheriting a fleet default.
 
 ## Suggested Conversation Order
 
 1. Select exact providers, facilities, base OS, and workload SLOs.
-2. Pin OpenTofu providers, standalone Python, Ansible, and `lego`.
+2. Pin the exact OpenTofu provider, standalone Python, Ansible, and `lego` releases. FLEET.md already accepts `lego` as the ACME client; only its version is open.
 3. Define retention, garbage collection, and rollback policy within the accepted `/opt/solution/` layout.
 4. Finalize service sandboxing, resource caps, health, and logging policy.
 5. Set rollout concurrency, failure budgets, and maintenance policy from measurements.

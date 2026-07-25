@@ -75,13 +75,23 @@ def _process_cxx_gcov(entry, counts, scratch_root):
       # co-locating a same-basename .gcno/.gcda pair in one scratch dir and
       # invoking gcov there (empirically validated) is what makes it find
       # the actual counters instead of reporting "not executed".
-      subprocess.run(
+      # gcov's stderr is captured rather than discarded: a pinned-toolchain
+      # version skew ("version 'B16 ' prefers 'A16 '") is reported there, and
+      # discarding it surfaced only as a bare CalledProcessError with no clue
+      # which pair failed or why.
+      result = subprocess.run(
         [gcov_bin, "-j", base + ".gcda"],
         cwd = work,
-        check = True,
+        check = False,
         stdout = subprocess.DEVNULL,
-        stderr = subprocess.DEVNULL,
+        stderr = subprocess.PIPE,
+        text = True,
       )
+      if result.returncode != 0:
+        raise SystemExit(
+          "coverage merge: gcov failed (exit %d) for %s in %s:\n%s"
+          % (result.returncode, base, gcda_dir, result.stderr.strip())
+        )
       for name in os.listdir(work):
         if not name.endswith(".gcov.json.gz"):
           continue
@@ -223,6 +233,28 @@ def _write_lcov(counts, out_path):
       f.write("\n")
 
 
+_TOTAL_RE = re.compile(r"^TOTAL\s+(\d+)\s+(\d+)\s+([0-9.]+)%$")
+
+
+def read_summary_total(path):
+  """Returns the TOTAL percentage recorded in a summary.txt written here."""
+  with open(path) as f:
+    for line in f:
+      match = _TOTAL_RE.match(line.strip())
+      if match:
+        return float(match.group(3))
+  raise SystemExit("coverage merge: %s has no TOTAL line" % (path,))
+
+
+def _enforce_min_total(total_pct, min_total, source):
+  if total_pct + 1e-9 < min_total:
+    raise SystemExit(
+      "coverage merge: total line coverage %.1f%% is below the required "
+      "minimum %.1f%% (%s)" % (total_pct, min_total, source)
+    )
+  print("coverage: total %.1f%% (minimum %.1f%%)" % (total_pct, min_total))
+
+
 def _write_summary(counts, out_path):
   header = "%-64s %8s %8s %7s" % ("File", "Lines", "Hit", "Pct")
   rule = "-" * len(header)
@@ -243,10 +275,60 @@ def _write_summary(counts, out_path):
   with open(out_path, "w") as f:
     f.write("\n".join(lines))
     f.write("\n")
+  return total_pct
+
+
+_USAGE = (
+  "usage: coverage_merge.py <manifest.json> <out.lcov> <out summary.txt> "
+  "[--min-total PCT]\n"
+  "       coverage_merge.py --check-total <summary.txt> --min-total PCT"
+)
+
+
+def _parse_min_total(value):
+  try:
+    return float(value)
+  except ValueError:
+    raise SystemExit("coverage_merge.py: --min-total expects a percentage, got %r" % (value,))
 
 
 def main(argv):
-  manifest_path, out_lcov, out_summary = argv
+  positional = []
+  min_total = None
+  check_total = None
+  index = 0
+  while index < len(argv):
+    arg = argv[index]
+    if arg == "--min-total":
+      index += 1
+      if index >= len(argv):
+        raise SystemExit("coverage_merge.py: --min-total requires a value\n" + _USAGE)
+      min_total = _parse_min_total(argv[index])
+    elif arg == "--check-total":
+      index += 1
+      if index >= len(argv):
+        raise SystemExit("coverage_merge.py: --check-total requires a path\n" + _USAGE)
+      check_total = argv[index]
+    else:
+      positional.append(arg)
+    index += 1
+
+  if check_total is not None:
+    if positional:
+      raise SystemExit("coverage_merge.py: --check-total takes no positional arguments\n" + _USAGE)
+    if min_total is None:
+      raise SystemExit("coverage_merge.py: --check-total requires --min-total\n" + _USAGE)
+    _enforce_min_total(read_summary_total(check_total), min_total, check_total)
+    return
+
+  # Bare tuple unpacking raised an opaque "not enough values to unpack" here;
+  # the caller (rules/coverage.bzl's merge action) deserves the real usage.
+  if len(positional) != 3:
+    raise SystemExit(
+      "coverage_merge.py: expected 3 positional arguments, got %d\n%s"
+      % (len(positional), _USAGE)
+    )
+  manifest_path, out_lcov, out_summary = positional
   with open(manifest_path) as f:
     entries = json.load(f)
 
@@ -275,7 +357,9 @@ def main(argv):
       sys.exit("coverage_merge.py: unknown kind %r" % (kind,))
 
   _write_lcov(counts, out_lcov)
-  _write_summary(counts, out_summary)
+  total_pct = _write_summary(counts, out_summary)
+  if min_total is not None:
+    _enforce_min_total(total_pct, min_total, out_summary)
 
 
 if __name__ == "__main__":

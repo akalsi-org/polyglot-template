@@ -84,6 +84,64 @@ assert_present 'release workflow checks for an existing release' grep -Fq 'gh re
 assert_present 'workflow pins actions/attest to the approved SHA' grep -Fq 'actions/attest@36051bcae73b7c2a8a6945a48cbf80953c6baa35' "$workflow"
 assert_present 'package release caller grants attestation write permission' grep -Fq 'attestations: write' "$release_workflow"
 assert_present 'release workflow validates published checksums' grep -Fq 'sha256sum --check' "$release_workflow"
+assert_present 'verify workflow records checksums against the bare archive name' \
+  grep -Fq '(cd dist && sha256sum "$(basename "$archive")" > "$(basename "$archive").sha256")' "$workflow"
+assert_absent 'verify workflow must not bake the dist/ prefix into a checksum body' \
+  grep -Eq '^ +sha256sum "\$archive" > "\$archive\.sha256"$' "$workflow"
+assert_present 'verify workflow defaults every job to read-only token scope' \
+  grep -Eq '^permissions:$' "$workflow"
+assert_count 'verify workflow grants id-token write exactly once, at job level' 1 \
+  '^      id-token: write$' "$workflow"
+assert_count 'verify workflow grants attestation write exactly once, at job level' 1 \
+  '^      attestations: write$' "$workflow"
+assert_order_pattern 'the read-only workflow default precedes any job-level grant' "$workflow" \
+  '^permissions:$' '^      id-token: write$'
+assert_absent 'verify workflow must not expand a tag-derived value into a run body' \
+  grep -Fq 'package=${{ steps.package.outputs.name }}' "$workflow"
+assert_present 'verify workflow passes the tag-derived package name as environment data' \
+  grep -Fq '          package: ${{ steps.package.outputs.name }}' "$workflow"
+assert_present 'release job bootstraps the pinned toolchain before publishing' \
+  grep -Fq './repo.sh bootstrap --offline || ./repo.sh bootstrap' "$release_workflow"
+assert_present 'release job restores the same cache structure verify uses' \
+  grep -Fq 'key: polyglot-v1-${{ runner.os }}-x86_64-linux-musl-${{ hashFiles(' "$release_workflow"
+
+# The published-checksum path is the one that broke: asserting only that the
+# literal string "sha256sum --check" appears proves nothing about whether the
+# recorded name survives upload-artifact's prefix stripping. Reproduce the
+# whole round trip - write the checksum exactly the way verify.yml does, flatten
+# dist/ into artifacts/ exactly the way upload-artifact does, then run the
+# publisher's verification command for real.
+checksum_round_trip() {
+  local scratch
+  scratch=$(mktemp -d "$root/buck-out/v2/tmp/workflow-contract.XXXXXX")
+  mkdir -p "$scratch/dist" "$scratch/artifacts"
+  local archive="$scratch/dist/polyglot-demo-0.1.0-x86_64-linux-musl.tar.gz"
+  printf 'payload\n' >"$archive"
+  # Verbatim from verify.yml's "Assemble and verify tagged package" step.
+  (cd "$scratch/dist" && sha256sum "$(basename "$archive")" > "$(basename "$archive").sha256")
+  # upload-artifact uploads dist/*.tar.gz* with the dist/ prefix stripped, and
+  # download-artifact re-materializes them flat under artifacts/.
+  cp -- "$scratch/dist"/* "$scratch/artifacts/"
+  # Verbatim from package-release.yml's publish step.
+  local checksum
+  for checksum in "$scratch/artifacts"/*.tar.gz.sha256; do
+    (cd "$scratch/artifacts" && sha256sum --check "$(basename "$checksum")") >/dev/null || {
+      rm -rf -- "$scratch"
+      fail 'published checksum does not verify from a flattened artifacts/ layout'
+    }
+  done
+  # And prove the assertion has teeth: reproduce the OLD dist/-prefixed body
+  # and require that it still fails from the flattened layout.
+  printf '%s  dist/%s\n' "$(sha256sum "$archive" | awk '{ print $1 }')" "$(basename "$archive")" \
+    >"$scratch/artifacts/prefixed.sha256"
+  if (cd "$scratch/artifacts" && sha256sum --check prefixed.sha256) >/dev/null 2>&1; then
+    rm -rf -- "$scratch"
+    fail 'a dist/-prefixed checksum body unexpectedly verified; this test cannot detect the regression it exists for'
+  fi
+  rm -rf -- "$scratch"
+}
+mkdir -p "$root/buck-out/v2/tmp"
+checksum_round_trip
 assert_present 'tag verification rejects lightweight release tags' grep -Fq 'git cat-file -t "$GITHUB_REF_NAME"' "$workflow"
 assert_present 'tag verification fetches annotated tag objects' grep -Fq 'git fetch --force --tags origin' "$workflow"
 assert_present 'tag packaging requires an SBOM sidecar' grep -Fq 'test -s "$archive.sbom.json"' "$workflow"
@@ -101,8 +159,6 @@ for command in \
   './repo.sh lint' './repo.sh package-validate' './repo.sh infra-test' \
   './repo.sh test opt' './repo.sh coverage' \
   './repo.sh package-target-check "$package"' \
-  './test/graph-compdb-contract.sh' \
-  './test/deno-manifest-contract.sh' \
   './repo.sh cpp-build dbg' './repo.sh cpp-run dbg' \
   './repo.sh cpp-build opt' './repo.sh cpp-run opt' \
   './repo.sh exec buck2 test --target-platforms //config:${{ matrix.target }}-opt //python/test:test' \
@@ -117,6 +173,25 @@ assert_present 'workflow uploads the merged lcov report' \
   grep -Fq 'buck-out/**/merged.lcov' "$workflow"
 assert_present 'workflow uploads the coverage summary' \
   grep -Fq 'buck-out/**/summary.txt' "$workflow"
+assert_present 'workflow uploads the browsable HTML coverage report' \
+  grep -Fq 'buck-out/coverage-report/coverage.html' "$workflow"
+# The job summary is the only coverage view a reviewer sees without
+# downloading anything, so assert the whole chain that produces it: the
+# generator is asked for Markdown, the Markdown reaches $GITHUB_STEP_SUMMARY,
+# and both steps survive a failing coverage floor.
+assert_present 'workflow asks the coverage run for a job-summary rendering' \
+  grep -Fq 'POLYGLOT_COVERAGE_MARKDOWN: coverage-summary.md' "$workflow"
+assert_present 'workflow writes coverage into the GitHub job summary' \
+  grep -Fq 'cat coverage-summary.md' "$workflow"
+assert_present 'workflow links the job summary to the HTML report artifact' \
+  grep -Fq 'steps.coverage-artifact.outputs.artifact-url' "$workflow"
+assert_present 'coverage publication survives a failing coverage floor' \
+  grep -Fq 'name: Publish coverage to the job summary' "$workflow"
+# ...but only once coverage actually ran: a bare always() would turn any
+# earlier failure into a second, misleading red step for an artifact that was
+# never produced. Both publication steps must carry the same guard.
+assert_equal 'both coverage publication steps are guarded on the coverage step' \
+  2 "$(grep -Fc "if: always() && steps.coverage.conclusion != 'skipped'" "$workflow")"
 assert_present 'branch and PR runs rehearse release without publishing' \
   grep -Fq "if: \${{ !startsWith(github.ref, 'refs/tags/packages/') }}" "$workflow"
 assert_present 'release rehearsal packages the selected package under opt' \
@@ -145,7 +220,20 @@ if sed -n '/^  package)/,/^  package-smoke)/p' "$root/repo.sh" | grep -Fq 'packa
   fail 'repo package command still falls through to the raw-build assembler'
 fi
 
-help=$($root/repo.sh help)
+# Every check CI runs must be reachable from `./repo.sh ci`, so a local green
+# result means what the CI green result means. The two graph contracts used to
+# be workflow-only steps; they now belong to infra-test, and `ci` is a strict
+# superset of the lint job's gates.
+infra_test_block=$(sed -n '/^  infra-test)/,/^    ;;$/p' "$root/repo.sh")
+for script in test/graph-compdb-contract.sh test/deno-manifest-contract.sh; do
+  assert_present "repo infra-test runs $script" grep -Fq "$script" <<<"$infra_test_block"
+done
+ci_block=$(sed -n '/^  ci)/,/^    ;;$/p' "$root/repo.sh")
+for gate in 'doctor --deep' 'lint' 'package-validate' 'infra-test' 'build' 'test' 'coverage'; do
+  assert_present "repo ci runs $gate" grep -Fq "\"\$ROOT/repo.sh\" $gate" <<<"$ci_block"
+done
+
+help=$("$root/repo.sh" help)
 for command in shell exec buck2 format lint build test cpp-build cpp-run cpp-test python-build python-test \
   ts-build ts-test tsweb-build tsweb-test go-build go-test init-project package-list package package-smoke; do
   assert_present "repo help documents '$command'" grep -Eq "^  ${command}( |$)" <<<"$help"
@@ -163,23 +251,23 @@ assert_fixed_count 'aggregate build, test, and cpp-build refresh profile compdb'
   '[[ ${POLYGLOT_DEFER_COMPDB:-0} == 1 ]] || "$ROOT/repo.sh" compile-commands "$profile"' "$root/repo.sh"
 assert_present 'repo.sh lint runs Buck2 lint-labelled tests' grep -Fq '"$POLYGLOT_BUCK2" test //... --labels lint' "$root/repo.sh"
 
-environment=$($root/repo.sh exec bash -c 'printf "%s|%s|%s|%s|%s|%s\n" "$POLYGLOT_ROOT" "$POLYGLOT_TARGET" "$CXX" "$GOROOT" "$DENO_DIR" "$PYTHONPATH"')
+environment=$("$root/repo.sh" exec bash -c 'printf "%s|%s|%s|%s|%s|%s\n" "$POLYGLOT_ROOT" "$POLYGLOT_TARGET" "$CXX" "$GOROOT" "$DENO_DIR" "$PYTHONPATH"')
 IFS='|' read -r env_root env_target env_cxx env_goroot env_deno_dir env_pythonpath <<<"$environment"
 assert_equal 'repo environment exposes the repository root' "$root" "$env_root"
 assert_matches 'repo environment selects a supported musl target' '^(x86_64|aarch64)-linux-musl$' "$env_target"
 [[ -x $env_cxx && -d $env_goroot && -d $env_deno_dir ]] || fail 'repo environment must expose executable C++ compiler and Go/Deno directories'
 assert_equal 'repo environment sets the isolated Python path' "$root/build/python/$env_target/lib:$root/python/lib:$root/python/app" "$env_pythonpath"
-assert_equal 'repo python launcher runs in isolated mode' 'python launcher' "$($root/repo.sh exec python -I -c 'print("python launcher")')"
-assert_matches 'repo Go launcher uses Go 1.x' '^go version go1\.' "$($root/repo.sh exec go version)"
-assert_matches 'repo Deno launcher uses the pinned release' '^deno 2\.9\.2 ' "$($root/repo.sh exec deno --version | head -n1)"
-assert_matches 'repo Buck2 launcher runs Buck2' '^buck2 ' "$($root/repo.sh exec buck2 --version)"
-assert_equal 'repo shell resolves Python from .local/bin' "$root/.local/bin/python" "$($root/repo.sh exec bash -c 'which python')"
-assert_equal 'repo shell resolves Go from .local/bin' "$root/.local/bin/go" "$($root/repo.sh exec bash -c 'which go')"
-assert_equal 'repo shell resolves GCC from .local/bin' "$root/.local/bin/gcc" "$($root/repo.sh exec bash -c 'which gcc')"
-assert_equal 'repo shell resolves G++ from .local/bin' "$root/.local/bin/g++" "$($root/repo.sh exec bash -c 'which g++')"
-assert_equal 'repo shell resolves Buck2 from .local/bin' "$root/.local/bin/buck2" "$($root/repo.sh exec bash -c 'which buck2')"
+assert_equal 'repo python launcher runs in isolated mode' 'python launcher' "$("$root/repo.sh" exec python -I -c 'print("python launcher")')"
+assert_matches 'repo Go launcher uses Go 1.x' '^go version go1\.' "$("$root/repo.sh" exec go version)"
+assert_matches 'repo Deno launcher uses the pinned release' '^deno 2\.9\.2 ' "$("$root/repo.sh" exec deno --version | head -n1)"
+assert_matches 'repo Buck2 launcher runs Buck2' '^buck2 ' "$("$root/repo.sh" exec buck2 --version)"
+assert_equal 'repo shell resolves Python from .local/bin' "$root/.local/bin/python" "$("$root/repo.sh" exec bash -c 'which python')"
+assert_equal 'repo shell resolves Go from .local/bin' "$root/.local/bin/go" "$("$root/repo.sh" exec bash -c 'which go')"
+assert_equal 'repo shell resolves GCC from .local/bin' "$root/.local/bin/gcc" "$("$root/repo.sh" exec bash -c 'which gcc')"
+assert_equal 'repo shell resolves G++ from .local/bin' "$root/.local/bin/g++" "$("$root/repo.sh" exec bash -c 'which g++')"
+assert_equal 'repo shell resolves Buck2 from .local/bin' "$root/.local/bin/buck2" "$("$root/repo.sh" exec bash -c 'which buck2')"
 for binutil in ar ranlib nm strip objcopy ld; do
-  assert_equal "repo shell resolves $binutil from .local/bin" "$root/.local/bin/$binutil" "$($root/repo.sh exec bash -c "which $binutil")"
+  assert_equal "repo shell resolves $binutil from .local/bin" "$root/.local/bin/$binutil" "$("$root/repo.sh" exec bash -c "which $binutil")"
 done
 assert_equal 'self-contained Python launcher works without environment setup' 'self-contained python' "$(env -i PATH=/usr/bin:/bin "$root/.local/bin/python" -I -c 'print("self-contained python")')"
 assert_matches 'self-contained Go launcher works without environment setup' '^go version go1\.' "$(env -i PATH=/usr/bin:/bin "$root/.local/bin/go" version)"

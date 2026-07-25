@@ -37,22 +37,12 @@ foreign-arch label.
 
 load("//platforms:defs.bzl", "platform")
 load("//rules:constraint.bzl", "constraint_setting", "constraint_value")
+load("//rules:host.bzl", "native_target")
 
 _ARCHES = ["x86_64-linux-musl", "aarch64-linux-musl"]
 _PROFILES = ["dbg", "opt"]
 
-def _native_target() -> str:
-  # Mirrors rules/cxx.bzl's/rules/go.bzl's/rules/python.bzl's/
-  # rules/package.bzl's own _native_target(): this repo only ever
-  # builds+runs the host's own musl output triplet.
-  arch = host_info().arch
-  if arch.is_x86_64:
-    return "x86_64-linux-musl"
-  if arch.is_aarch64:
-    return "aarch64-linux-musl"
-  fail("unsupported native CPU architecture")
-
-_NATIVE_TARGET = _native_target()
+_NATIVE_TARGET = native_target()
 
 def define_config():
   constraint_setting(name = "profile")

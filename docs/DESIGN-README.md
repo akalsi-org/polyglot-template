@@ -6,14 +6,34 @@ This document set defines a cloneable, non-JVM, AI-ready monorepo template for C
 
 ## Documents
 
+This index lists every document under `docs/`. When this page and
+[CURRENT-CAPABILITIES.md](CURRENT-CAPABILITIES.md) disagree about what exists,
+the capability matrix wins: it is the executable-scope authority and this page
+is a design baseline.
+
+Current and verified:
+
+- [CURRENT-CAPABILITIES.md](CURRENT-CAPABILITIES.md) — the compatibility and readiness contract; the authority over this document for what is executable today.
 - [ARCHITECTURE.md](ARCHITECTURE.md) — repository layout, commands, toolchains, build graph, packaging, validation, and implementation phases.
-- [PRINCIPLES.md](PRINCIPLES.md) — durable principles, decision tree, evidence, boundaries, falsifiers, and meta-rules.
-- [DEPLOYMENT.md](DEPLOYMENT.md) — VPS application placement, package composition, systemd activation, HAProxy subdomain routing, wildcard DNS, and hot certificate delivery.
-- [FLEET.md](FLEET.md) — optional infrastructure profile, inventory authority, OpenTofu provisioning, isolated Ansible convergence, host lifecycle, trust, locks, receipts, and scaling boundary.
-- [FLEET-NEXT.md](FLEET-NEXT.md) — remaining provider, SLO, trust-implementation, service-policy, stateful-workload, and recovery questions.
-- [CI-RELEASE.md](CI-RELEASE.md) — GitHub Actions packaging, target archives, checksum sidecars, and tag-gated release contract.
-- [spikes/serialization/README.md](spikes/serialization/README.md) — nested-array IDL spike comparing Fory, Bebop, FlatBuffers, and a minimal borrowed-view lower bound.
+- [LANGUAGE-GUIDE.md](LANGUAGE-GUIDE.md) — per-language source layout, commands, and validation.
+- [TOOLCHAIN-LIFECYCLE.md](TOOLCHAIN-LIFECYCLE.md) — reviewed toolchain update, qualification, recovery, and rollback workflow.
+- [CI-RELEASE.md](CI-RELEASE.md) — GitHub Actions verification jobs, packaging, target archives, evidence sidecars, and the tag-gated release contract.
+- [EDITOR.md](EDITOR.md) — VS Code setup against the pinned toolchain and configured language roots.
+- [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — bootstrap, Buck daemon, cache, compdb, and native-module recovery.
+- [IMPROVEMENT-ROADMAP.md](IMPROVEMENT-ROADMAP.md) — audit findings turned into phased work, with per-item completion status.
+- [PRINCIPLES.md](PRINCIPLES.md) — durable principles, decision tree, evidence, boundaries, falsifiers, and meta-rules; each principle carries its own enforcement status.
 - [../README.md](../README.md) — runnable target, lock/bootstrap, C++ graph, language source layout, package/runtime closure, AI guide, tests, and live two-runner CI.
+
+Proposals — designs for systems that do not exist in this checkout:
+
+- [proposals/DEPLOYMENT.md](proposals/DEPLOYMENT.md) — VPS application placement, package composition, systemd activation, HAProxy subdomain routing, wildcard DNS, and hot certificate delivery.
+- [proposals/FLEET.md](proposals/FLEET.md) — optional infrastructure profile, inventory authority, OpenTofu provisioning, isolated Ansible convergence, host lifecycle, trust, locks, receipts, and scaling boundary.
+- [proposals/FLEET-NEXT.md](proposals/FLEET-NEXT.md) — remaining provider, SLO, trust-implementation, service-policy, stateful-workload, and recovery questions.
+
+Spikes — research, superseded or not adopted:
+
+- [spikes/serialization/README.md](spikes/serialization/README.md) — nested-array IDL spike comparing Fory, Bebop, FlatBuffers, and a minimal borrowed-view lower bound.
+- [spikes/parallel-build.md](spikes/parallel-build.md) — historical parallel-build spike, predating the Buck2 migration.
 
 ## Decision Summary
 

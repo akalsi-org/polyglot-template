@@ -6,6 +6,37 @@ export POLYGLOT_ROOT=${POLYGLOT_ROOT:-$ROOT}
 export POLYGLOT_LOCAL_DIR=${POLYGLOT_LOCAL_DIR:-$ROOT/.local}
 . "$ROOT/toolchain/wrappers.sh"
 
+# Every buck2 --show-output path below is relative to the repository root, so
+# the whole script runs from $ROOT. The passthrough commands (shell, exec,
+# buck2, python, deno, go) restore the caller's directory before handing over,
+# because those are the caller's own working directory, not this script's.
+INVOCATION_CWD=$PWD
+cd -- "$ROOT"
+
+restore_invocation_cwd() { cd -- "$INVOCATION_CWD"; }
+
+# A path the CALLER typed is relative to the caller's directory, not to $ROOT.
+# Used for the handful of commands that accept a filesystem path argument.
+caller_path() {
+  case $1 in
+    /*) printf '%s\n' "$1" ;;
+    *) printf '%s/%s\n' "$INVOCATION_CWD" "$1" ;;
+  esac
+}
+
+# Repo scratch policy (mirrors tools/coverage_merge.py): never /tmp (small
+# tmpfs), always under buck-out. One directory per invocation, removed by an
+# EXIT trap so a `set -e` abort mid-function cannot leak it.
+SCRATCH_DIR=
+scratch_file() {
+  if [[ -z $SCRATCH_DIR ]]; then
+    mkdir -p "$ROOT/buck-out/v2/tmp"
+    SCRATCH_DIR=$(mktemp -d "$ROOT/buck-out/v2/tmp/repo-sh.XXXXXX")
+    trap 'rm -rf -- "$SCRATCH_DIR"' EXIT
+  fi
+  mktemp "$SCRATCH_DIR/scratch.XXXXXX"
+}
+
 tool_path() {
   local tool=$1 target version expected
   target=$("$ROOT/toolchain/target.sh")
@@ -17,7 +48,7 @@ tool_path() {
 }
 
 setup_environment() {
-  local target gcc python deno go buck2 clang_format gcc_bin go_root path_prefix loader loader_path env_bin gcc_install
+  local target gcc python deno go buck2 clang_format gcc_bin go_root path_prefix loader loader_path env_bin gcc_install jobs
   target=$("$ROOT/toolchain/target.sh")
   export POLYGLOT_TARGET=$target
   export POLYGLOT_LOCK_FILE=${POLYGLOT_LOCK_FILE:-$ROOT/tools.lock.toml}
@@ -61,8 +92,11 @@ setup_environment() {
   # `go-test` invocations outside buck2 (which schedules its own graph). There
   # is no cross-lane job budget to split any more (that was the retired
   # task-runner's jobserver-fed concurrency knob) - this is simply
-  # host_jobs().
-  export GOFLAGS="-p=$(host_jobs)"
+  # host_jobs(). Assign before exporting: `export X=$(f)` is a builtin
+  # invocation whose own status masks f's, so a rejected POLYGLOT_JOBS would
+  # otherwise leave a malformed `-p=` behind and continue.
+  jobs=$(host_jobs)
+  export GOFLAGS="-p=$jobs"
   export DENO_DIR="$POLYGLOT_LOCAL_DIR/cache/deno"
   export XDG_CACHE_HOME="$POLYGLOT_LOCAL_DIR/cache/xdg"
   export PYTHONPATH="$ROOT/build/python/$target/lib:$ROOT/python/lib:$ROOT/python/app"
@@ -95,8 +129,8 @@ stage_python_extensions() {
   stage="$ROOT/build/python/$target/lib"
   parent=$(dirname -- "$stage")
   manifest="$parent/.lib.manifest"
-  query_out=$(mktemp)
-  query_err=$(mktemp)
+  query_out=$(scratch_file)
+  query_err=$(scratch_file)
   if ! "$POLYGLOT_BUCK2" uquery "kind('^_py_extension_rule$', '//...')" >"$query_out" 2>"$query_err"; then
     cat "$query_err" >&2
     rm -f "$query_out" "$query_err"
@@ -108,8 +142,8 @@ stage_python_extensions() {
     rm -rf "$stage" "$manifest"
     return 0
   fi
-  output_out=$(mktemp)
-  output_err=$(mktemp)
+  output_out=$(scratch_file)
+  output_err=$(scratch_file)
   if ! "$POLYGLOT_BUCK2" build "${plat[@]}" --show-output "${extensions[@]}" >"$output_out" 2>"$output_err"; then
     cat "$output_err" >&2
     rm -f "$output_out" "$output_err"
@@ -157,7 +191,7 @@ stage_python_extensions() {
 # the legacy raw-build-dir assembler (which repo.sh never populated).
 require_buck_package_target() {
   local name=$1 probe_err probe_status
-  probe_err=$(mktemp)
+  probe_err=$(scratch_file)
   if "$POLYGLOT_BUCK2" targets "//packages:$name" >/dev/null 2>"$probe_err"; then
     rm -f "$probe_err"
     return 0
@@ -197,7 +231,9 @@ Commands:
   format [--check]             Apply, or check, repository formatting for every lane.
   lint                         Run buck2's lint-as-test targets plus infra-lint.
   build [dbg|opt]              Build every lane's primary outputs (discovered by rule kind).
-  coverage                     Build the merged dbg coverage report (bxl/coverage.bxl).
+  coverage                     Build the merged dbg coverage report
+                               (bxl/coverage.bxl) and render a browsable
+                               single-file HTML report next to it.
   test [dbg|opt]               Test every language target in the selected profile (default: dbg).
   compile-commands [dbg|opt]   Materialize compile_commands.json via the BXL compdb.
   cpp-build [dbg|opt]          Build the C++ hello binary via buck2.
@@ -226,7 +262,9 @@ Commands:
                                Verify a packaged artifact and exact runtime closure.
   release-check <name> <tag>   Check package tag, changelog, archive, and smoke test.
   release-notes <tag>          Print release notes for an exact changelog tag.
-  ci                           Run lint, package validation, build, and test.
+  ci                           Run every gate CI runs: deep doctor, lint,
+                               package validation, infra tests, build, test,
+                               and coverage.
 
 Bootstrap is the only command allowed to fetch toolchain artifacts. Builds must
 use tools beneath .local/toolchain and never fall back to host compilers.
@@ -245,15 +283,31 @@ pinned_python() {
   "$POLYGLOT_LOCAL_DIR/bin/python3" "$@"
 }
 
+# toolchain-lock regenerates the derived Starlark lock, and `toolchain-qualify`
+# runs it BEFORE bootstrap - so it is the one repository script that can be
+# asked to run before a pinned interpreter exists. Prefer the pinned
+# interpreter whenever it is installed (the hermeticity rule) and fall back to
+# the host only to break that ordering cycle; gen_toolchain_lock.py is pure
+# stdlib and version-insensitive.
+lock_python() {
+  if [[ -x $POLYGLOT_LOCAL_DIR/bin/python3 ]]; then
+    "$POLYGLOT_LOCAL_DIR/bin/python3" "$@"
+  else
+    python3 "$@"
+  fi
+}
+
 case "$command" in
   shell)
     (($# == 0)) || { printf 'usage: ./repo.sh\n' >&2; exit 2; }
     setup_environment
+    restore_invocation_cwd
     exec bash --noprofile --rcfile "$ROOT/toolchain/repo-shell.bashrc" -i
     ;;
   exec)
     (($# >= 1)) || { printf 'usage: ./repo.sh exec <command> [args...]\n' >&2; exit 2; }
     setup_environment
+    restore_invocation_cwd
     exec "$@"
     ;;
   help|-h|--help)
@@ -272,8 +326,8 @@ case "$command" in
   toolchain-lock)
     (($# <= 1)) || { printf 'usage: ./repo.sh toolchain-lock [--check]\n' >&2; exit 2; }
     case ${1:-} in
-      '') python3 "$ROOT/tools/gen_toolchain_lock.py" --lock "$ROOT/tools.lock.toml" --output "$ROOT/toolchains/lock.bzl" ;;
-      --check) python3 "$ROOT/tools/gen_toolchain_lock.py" --lock "$ROOT/tools.lock.toml" --output "$ROOT/toolchains/lock.bzl" --check ;;
+      '') lock_python "$ROOT/tools/gen_toolchain_lock.py" --lock "$ROOT/tools.lock.toml" --output "$ROOT/toolchains/lock.bzl" ;;
+      --check) lock_python "$ROOT/tools/gen_toolchain_lock.py" --lock "$ROOT/tools.lock.toml" --output "$ROOT/toolchains/lock.bzl" --check ;;
       *) printf 'usage: ./repo.sh toolchain-lock [--check]\n' >&2; exit 2 ;;
     esac
     ;;
@@ -290,12 +344,30 @@ case "$command" in
     ;;
   buck2)
     setup_environment
+    restore_invocation_cwd
     exec "$POLYGLOT_BUCK2" "$@"
     ;;
   infra-lint)
     require_no_args infra-lint "$@"
     setup_environment
-    bash -n "$ROOT/repo.sh" "$ROOT"/.vscode/go "$ROOT"/toolchain/*.sh "$ROOT"/test/*.sh
+    # `bash -n f1 f2 ...` parses ONLY f1 and treats the rest as positional
+    # parameters, so every file after the first went unchecked. One process
+    # per file is the only way to actually gate them all.
+    mapfile -t infra_scripts < <(printf '%s\n' "$ROOT/repo.sh" "$ROOT"/.vscode/go "$ROOT"/toolchain/*.sh "$ROOT"/test/*.sh)
+    for script in "${infra_scripts[@]}"; do
+      bash -n "$script" || { printf 'error: shell syntax check failed: %s\n' "$script" >&2; exit 1; }
+    done
+    # shellcheck is not a pinned toolchain artifact (it is a Haskell binary
+    # with no entry in tools.lock.toml), so it can only be an opportunistic
+    # gate: it runs when the host happens to provide it and is skipped
+    # otherwise. `bash -n` above is the guaranteed floor. To make shellcheck
+    # mandatory it must first be pinned in tools.lock.toml and installed by
+    # bootstrap like every other tool.
+    if command -v shellcheck >/dev/null 2>&1; then
+      shellcheck --severity=error --shell=bash -- "${infra_scripts[@]}"
+    else
+      printf 'infra-lint: shellcheck not on PATH; syntax-only shell gating\n'
+    fi
     pinned_python "$ROOT/tools/lint.py"
     ;;
   format)
@@ -314,11 +386,13 @@ case "$command" in
     fi
     if ((format_check)); then
       "$POLYGLOT_DENO" fmt --check ts tsweb deno.json
-      mapfile -t format_go < <(find "$ROOT/go" -name '*.go' -type f -print0 | xargs -0 "$GOROOT/bin/gofmt" -l)
+      # -r: with an empty Go lane xargs would otherwise run gofmt with no
+      # arguments, which reads stdin (hangs on a tty, passes vacuously in CI).
+      mapfile -t format_go < <(find "$ROOT/go" -name '*.go' -type f -print0 | xargs -0 -r "$GOROOT/bin/gofmt" -l)
       ((${#format_go[@]} == 0)) || { printf 'gofmt: files not canonically formatted:\n%s\nrun: ./repo.sh format\n' "${format_go[*]}" >&2; exit 1; }
     else
       "$POLYGLOT_DENO" fmt ts tsweb deno.json
-      find "$ROOT/go" -name '*.go' -type f -print0 | xargs -0 "$GOROOT/bin/gofmt" -w
+      find "$ROOT/go" -name '*.go' -type f -print0 | xargs -0 -r "$GOROOT/bin/gofmt" -w
     fi
     ;;
   lint)
@@ -341,7 +415,7 @@ case "$command" in
     # progress noise would otherwise pollute every build, but swallowing
     # it outright turns a real Starlark/daemon error into an unexplained
     # "no buildable targets discovered".
-    uquery_err=$(mktemp)
+    uquery_err=$(scratch_file)
     mapfile -t buildables < <("$POLYGLOT_BUCK2" uquery \
       "kind('^_(cxx_binary|go_binary|py_binary|deno_check|vite_build)_rule$', '//...')" 2>"$uquery_err" | grep '^root//')
     ((${#buildables[@]} > 0)) || { cat "$uquery_err" >&2; rm -f "$uquery_err"; printf 'error: no buildable targets discovered\n' >&2; exit 1; }
@@ -353,7 +427,35 @@ case "$command" in
   coverage)
     (($# == 0)) || { printf 'usage: ./repo.sh coverage\n' >&2; exit 2; }
     setup_environment
-    "$POLYGLOT_BUCK2" bxl -M all //bxl:coverage.bxl:coverage
+    # bxl/coverage.bxl prints the ensured merged.lcov path then the
+    # summary.txt path. Nothing used to read either, so the merged total could
+    # fall to 0% with every gate still green - gate it here, on the same
+    # summary CI uploads. rules/coverage.bzl owns the merge action's argv, so
+    # the floor is enforced from this side of the graph rather than by passing
+    # --min-total into the action.
+    cov_out=$("$POLYGLOT_BUCK2" bxl -M all //bxl:coverage.bxl:coverage)
+    printf '%s\n' "$cov_out"
+    cov_summary=$(printf '%s\n' "$cov_out" | grep -E 'summary\.txt$' | tail -n1)
+    [[ -n $cov_summary && -f $cov_summary ]] || {
+      printf 'error: coverage bxl did not report a summary file: %s\n' "$cov_out" >&2; exit 1;
+    }
+    cov_lcov=$(printf '%s\n' "$cov_out" | grep -E 'merged\.lcov$' | tail -n1)
+    [[ -n $cov_lcov && -f $cov_lcov ]] || {
+      printf 'error: coverage bxl did not report a merged lcov file: %s\n' "$cov_out" >&2; exit 1;
+    }
+    # The browsable report is rendered OUTSIDE the graph, on purpose. It is a
+    # view of merged.lcov plus the working-tree sources, not a build input:
+    # nothing depends on it, and making it a buck action would mean declaring
+    # every repo source as an input to the merge just to annotate them.
+    # Rendered before the floor check so a FAILING run still leaves a report
+    # explaining which lines are missing - that is exactly when it is wanted.
+    cov_html=${POLYGLOT_COVERAGE_HTML:-$ROOT/buck-out/coverage-report/coverage.html}
+    pinned_python "$ROOT/tools/coverage_html.py" "$cov_lcov" "$cov_html" \
+      --root "$ROOT" --title 'Coverage report' \
+      ${POLYGLOT_COVERAGE_MARKDOWN:+--markdown "$POLYGLOT_COVERAGE_MARKDOWN"} \
+      ${POLYGLOT_COVERAGE_HTML_LINK:+--html-link "$POLYGLOT_COVERAGE_HTML_LINK"}
+    pinned_python "$ROOT/tools/coverage_merge.py" --check-total "$cov_summary" \
+      --min-total "${POLYGLOT_COVERAGE_MIN:-90.0}"
     ;;
   test)
     (($# <= 1)) || { printf 'usage: ./repo.sh test [dbg|opt]\n' >&2; exit 2; }
@@ -370,7 +472,7 @@ case "$command" in
     [[ $profile == dbg || $profile == opt ]] || { printf 'error: profile must be dbg or opt\n' >&2; exit 2; }
     setup_environment
     mapfile -t plat < <(target_platform_args "$profile")
-    bxl_err=$(mktemp)
+    bxl_err=$(scratch_file)
     if ! out=$("$POLYGLOT_BUCK2" bxl -M all "${plat[@]}" //bxl:compdb.bxl:compdb 2>"$bxl_err"); then
       cat "$bxl_err" >&2; rm -f "$bxl_err"
       printf 'error: compdb bxl failed\n' >&2; exit 1
@@ -423,6 +525,7 @@ case "$command" in
     loader_dir=$(dirname -- "$gcc_install/$loader")
     build_python="$ROOT/build/python/$target/lib"
     export PYTHONPATH="$build_python:$ROOT/python/lib:$ROOT/python/app"
+    restore_invocation_cwd
     "$gcc_install/$loader" --library-path "$loader_dir:$python_install/python/lib" "$python_install/$python_expected" "$@"
     ;;
   python-build)
@@ -444,6 +547,7 @@ case "$command" in
     deno=$(tool_path deno)
     [[ -x $deno ]] || { printf 'error: pinned Deno is not installed; run ./repo.sh bootstrap\n' >&2; exit 1; }
     export DENO_DIR="$POLYGLOT_LOCAL_DIR/cache/deno"
+    restore_invocation_cwd
     exec "$deno" "$@"
     ;;
   ts-build)
@@ -481,8 +585,12 @@ case "$command" in
     export GOTOOLCHAIN=local
     export CGO_ENABLED=0
     export GOEXPERIMENT=jsonv2
-    export GOFLAGS="-p=$(host_jobs)"
+    # See setup_environment: assign first so host_jobs' rejection status is
+    # not masked by the `export` builtin's own success.
+    go_jobs=$(host_jobs)
+    export GOFLAGS="-p=$go_jobs"
     export PATH="$GOROOT/bin:$PATH"
+    restore_invocation_cwd
     exec "$GOROOT/bin/go" "$@"
     ;;
   go-build)
@@ -516,7 +624,7 @@ case "$command" in
     target=$("$ROOT/toolchain/target.sh")
     setup_environment
     args=(--catalog "$ROOT/packages/catalog.bzl" --tools-lock "$ROOT/tools.lock.toml" resolve --package "$1" --target "$target")
-    [[ ${2:-} ]] && args+=(--out-dir "$2")
+    [[ ${2:-} ]] && args+=(--out-dir "$(caller_path "$2")")
     pinned_python "$ROOT/tools/package_model.py" "${args[@]}"
     ;;
   package)
@@ -530,7 +638,20 @@ case "$command" in
       --tools-lock "$ROOT/tools.lock.toml" resolve \
       --package "$1" --target "$target" | pinned_python -c 'import json, sys; print(json.load(sys.stdin)["version"])')
     mapfile -t plat < <(target_platform_args "$profile")
-    out=$("$POLYGLOT_BUCK2" build "${plat[@]}" --show-output "//packages:$1" 2>/dev/null | awk '{ print $2 }')
+    # Mirror every other buck2 call here: stderr to a scratch file, surfaced
+    # only on failure. Swallowing it turned a real build error into an
+    # unexplained `cp` failure on an empty path.
+    package_err=$(scratch_file)
+    if ! out=$("$POLYGLOT_BUCK2" build "${plat[@]}" --show-output "//packages:$1" 2>"$package_err" | awk '{ print $2 }'); then
+      cat "$package_err" >&2
+      printf 'error: buck2 build of //packages:%s failed\n' "$1" >&2; exit 1
+    fi
+    # --show-output prints one line per built output; anything but exactly one
+    # makes the `cp` below fail obscurely on a multi-line path.
+    [[ $(printf '%s\n' "$out" | grep -c .) == 1 ]] || {
+      cat "$package_err" >&2
+      printf 'error: buck2 did not report exactly one output for //packages:%s: %s\n' "$1" "$out" >&2; exit 1
+    }
     mkdir -p "$ROOT/dist"
     archive="$ROOT/dist/$1-$version-$target.tar.gz"
     tmp="$archive.tmp.$$"
@@ -565,7 +686,7 @@ case "$command" in
     pinned_python "$ROOT/tools/package_release.py" --root "$ROOT" --catalog "$ROOT/packages/catalog.bzl" \
       --tools-lock "$ROOT/tools.lock.toml" \
       --dist-dir "$ROOT/dist" --changelog "$ROOT/CHANGELOG.md" smoke \
-      --archive "$1" --package "$2" --target "$target" --execute
+      --archive "$(caller_path "$1")" --package "$2" --target "$target" --execute
     ;;
   release-check)
     (($# == 2)) || { printf 'usage: ./repo.sh release-check <name> <tag>\n' >&2; exit 2; }
@@ -594,13 +715,21 @@ case "$command" in
     pinned_python -m unittest discover -s "$ROOT/test" -p 'test_*.py'
     bash "$ROOT/test/test-package-model.sh"
     bash "$ROOT/test/test-package-release.sh"
+    bash "$ROOT/test/graph-compdb-contract.sh"
+    bash "$ROOT/test/deno-manifest-contract.sh"
     ;;
   ci)
     (($# == 0)) || { printf 'usage: ./repo.sh ci\n' >&2; exit 2; }
+    # A strict superset of what .github/workflows/verify.yml runs, so a local
+    # green result means the same thing CI's green result does. Keep this list
+    # and verify.yml's job steps in lockstep.
+    "$ROOT/repo.sh" doctor --deep
     "$ROOT/repo.sh" lint
     "$ROOT/repo.sh" package-validate
+    "$ROOT/repo.sh" infra-test
     "$ROOT/repo.sh" build
     "$ROOT/repo.sh" test
+    "$ROOT/repo.sh" coverage
     ;;
   *) printf 'error: unknown command: %s\n' "$command" >&2; usage >&2; exit 2 ;;
 esac

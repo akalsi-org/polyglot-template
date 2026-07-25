@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -38,6 +39,13 @@ def load_object(path: Path, description: str) -> dict[str, Any]:
   return value
 
 
+def is_ascii_digits(part: str) -> bool:
+  # str.isdigit() is true for every Unicode decimal form, so "١.٢.٣"
+  # validated as a version and then flowed on into unit names and
+  # digests. A version component here is ASCII or it is invalid.
+  return part.isascii() and part.isdigit()
+
+
 def validate_plan(plan: dict[str, Any]) -> None:
   required = {"schema", "group", "environment", "target", "packages", "eligible_hosts", "routes"}
   missing = required - plan.keys()
@@ -56,7 +64,7 @@ def validate_plan(plan: dict[str, Any]) -> None:
     if not isinstance(package, str) or package.count("@") != 1:
       raise ValueError(f"invalid package specification: {package!r}")
     name, version = package.split("@", 1)
-    if not name or len(version.split(".")) != 3 or not all(part.isdigit() for part in version.split(".")):
+    if not name or len(version.split(".")) != 3 or not all(is_ascii_digits(part) for part in version.split(".")):
       raise ValueError(f"invalid package specification: {package!r}")
     if name in package_names:
       raise ValueError(f"duplicate package: {name}")
@@ -163,7 +171,7 @@ def main(argv: list[str] | None = None) -> int:
       return 1
     return 0
   except (AssertionError, ValueError) as error:
-    print(f"deployment readonly error: {error}", file = __import__("sys").stderr)
+    print(f"deployment readonly error: {error}", file = sys.stderr)
     return 2
 
 

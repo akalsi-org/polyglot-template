@@ -50,5 +50,5 @@ extension against the pinned toolchain:
 
 `python/test:pyfast_test_extension` is a C-mode `py_extension` that consumes
 this header through `cxx_deps`. Its top-level function tests run via
-`py_tests()` and prove normal and error calls through the pinned interpreter.
+`py_test()` and prove normal and error calls through the pinned interpreter.
 Add new pyfast behavior there, keeping tests plain `test_*` functions.

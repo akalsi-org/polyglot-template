@@ -22,12 +22,23 @@ then splits the result into two declared outputs:
     why it is safe to hand to every consumer as one read-only symlink
     rather than a private copy.
 
-Every consuming action (deno_check, deno_test, deno_run_check, vite_build)
-gets a PRIVATE WRITABLE copy of the small stripped DENO_DIR — deno still
-writes sqlite scratch back even on --cached-only/frozen runs — plus a
-read-only symlink of node_modules placed next to a staged copy of the
-sources it needs. All consumers pass --frozen (and --cached-only where
-supported) with DENO_NO_UPDATE_CHECK=1, so none of them touch the network.
+Every consuming action (deno_check, deno_test, deno_run_check, deno_lint,
+vite_build) gets a PRIVATE WRITABLE copy of the small stripped DENO_DIR —
+deno still writes sqlite scratch back even on --cached-only/frozen runs —
+plus a read-only symlink of node_modules placed next to a staged copy of the
+sources it needs.
+
+OFFLINE is ENFORCED, not merely configured: every deno invocation in this
+file — the population action, all five _stage_and_run consumers, and
+deno_graph_check — runs inside a fresh user+net namespace via the shared
+run_offline helper (see _run_offline_lines), fail-closed with one opt-out
+env var. --frozen and --cached-only remain set where the subcommand supports
+them, but they are NOT the boundary: they constrain module RESOLUTION, not
+what the program does once running, and vite_build necessarily passes vite
+`-A` (all permissions, --allow-net included). Verified: vite builds the
+tsweb site to completion with no network reachable, so the offline claim
+holds for the whole lane rather than for the two rules that used to enforce
+it.
 
 Coverage (default-on under dbg - see rules/coverage.bzl's module docstring):
 deno_test's coverage variant adds `--coverage=coverage_raw` to the same
@@ -52,24 +63,55 @@ sliced at the wrong segment.
 
 load("//config:flags.bzl", "coverage_enabled_flag")
 load("//rules:coverage.bzl", "CoverageInfo")
+load("//rules:env.bzl", "action_env")
 load("//rules:deno_sources.bzl", "DenoAppInfo", "DenoSourcesInfo", "DenoSourceSet", "deno_sources_children", "flatten_deno_sources", "merge_direct_deno_sources", "own_deno_sources", "staged_path")
+load("//rules:host.bzl", "native_target")
+load("//rules:hosttools.bzl", "require_host_tools")
 load("//rules:pkg.bzl", "PACKAGE_LABELS_ATTR", "PackageEntry", "check_pkg_name", "package_info")
 load("//rules:pinned_python.bzl", "PINNED_PYTHON_ATTRS", "pinned_python_command", "pinned_python_script_args")
 
-def _native_target() -> str:
-  # Mirrors rules/{cxx,go,python}.bzl's own _native_target(): this repo only
-  # ever builds+runs the host's own musl output triplet, so the deno
-  # toolchain dep's default can be derived the same way instead of every
-  # consumer target hand-writing "//toolchains:deno-x86_64-linux-musl".
-  arch = host_info().arch
-  if arch.is_x86_64:
-    return "x86_64-linux-musl"
-  if arch.is_aarch64:
-    return "aarch64-linux-musl"
-  fail("unsupported native CPU architecture")
-
-_NATIVE_TARGET = _native_target()
+_NATIVE_TARGET = native_target()
 _DENO_TOOLCHAIN = "//toolchains:deno-" + _NATIVE_TARGET
+
+# --- OFFLINE ENFORCEMENT, shared by every deno action in this file.
+#
+# The module docstring above used to claim all six deno rules are
+# network-free. Only two actually enforced it: deno_cache and
+# deno_graph_check ran their deno inside `unshare -rn`. Everything routed
+# through _stage_and_run relied on --cached-only/--frozen alone, which
+# constrain MODULE RESOLUTION and say nothing about what the program then
+# does - and vite_build hands vite `-A`, i.e. --allow-net among everything
+# else, while deno_check has no --cached-only at all (the flag does not
+# exist for `deno check`). So "never touches the network" was a property of
+# the flags for two rules and an aspiration for four.
+#
+# One helper now emits the same fail-closed namespace wrapper for all of
+# them, with ONE opt-out variable. Previously deno_cache had an opt-out and
+# deno_graph_check silently did not, so the two rules disagreed about
+# whether a host lacking unprivileged user namespaces could build at all.
+_ALLOW_ONLINE_ENV = "POLYGLOT_ALLOW_ONLINE_DENO"
+
+def _run_offline_lines(what: str) -> list[str]:
+  """Shell defining `run_offline`, which runs its arguments inside a fresh
+  user+net namespace (loopback up, nothing else reachable). FAIL-CLOSED: a
+  host without unprivileged userns must opt in explicitly rather than
+  silently degrading to an unenforced run, because a warning nobody reads is
+  not an offline guarantee - a stale cache would let deno fetch
+  SUCCESSFULLY and emit valid-looking, cacheable outputs."""
+  return require_host_tools(["unshare"]) + [
+    "if unshare -rn true 2>/dev/null; then",
+    # `ip link set lo up` is best-effort on purpose: some deno operations
+    # want a working loopback (it is not the network), but a kernel or
+    # container that refuses it must not turn an offline run into a failure.
+    "  run_offline() { unshare -rn sh -c 'ip link set lo up 2>/dev/null || true; exec \"$@\"' offline-sh \"$@\"; }",
+    "elif [ \"${%s:-}\" = \"1\" ]; then" % _ALLOW_ONLINE_ENV,
+    "  echo 'warning: %s=1 - %s may reach the network; offline-after-bootstrap is NOT enforced for this action' >&2" % (_ALLOW_ONLINE_ENV, what),
+    "  run_offline() { \"$@\"; }",
+    "else",
+    "  echo 'error: user+net namespaces unavailable, so %s cannot be enforced offline. Set %s=1 to explicitly allow this action to reach the network (breaking offline-after-bootstrap), or run on a host with unprivileged userns.' >&2" % (what, _ALLOW_ONLINE_ENV),
+    "  exit 1",
+    "fi",
+  ]
 
 # --- DenoSourcesInfo: a transitive set of (staged_path, artifact) pairs,
 # threaded through deno_library/deno_app deps so every consumer
@@ -173,7 +215,7 @@ def _deno_app_impl(ctx: AnalysisContext) -> list[Provider]:
   return [
     DefaultInfo(default_outputs = list(ctx.attrs.srcs)),
     DenoSourcesInfo(sources = tset),
-    DenoAppInfo(entry = staged_path(ctx, ctx.attrs.main)),
+    DenoAppInfo(entry = main_dest),
     info,
   ]
 
@@ -257,8 +299,13 @@ def _deno_cache_impl(ctx: AnalysisContext) -> list[Provider]:
       "LOADER_DIR=\"$ROOT/$9\"",
       "PYTHON_LIB=\"$ROOT/${10}\"",
       "PYTHON=\"$ROOT/${11}\"",
-      "chmod +x \"$DENO\"",
-      "WORK=$(mktemp -d)",
+      # Anchored under buck-out rather than a bare `mktemp -d` (host /tmp),
+      # for the reason rules/go.bzl's SCRATCH_BASE spells out: /tmp is often
+      # a small tmpfs shared by every concurrent build on the machine, and
+      # this copies a whole DENO_DIR into it.
+      "SCRATCH_BASE=\"$ROOT/buck-out/v2/tmp/deno-cache\"",
+      "mkdir -p \"$SCRATCH_BASE\"",
+      "WORK=$(mktemp -d \"$SCRATCH_BASE/tmp.XXXXXX\")",
       "trap 'rm -rf \"$WORK\"' EXIT",
       "cp -RL \"$STAGED\"/. \"$WORK\"/",
       "chmod -R u+w \"$WORK\"",
@@ -277,25 +324,7 @@ def _deno_cache_impl(ctx: AnalysisContext) -> list[Provider]:
       "  chmod -R u+w \"$DENO_DIR\"",
       "fi",
       "cd \"$WORK\"",
-      # run_offline: deno inside a fresh user+net namespace (loopback up,
-      # nothing else) where the host supports it - it physically cannot
-      # fetch. The fallback is LOUD, never silent: on a host without
-      # userns the seed still makes fetching unnecessary, but enforcement
-      # is reduced to that, and the log says so.
-      "if unshare -rn true 2>/dev/null; then",
-      "  run_offline() { unshare -rn sh -c 'ip link set lo up 2>/dev/null || true; exec \"$@\"' offline-sh \"$@\"; }",
-      "elif [ \"${POLYGLOT_ALLOW_ONLINE_DENO_CACHE:-}\" = \"1\" ]; then",
-      "  echo 'warning: POLYGLOT_ALLOW_ONLINE_DENO_CACHE=1 - deno cache may fetch; offline-after-bootstrap is NOT enforced for this action' >&2",
-      "  run_offline() { \"$@\"; }",
-      "else",
-      # FAIL CLOSED, not warn-and-continue: without the namespace, a
-      # stale seed would let deno fetch SUCCESSFULLY and emit
-      # valid-looking outputs - a warning nobody reads is not an offline
-      # guarantee. Hosts that genuinely cannot provide user+net
-      # namespaces must opt in to the online behavior explicitly.
-      "  echo 'error: user+net namespaces unavailable, so deno offline resolution cannot be enforced. Set POLYGLOT_ALLOW_ONLINE_DENO_CACHE=1 to explicitly allow this action to fetch (breaking offline-after-bootstrap), or run on a host with unprivileged userns.' >&2",
-      "  exit 1",
-      "fi",
+    ] + _run_offline_lines("deno cache") + [
       "if ! run_offline \"$LOADER\" --library-path \"$LOADER_DIR:$PYTHON_LIB\" \"$PYTHON\" \"$CACHE_EXEC\" --deno \"$DENO\" --manifest \"$MANIFEST\" --root \"$WORK\"; then",
       "  echo 'error: deno cache failed (deno output above). If it needed the network, the .local/cache/deno seed is stale or incomplete - run ./repo.sh bootstrap. Otherwise fix the reported source/lock problem; graph actions never fetch.' >&2",
       "  exit 1",
@@ -310,7 +339,14 @@ def _deno_cache_impl(ctx: AnalysisContext) -> list[Provider]:
       "mkdir -p \"$OUT_DENO_DIR\"",
       "\"$LOADER\" --library-path \"$LOADER_DIR:$PYTHON_LIB\" \"$PYTHON\" \"$PRUNE\" \"$WORK/deno.lock\" \"$DENO_DIR\" \"$OUT_DENO_DIR\"",
       "mkdir -p \"$OUT_NODE_MODULES\"",
-      "[ -d \"$WORK/node_modules\" ] && cp -R \"$WORK/node_modules\"/. \"$OUT_NODE_MODULES\"/ || true",
+      # An if-block, NOT `[ -d ... ] && cp ... || true`: under `set -e` that
+      # form swallows both possible failures - "the directory is absent"
+      # (legitimate: a lock with no npm dependencies) and "cp died halfway
+      # through" - so a partially copied npm closure was declared a valid
+      # output and cached as one.
+      "if [ -d \"$WORK/node_modules\" ]; then",
+      "  cp -R \"$WORK/node_modules\"/. \"$OUT_NODE_MODULES\"/",
+      "fi",
     ],
     is_executable = True,
   )
@@ -319,6 +355,7 @@ def _deno_cache_impl(ctx: AnalysisContext) -> list[Provider]:
     cmd_args(["/bin/sh", script, staged, deno, deno_dir_out.as_output(), node_modules_out.as_output(), ctx.attrs._prune_tool, ctx.attrs._cache_exec_tool, manifest, pinned_python_script_args(ctx)]),
     category = "deno_cache",
     identifier = ctx.label.name,
+    env = action_env(),
     local_only = True,
   )
   return [DefaultInfo(
@@ -358,13 +395,39 @@ def deno_cache(**kwargs):
   _deno_cache_rule(**kwargs)
 
 # --- shared plumbing for every network-free consumer of the cache.
+def _check_layout_paths(ctx: AnalysisContext, layout: dict, paths: list):
+  """Fails at ANALYSIS time on a deno CLI path argument that no staged entry
+  provides.
+
+  Every consumer takes free-form strings (`entries`, vite_build's `config`)
+  that name paths inside the staged tree, and nothing ever cross-checked them
+  against the tree actually being staged - so renaming e.g.
+  tsweb/vite.config.ts and updating `srcs` but not vite_build's `config=`
+  analyzed cleanly and then failed at action RUN time with a path that exists
+  nowhere, tens of seconds into a build, from inside a temporary staging
+  directory that no longer exists by the time you read the message.
+
+  Directory-scoped entries (deno_test's "ts/test/", deno_lint's "ts/") are
+  exempt: they name a prefix of the tree rather than an entry in it. A
+  trailing "/" is what marks them, matching how every call site already
+  spells them."""
+  for path in paths:
+    if path.endswith("/"):
+      # Directory scope: require at least one staged entry underneath, so a
+      # typo'd directory is still caught.
+      if not [key for key in layout.keys() if key.startswith(path)]:
+        fail("{}: {!r} matches no staged source - check the entries/srcs/deps of this target".format(ctx.label.raw_target(), path))
+    elif path not in layout:
+      fail("{}: {!r} is not staged by this target - it must come from a dep's DenoSourcesInfo or this target's own srcs".format(ctx.label.raw_target(), path))
+
 def _stage_and_run(
     ctx: AnalysisContext,
     extra_layout: dict,
     deno_args: list,
     category: str,
     out_dir_name: [str, None] = None,
-    name_suffix: str = "") -> (Artifact, [Artifact, None]):
+    name_suffix: str = "",
+    check_paths: list = []) -> (Artifact, [Artifact, None]):
   # name_suffix disambiguates output paths when a single rule instance calls
   # _stage_and_run more than once (e.g. deno_test's plain run plus its
   # coverage-collection run - see _deno_test_impl) - every declared output
@@ -372,6 +435,7 @@ def _stage_and_run(
   srcs = merge_direct_deno_sources(ctx, flatten_deno_sources(ctx, ctx.attrs.deps), ctx.attrs.srcs)
   layout = _entries_to_layout(ctx.attrs.deno_json, ctx.attrs.deno_lock, srcs)
   layout.update(extra_layout)
+  _check_layout_paths(ctx, layout, check_paths)
   staged = ctx.actions.symlinked_dir(ctx.label.name + name_suffix + "-staged", layout)
 
   deno_dir = ctx.attrs.deno_dir[DefaultInfo].default_outputs[0]
@@ -379,7 +443,11 @@ def _stage_and_run(
   deno = _deno_bin(ctx)
 
   stamp = ctx.actions.declare_output(ctx.label.name + name_suffix + ".stamp")
-  out_dir = ctx.actions.declare_output((out_dir_name + name_suffix) if out_dir_name else None) if out_dir_name else None
+  # dir = True: this output is always a whole directory tree (vite's built
+  # site, deno test's coverage_raw). Declaring it without dir = True - which
+  # deno_cache, tsconfig_emit and _coverage_collect_action all pass - left
+  # buck2 treating a directory as a single-file output.
+  out_dir = ctx.actions.declare_output(out_dir_name + name_suffix, dir = True) if out_dir_name else None
 
   lines = [
     "#!/bin/sh",
@@ -390,10 +458,23 @@ def _stage_and_run(
     "NODE_MODULES=\"$ROOT/$3\"",
     "DENO=\"$ROOT/$4/deno\"",
     "STAMP=\"$ROOT/$5\"",
-    "OUT_DIR=\"$ROOT/$6\"",
-    "shift 6",
-    "chmod +x \"$DENO\"",
-    "WORK=$(mktemp -d)",
+  ]
+  if out_dir_name:
+    # Only declared when there IS one. This slot used to be filled with the
+    # literal string "/dev/null" whenever a consumer had no output directory,
+    # which the script then concatenated into OUT_DIR="$ROOT//dev/null" - a
+    # nonsense path that only stayed harmless because nothing read it.
+    lines.append("OUT_DIR=\"$ROOT/$6\"")
+    lines.append("shift 6")
+  else:
+    lines.append("shift 5")
+  lines += [
+    # Anchored under buck-out, not host /tmp - see rules/go.bzl's
+    # SCRATCH_BASE. Under `buck2 test //...` a dozen of these run
+    # concurrently, each copying a full DENO_DIR.
+    "SCRATCH_BASE=\"$ROOT/buck-out/v2/tmp/deno-run\"",
+    "mkdir -p \"$SCRATCH_BASE\"",
+    "WORK=$(mktemp -d \"$SCRATCH_BASE/tmp.XXXXXX\")",
     "trap 'rm -rf \"$WORK\"' EXIT",
     "mkdir -p \"$WORK/proj\" \"$WORK/denodir\"",
     "cp -RL \"$STAGED\"/. \"$WORK/proj\"/",
@@ -404,7 +485,13 @@ def _stage_and_run(
     "export DENO_DIR=\"$WORK/denodir\"",
     "export DENO_NO_UPDATE_CHECK=1",
     "cd \"$WORK/proj\"",
-    "\"$DENO\" \"$@\"",
+  ] + _run_offline_lines("deno") + [
+    # THE offline boundary for every consumer (check/test/run/lint/vite).
+    # --cached-only/--frozen only constrain module resolution; the namespace
+    # is what makes "graph actions never fetch" true of the program too -
+    # including vite, which runs under `-A` (all permissions, --allow-net
+    # among them).
+    "run_offline \"$DENO\" \"$@\"",
   ]
   if out_dir_name:
     lines.append("mkdir -p \"$OUT_DIR\"")
@@ -420,9 +507,8 @@ def _stage_and_run(
     node_modules,
     deno,
     stamp.as_output(),
-    out_dir.as_output() if out_dir else "/dev/null",
-  ] + deno_args
-  ctx.actions.run(cmd_args(run_args), category = category, identifier = ctx.label.name)
+  ] + ([out_dir.as_output()] if out_dir else []) + deno_args
+  ctx.actions.run(cmd_args(run_args), category = category, identifier = ctx.label.name, env = action_env())
   return stamp, out_dir
 
 _CONSUMER_ATTRS = {
@@ -457,7 +543,8 @@ def _consumer_defaults(kwargs):
 # (no --cached-only: `deno check` has no such flag, but is network-free once
 # the cache is warm and --frozen is set).
 def _deno_check_impl(ctx: AnalysisContext) -> list[Provider]:
-  stamp, _ = _stage_and_run(ctx, {}, ["check", "--frozen"] + _resolve_entries(ctx), "deno_check")
+  entries = _resolve_entries(ctx)
+  stamp, _ = _stage_and_run(ctx, {}, ["check", "--frozen"] + entries, "deno_check", check_paths = entries)
   return [DefaultInfo(default_output = stamp)]
 
 _deno_check_rule = rule(
@@ -474,7 +561,8 @@ def deno_check(**kwargs):
 # --- deno_run_check: `deno run --cached-only --frozen <entry>`, ts-test's
 # "run the app" parity, wired up as a buck2 test.
 def _deno_run_check_impl(ctx: AnalysisContext) -> list[Provider]:
-  stamp, _ = _stage_and_run(ctx, {}, ["run", "--cached-only", "--frozen"] + ctx.attrs.extra_flags + _resolve_entries(ctx), "deno_run_check")
+  entries = _resolve_entries(ctx)
+  stamp, _ = _stage_and_run(ctx, {}, ["run", "--cached-only", "--frozen"] + ctx.attrs.extra_flags + entries, "deno_run_check", check_paths = entries)
   command = cmd_args(["/bin/sh", "-c", "exit 0"], hidden = [stamp])
   return [
     DefaultInfo(default_output = stamp),
@@ -503,7 +591,7 @@ def _deno_test_impl(ctx: AnalysisContext) -> list[Provider]:
   # importing an app's exported function), not to be run as an extra test
   # entry, so its DenoAppInfo.entry should NOT be folded in automatically.
   entries = ctx.attrs.entries
-  stamp, _ = _stage_and_run(ctx, {}, ["test", "--cached-only", "--frozen"] + ctx.attrs.extra_flags + entries, "deno_test")
+  stamp, _ = _stage_and_run(ctx, {}, ["test", "--cached-only", "--frozen"] + ctx.attrs.extra_flags + entries, "deno_test", check_paths = entries)
   command = cmd_args(["/bin/sh", "-c", "exit 0"], hidden = [stamp])
   providers = [
     DefaultInfo(default_output = stamp),
@@ -523,6 +611,7 @@ def _deno_test_impl(ctx: AnalysisContext) -> list[Provider]:
       "deno_test_coverage",
       out_dir_name = "coverage_raw",
       name_suffix = "-cov",
+      check_paths = entries,
     )
     providers.append(CoverageInfo(kind = "deno", primary = out_dir, tool = None, gcnos = None, toolchain_dir = None))
   return providers
@@ -530,10 +619,12 @@ def _deno_test_impl(ctx: AnalysisContext) -> list[Provider]:
 _deno_test_rule = rule(
   impl = _deno_test_impl,
   attrs = _CONSUMER_ATTRS | {
-    # Directory-scoped ("ts/test/") entries stay explicit - see
-    # _resolve_entries' doc comment - deno_app deps still fold their own
-    # entrypoint in additionally (harmless: `deno test` treats an extra file
-    # arg with no Deno.test() calls as zero additional tests, not an error).
+    # Directory-scoped ("ts/test/") entries stay explicit, and are the ONLY
+    # entries deno_test ever runs: unlike every other consumer here,
+    # _deno_test_impl deliberately does NOT call _resolve_entries, so a
+    # deno_app dep's own DenoAppInfo.entry is not folded in (see the comment
+    # at the top of _deno_test_impl for why - an app dep here exists for
+    # source availability, not to be run as an extra test entry).
     "entries": attrs.list(attrs.string(), default = []),
     "extra_flags": attrs.list(attrs.string(), default = []),
     "_coverage_enabled": attrs.bool(default = coverage_enabled_flag()),
@@ -561,7 +652,7 @@ def deno_test(**kwargs):
 # --- deno_lint: shared shape for `deno fmt --check` and `deno lint` parity
 # targets, wired up as buck2 tests.
 def _deno_lint_impl(ctx: AnalysisContext) -> list[Provider]:
-  stamp, _ = _stage_and_run(ctx, {}, ctx.attrs.args + ctx.attrs.entries, "deno_lint")
+  stamp, _ = _stage_and_run(ctx, {}, ctx.attrs.args + ctx.attrs.entries, "deno_lint", check_paths = ctx.attrs.entries)
   command = cmd_args(["/bin/sh", "-c", "exit 0"], hidden = [stamp])
   return [
     DefaultInfo(default_output = stamp),
@@ -588,6 +679,9 @@ def _vite_build_impl(ctx: AnalysisContext) -> list[Provider]:
     ["run", "--cached-only", "--frozen", "-A", "npm:vite@" + ctx.attrs.vite_version, "build", "--config", ctx.attrs.config],
     "vite_build",
     out_dir_name = ctx.attrs.out_dir,
+    # `config` names a file inside the staged tree, so it is exactly the
+    # kind of free string that silently rots when a source is renamed.
+    check_paths = [ctx.attrs.config],
   )
   # Packaging: the whole built site directory stages as one tree entry at
   # web/<site> under the root-level "web" sibling of bin/lib/libexec/
@@ -693,6 +787,7 @@ def _tsconfig_emit_impl(ctx: AnalysisContext) -> list[Provider]:
     pinned_python_command(ctx, [gen, ctx.attrs.deno_json, out_dir.as_output(), "emit"]),
     category = "tsconfig_emit",
     identifier = ctx.label.name,
+    env = action_env(),
   )
   return [DefaultInfo(default_output = out_dir)]
 
@@ -710,6 +805,7 @@ def _tsconfig_drift_test_impl(ctx: AnalysisContext) -> list[Provider]:
     pinned_python_command(ctx, [gen, ctx.attrs.deno_json, stamp.as_output(), "check"]),
     category = "tsconfig_drift_check",
     identifier = ctx.label.name,
+    env = action_env(),
   )
   command = cmd_args(["/bin/sh", "-c", "exit 0"], hidden = [stamp])
   return [
@@ -822,8 +918,11 @@ def _deno_graph_check_impl(ctx: AnalysisContext) -> list[Provider]:
       "PYTHON_LIB=\"$ROOT/${10}\"",
       "PYTHON=\"$ROOT/${11}\"",
       "shift 11",
-      "chmod +x \"$DENO\"",
-      "WORK=$(mktemp -d)",
+      # buck-out-anchored scratch, not host /tmp - see rules/go.bzl's
+      # SCRATCH_BASE for the shared-tmpfs rationale.
+      "SCRATCH_BASE=\"$ROOT/buck-out/v2/tmp/deno-graph-check\"",
+      "mkdir -p \"$SCRATCH_BASE\"",
+      "WORK=$(mktemp -d \"$SCRATCH_BASE/tmp.XXXXXX\")",
       "trap 'rm -rf \"$WORK\"' EXIT",
       "mkdir -p \"$WORK/proj\" \"$WORK/denodir\" \"$WORK/infos\"",
       "cp -RL \"$STAGED\"/. \"$WORK/proj\"/",
@@ -833,15 +932,12 @@ def _deno_graph_check_impl(ctx: AnalysisContext) -> list[Provider]:
       "ln -s \"$NODE_MODULES\" \"$WORK/proj/node_modules\"",
       "export DENO_DIR=\"$WORK/denodir\"",
       "export DENO_NO_UPDATE_CHECK=1",
-      # Match deno_cache's network boundary. `deno info` now supports both
-      # --frozen and --no-remote, but the namespace remains the fail-closed
-      # defense-in-depth boundary for all graph resolution subprocesses.
-      "if unshare -rn true 2>/dev/null; then",
-      "  run_offline() { unshare -rn sh -c 'ip link set lo up 2>/dev/null || true; exec \"$@\"' offline-sh \"$@\"; }",
-      "else",
-      "  echo 'error: user+net namespaces unavailable, so deno graph resolution cannot be enforced. Run on a host with unprivileged userns.' >&2",
-      "  exit 1",
-      "fi",
+      # Same shared fail-closed boundary as every other deno action here.
+      # `deno info` supports --frozen and --no-remote, but the namespace is
+      # the enforcement; this rule used to be the one deno action with NO
+      # opt-out at all, so a host without userns could build the whole graph
+      # except this check.
+    ] + _run_offline_lines("deno graph resolution") + [
       "cd \"$WORK/proj\"",
       "i=0",
       "for entry in \"$@\"; do",
@@ -858,6 +954,7 @@ def _deno_graph_check_impl(ctx: AnalysisContext) -> list[Provider]:
     cmd_args(["/bin/sh", script, staged, deno_dir, node_modules, deno, declared, checker, stamp.as_output(), pinned_python_script_args(ctx)] + _resolve_entries(ctx)),
     category = "deno_graph_check",
     identifier = ctx.label.name,
+    env = action_env(),
   )
   command = cmd_args(["/bin/sh", "-c", "exit 0"], hidden = [stamp])
   return [
@@ -901,6 +998,7 @@ def _smoke_test_impl(ctx: AnalysisContext) -> list[Provider]:
     cmd_args(["/bin/sh", script, ctx.attrs.script, ctx.attrs.root, stamp.as_output(), pinned_python_script_args(ctx)] + ctx.attrs.extra_args),
     category = "smoke_test",
     identifier = ctx.label.name,
+    env = action_env(),
   )
   command = cmd_args(["/bin/sh", "-c", "exit 0"], hidden = [stamp])
   return [

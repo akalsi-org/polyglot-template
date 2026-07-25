@@ -3,9 +3,23 @@
 # Header-only - consumers compile against it. python/test owns the small
 # pyfast_test_extension fixture.
 load("//rules:cxx.bzl", "cxx_library")
+load("//rules:python.bzl", "py_script_test")
 
 cxx_library(
   name = "pyfast",
   hdrs = ["pyfast.h"],
   visibility = ["PUBLIC"],
+)
+
+# Leak regression for pyfast.h's VSTEAL/VMOVE ownership contract. The script
+# hammers the fixture extension and prints the allocated-block delta; a
+# regression to the leaking pattern turns that bounded delta into ~90k
+# permanently-live blocks. It ran correctly by hand but belonged to no
+# target, so nothing re-ran it when pyfast.h changed. `deps` supplies
+# PYTHONPATH pointing at //python/test:pyfast_test_extension's staged
+# package directory (see rules/python.bzl's py_script_test).
+py_script_test(
+  name = "leak_check",
+  main = "leak_check.py",
+  deps = ["//python/test:pyfast_test_extension"],
 )

@@ -5,17 +5,10 @@ interpreter through the matching pinned musl loader.  These helpers make both
 artifacts declared inputs and keep the loader/library-path invocation uniform.
 """
 
+load("//rules:host.bzl", "native_target")
 load("//toolchains:lock.bzl", "TOOLCHAINS")
 
-def _native_target():
-  arch = host_info().arch
-  if arch.is_x86_64:
-    return "x86_64-linux-musl"
-  if arch.is_aarch64:
-    return "aarch64-linux-musl"
-  fail("unsupported native CPU architecture")
-
-_NATIVE_TARGET = _native_target()
+_NATIVE_TARGET = native_target()
 _GCC = TOOLCHAINS["gcc-musl"][_NATIVE_TARGET]
 _PYTHON = TOOLCHAINS["python"][_NATIVE_TARGET]
 _LOADER_DIR = _GCC["loader"].rsplit("/", 1)[0]

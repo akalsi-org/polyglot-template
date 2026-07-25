@@ -26,6 +26,40 @@ here runs with cwd = project root - see rules/go.bzl's module docstring for
 the general pattern this repo uses), so the report is stable across
 configurations/machines.
 
+CONSEQUENCE OF "DEFAULT-ON FOR dbg", stated explicitly because it is
+surprising and was previously undocumented: each lane's collector is a
+ctx.actions.run() build action, so ANY command that builds a test target
+under dbg also EXECUTES that test - a second time, in addition to whatever
+`buck2 test` does. Concretely:
+
+  - `buck2 build //...` runs every instrumented test.
+  - a FAILING test therefore fails `buck2 build`, and fails it with a
+    coverage-action error ("Action failed: ... (cxx_test_coverage foo)")
+    rather than a test report naming the assertion.
+  - anything depending on a test target inherits both effects.
+
+`./repo.sh build` is deliberately NOT affected: it discovers buildables by
+rule kind (cxx_binary/go_binary/py_binary/deno_check/vite_build - see the
+uquery in repo.sh), so no test target, and therefore no collector, is in its
+build set. `./repo.sh test` and `./repo.sh coverage` are the commands that
+reach them.
+
+This is left AS IS rather than gated behind a //config:coverage constraint,
+and the choice is deliberate. Gating would mean a third configuration
+dimension: a new constraint_setting, new platform() rows for every
+arch x profile x coverage combination in config/defs.bzl, and every
+`default_target_platform` in rules/ picking one - for a graph that has
+exactly two profiles today and where the -m modifier demonstrably does not
+override a rule's own default_target_platform (see config/defs.bzl's
+docstring). It would also split coverage off from the dbg configuration
+whose --coverage compile flags produce the .gcno files the cxx collector
+reads, so cxx coverage would need dbg AND the new constraint to be
+coherent - a constraint pair no invocation can express without also
+teaching repo.sh, which is a bigger and more fragile change than the
+behavior it fixes. The double execution costs wall-clock on a full build;
+the failure-message confusion is real but rare, and is now written down
+where someone hitting it will look.
+
 CRITICAL RULE-WRITING LAW (see rules/go.bzl / rules/python.bzl module
 docstrings): the manifest below embeds every artifact's path as literal
 TEXT (via ctx.actions.write_json). That text-only reference is not enough
@@ -35,6 +69,7 @@ manifest file itself) is therefore also passed into the merge action's own
 `hidden` list directly.
 """
 
+load("//rules:env.bzl", "action_env")
 load("//rules:pinned_python.bzl", "pinned_python_command_from_tools", "pinned_python_tools_from_dirs")
 
 CoverageInfo = provider(fields = [
@@ -115,5 +150,6 @@ def coverage_merge_actions(actions, merge_tool, gomod, infos, python_dir, gcc_di
     ),
     category = "coverage_merge",
     identifier = "coverage",
+    env = action_env(),
   )
   return merged, summary

@@ -51,23 +51,15 @@ therefore also include `roots` directly, alongside gcc_dir/py_dir.
 """
 
 load("//config:defs.bzl", "fail_if_cross_arch", "target_arch_attr")
-load("//config:flags.bzl", "COVERAGE_FLAG", "FORBIDDEN_FLAGS", "STANDARD", "coverage_enabled_flag", "profile_compile_flags", "profile_link_flags")
+load("//config:flags.bzl", "COVERAGE_FLAG", "STANDARD", "check_flags", "coverage_enabled_flag", "profile_compile_flags", "profile_link_flags")
 load("//rules:coverage.bzl", "CoverageInfo")
 load("//rules:cxx.bzl", "CxxInfo", "cxx_include_tree_args")
+load("//rules:env.bzl", "action_env")
+load("//rules:host.bzl", "native_target")
 load("//rules:pkg.bzl", "PACKAGE_LABELS_ATTR", "PackageEntry", "check_pkg_name", "package_info")
 load("//toolchains:lock.bzl", "TOOLCHAINS")
 
-def _native_target() -> str:
-  # Mirrors rules/cxx.bzl's _native_target() / toolchain/target.sh: this
-  # repo only ever builds+runs the host's own musl output triplet.
-  arch = host_info().arch
-  if arch.is_x86_64:
-    return "x86_64-linux-musl"
-  if arch.is_aarch64:
-    return "aarch64-linux-musl"
-  fail("unsupported native CPU architecture")
-
-_NATIVE_TARGET = _native_target()
+_NATIVE_TARGET = native_target()
 _GCC = TOOLCHAINS["gcc-musl"][_NATIVE_TARGET]
 _PYTHON = TOOLCHAINS["python"][_NATIVE_TARGET]
 _DENO_TOOLCHAIN = "//toolchains:deno-" + _NATIVE_TARGET
@@ -84,14 +76,25 @@ _PY_INCLUDE_SUBPATH = _PYTHON["include_subpath"]
 _PY_INCLUDE_REL = _PY_ROOT_REL + "/" + _PY_INCLUDE_SUBPATH
 _EXT_SUFFIX = _PYTHON["ext_suffix"]
 
-PyInfo = provider(fields = ["srcs", "roots"])
+# PySourceSet: a transitive_set of Artifact lists. Every sibling lane
+# already converted its own equivalent with written rationale (rules/go.bzl's
+# GoSourceSet, rules/cxx.bzl's CxxArtifactSet, rules/pkg.bzl's
+# PackageEntrySet, rules/deno_sources.bzl's DenoSourceSet); python was the
+# one holdout, still doing a plain `srcs += info.srcs` with no dedupe at
+# every level of the graph - so a diamond (python/test depends on both
+# fastbytes and example, which will share a base library) re-concatenated
+# the shared library's sources once per path that reached it, and every
+# consuming action's hidden-input list grew with it.
+#
+# `roots` stays a plain deduped list: it is short (one entry per
+# py_extension package dir plus the repo-relative library roots), order is
+# load-bearing because it becomes PYTHONPATH, and it mixes strings with
+# Artifacts - none of which a tset expresses better than the explicit
+# seen-set already here.
+PySourceSet = transitive_set()
 
-def _check_flags(flags):
-  for flag in flags:
-    if flag in FORBIDDEN_FLAGS:
-      fail("forbidden C++ flag: {}".format(flag))
-    if flag.startswith("-fsanitize"):
-      fail("sanitizers are outside the pinned musl toolchain contract: {}".format(flag))
+# `srcs`: a PySourceSet transitive_set. `roots`: list[str | Artifact].
+PyInfo = provider(fields = ["srcs", "roots"])
 
 def _gcc_tools(ctx):
   fail_if_cross_arch(ctx, _NATIVE_TARGET)
@@ -142,19 +145,34 @@ _PROFILE_ATTRS = {
   "link_flags": attrs.list(attrs.string(), default = profile_link_flags()),
 }
 
-def _merge_pyinfo(deps):
-  srcs = []
+def _py_srcs(ctx: AnalysisContext, own_srcs: list, deps: list):
+  """Mirrors rules/go.bzl's _go_srcs: builds this target's own PySourceSet
+  node (own_srcs as its value, each dep's PyInfo.srcs tset as a child) and
+  flattens it with a SINGLE traverse() into an order-stable, deduped list.
+  Returns (flattened, tset) - the flattened list is this target's own hidden
+  inputs; the tset is what its own PyInfo should carry forward so a further
+  consumer's traversal stays one pass instead of re-flattening."""
+  tset = ctx.actions.tset(PySourceSet, value = list(own_srcs), children = [d[PyInfo].srcs for d in deps])
+  seen = {}
+  flattened = []
+  for value in tset.traverse():
+    for src in value:
+      key = str(src)
+      if key not in seen:
+        seen[key] = True
+        flattened.append(src)
+  return flattened, tset
+
+def _merge_roots(deps):
   roots = []
   seen_roots = {}
   for dep in deps:
-    info = dep[PyInfo]
-    srcs += info.srcs
-    for root in info.roots:
+    for root in dep[PyInfo].roots:
       key = str(root)
       if key not in seen_roots:
         seen_roots[key] = True
         roots.append(root)
-  return srcs, roots
+  return roots
 
 def _pythonpath_env_lines(roots):
   if not roots:
@@ -174,8 +192,8 @@ def _loader_exec_prefix(gcc, py):
 # the real on-disk PYTHONPATH itself, not from a buck2-provided file list).
 
 def _py_library_impl(ctx: AnalysisContext) -> list[Provider]:
-  dep_srcs, dep_roots = _merge_pyinfo(ctx.attrs.deps)
-  srcs = list(ctx.attrs.srcs) + dep_srcs
+  _srcs, srcs_tset = _py_srcs(ctx, ctx.attrs.srcs, ctx.attrs.deps)
+  dep_roots = _merge_roots(ctx.attrs.deps)
   roots = [ctx.attrs.root] + [r for r in dep_roots if str(r) != ctx.attrs.root]
   # Packaging: one tree entry per OWN source file (not dep_srcs - deps'
   # entries are already folded in transitively via package_info(deps=...)
@@ -199,7 +217,7 @@ def _py_library_impl(ctx: AnalysisContext) -> list[Provider]:
   )
   return [
     DefaultInfo(default_outputs = list(ctx.attrs.srcs)),
-    PyInfo(srcs = srcs, roots = roots),
+    PyInfo(srcs = srcs_tset, roots = roots),
     info,
   ]
 
@@ -237,8 +255,8 @@ def _py_extension_impl(ctx: AnalysisContext) -> list[Provider]:
   # empirically confirmed against the pinned toolchain.
   compile_flags = [f for f in ctx.attrs.compile_flags if f != COVERAGE_FLAG]
   link_flags = [f for f in ctx.attrs.link_flags if f != COVERAGE_FLAG]
-  _check_flags(compile_flags)
-  _check_flags(link_flags)
+  check_flags(compile_flags)
+  check_flags(link_flags)
 
   if ctx.attrs.language not in ("c", "cxx"):
     fail("{}: language must be 'c' or 'cxx', got {!r}".format(ctx.label.raw_target(), ctx.attrs.language))
@@ -263,6 +281,7 @@ def _py_extension_impl(ctx: AnalysisContext) -> list[Provider]:
       # Match rules/cxx.bzl's structured identifier contract so compdb can
       # obtain its source field without parsing rendered action commands.
       identifier = "source={}/{};{}/{}".format(ctx.label.package, src.short_path, ctx.attrs.name, src.short_path),
+      env = action_env(),
     )
     objects.append(obj)
 
@@ -270,7 +289,7 @@ def _py_extension_impl(ctx: AnalysisContext) -> list[Provider]:
   shared_obj = ctx.actions.declare_output(ctx.attrs.name + "-" + native_name)
   link_args = [compiler] + objects + [cmd_args(gcc.bin_dir, format = "-B{}"), "-shared"] + link_flags + ctx.attrs.extra_link_flags
   link_args += ["-o", shared_obj.as_output()]
-  ctx.actions.run(cmd_args(link_args), category = "cxx_link", identifier = ctx.attrs.name)
+  ctx.actions.run(cmd_args(link_args), category = "cxx_link", identifier = ctx.attrs.name, env = action_env())
 
   pkg_dir = ctx.actions.declare_output(ctx.attrs.name + "-pkg", dir = True)
   # stubs (.pyi files, the PEP 561 py.typed marker) stage beside
@@ -298,6 +317,7 @@ def _py_extension_impl(ctx: AnalysisContext) -> list[Provider]:
     cmd_args(stage_args),
     category = "py_extension_stage",
     identifier = ctx.attrs.name,
+    env = action_env(),
   )
 
   # Packaging: pkg_dir's OWN top level already contains a "<package>/"
@@ -313,7 +333,7 @@ def _py_extension_impl(ctx: AnalysisContext) -> list[Provider]:
   )
   return [
     DefaultInfo(default_outputs = [pkg_dir]),
-    PyInfo(srcs = list(ctx.attrs.srcs) + [ctx.attrs.init_src] + list(ctx.attrs.stubs), roots = [pkg_dir]),
+    PyInfo(srcs = ctx.actions.tset(PySourceSet, value = list(ctx.attrs.srcs) + [ctx.attrs.init_src] + list(ctx.attrs.stubs)), roots = [pkg_dir]),
     info,
   ]
 
@@ -338,7 +358,8 @@ _py_extension_rule = rule(
 def _py_binary_impl(ctx: AnalysisContext) -> list[Provider]:
   gcc = _gcc_tools(ctx)
   py = _python_tools(ctx)
-  srcs, roots = _merge_pyinfo(ctx.attrs.deps)
+  srcs, srcs_tset = _py_srcs(ctx, [ctx.attrs.main], ctx.attrs.deps)
+  roots = _merge_roots(ctx.attrs.deps)
   lines = ["#!/bin/sh", "set -eu"] + _pythonpath_env_lines(roots) + [
     cmd_args(["exec"] + _loader_exec_prefix(gcc, py) + [ctx.attrs.main, "\"$@\""], delimiter = " "),
   ]
@@ -380,7 +401,7 @@ def _py_binary_impl(ctx: AnalysisContext) -> list[Provider]:
   return [
     DefaultInfo(default_output = launcher, other_outputs = written),
     RunInfo(args = command),
-    PyInfo(srcs = srcs + [ctx.attrs.main], roots = []),
+    PyInfo(srcs = srcs_tset, roots = []),
     info,
   ]
 
@@ -456,14 +477,15 @@ def _py_test_coverage_action(ctx, gcc, py, srcs, roots, start):
     cmd_args(["/bin/sh", script, lcov.as_output()], hidden = srcs + written + roots + [gcc.gcc_dir, py.py_dir, ctx.attrs._py_cover, ctx.attrs._py_test_runner]),
     category = "py_test_coverage",
     identifier = ctx.attrs.name,
+    env = action_env(),
   )
   return lcov
 
 def _py_test_impl(ctx: AnalysisContext) -> list[Provider]:
   gcc = _gcc_tools(ctx)
   py = _python_tools(ctx)
-  dep_srcs, roots = _merge_pyinfo(ctx.attrs.deps)
-  srcs = list(ctx.attrs.srcs) + dep_srcs
+  srcs, _srcs_tset = _py_srcs(ctx, ctx.attrs.srcs, ctx.attrs.deps)
+  roots = _merge_roots(ctx.attrs.deps)
   start = ctx.attrs.start or ctx.label.package
   lines = ["#!/bin/sh", "set -eu"] + _pythonpath_env_lines(roots) + [
     cmd_args(
@@ -503,18 +525,73 @@ _py_test_rule = rule(
 # --- py_compileall_check: `python -m compileall -q <dirs...>`, mirroring
 # repo.sh's python-test lane's own compileall step, as its own test target
 # for lint parity with the rest of the python lane.
+#
+# It ALSO enforces the declared-vs-resolved contract for the whole python
+# lane, which is this rule's more important job. Every other python rule
+# here resolves imports off the LIVE tree: PyInfo.roots are repo-relative
+# directory STRINGS handed to the interpreter via PYTHONPATH, so the
+# interpreter reads whatever is on disk under them while buck2 only tracks
+# files that some target named in `srcs`. An undeclared module therefore
+# imports and runs perfectly, but no action depends on it, so editing it
+# invalidates nothing - reproduced before this check existed by appending
+# invalid Python to python/lib/test_helpers.py, which left `./repo.sh
+# coverage` reporting SUCCESS off a stale cached report.
+#
+# `dirs` is exactly the set of directories the lane claims to own, which
+# makes it the right place to assert the converse of deno_graph_check's
+# contract: every *.py that exists under those directories must be reachable
+# from this target's own srcs+deps closure. The check runs BEFORE compileall
+# so the actionable message wins over a confusing downstream one.
+_COMPILEALL_DECLARED_PY = [
+  "import json, os, sys",
+  "",
+  "declared_path = sys.argv[1]",
+  "dirs = sys.argv[2:]",
+  "with open(declared_path) as f:",
+  "  declared = set(json.load(f))",
+  "",
+  "missing = []",
+  "seen = 0",
+  "for d in dirs:",
+  "  for dirpath, dirnames, filenames in os.walk(d):",
+  # __pycache__ holds generated bytecode, not source; pruning it from the
+  # walk also keeps a previous compileall run from poisoning this one.
+  "    dirnames[:] = [n for n in dirnames if n != '__pycache__']",
+  "    for name in filenames:",
+  "      if not name.endswith('.py'):",
+  "        continue",
+  "      seen += 1",
+  "      rel = os.path.join(dirpath, name).replace(os.sep, '/')",
+  "      if rel not in declared:",
+  "        missing.append(rel)",
+  "",
+  "if missing:",
+  "  print('py_compileall_check: .py files present under the checked dirs but missing from the declared srcs/deps closure:', file=sys.stderr)",
+  "  for m in sorted(missing):",
+  "    print('  ' + m, file=sys.stderr)",
+  "  print('buck2 tracks only files some target names in srcs=; an undeclared module still imports at run time off PYTHONPATH, so nothing invalidates when you edit it. Add each to a py_library/py_binary/py_extension srcs=, then list that target in the deps= of this check.', file=sys.stderr)",
+  "  sys.exit(1)",
+  "print('py_compileall_check: ok (%d .py files under %s, all declared)' % (seen, ', '.join(dirs)))",
+]
 
 def _py_compileall_check_impl(ctx: AnalysisContext) -> list[Provider]:
   gcc = _gcc_tools(ctx)
   py = _python_tools(ctx)
-  dep_srcs, _ = _merge_pyinfo(ctx.attrs.deps)
-  srcs = list(ctx.attrs.srcs) + dep_srcs
+  srcs, _srcs_tset = _py_srcs(ctx, ctx.attrs.srcs, ctx.attrs.deps)
+  # write_json renders each source Artifact as its repo-relative path, the
+  # same spelling os.walk produces below (every action runs with cwd =
+  # project root).
+  declared = ctx.actions.write_json(ctx.attrs.name + "-declared.json", srcs)
+  checker = ctx.actions.write(ctx.attrs.name + "-declared.py", _COMPILEALL_DECLARED_PY)
   lines = ["#!/bin/sh", "set -eu", cmd_args(
+    _loader_exec_prefix(gcc, py) + ["-I", checker, declared] + list(ctx.attrs.dirs),
+    delimiter = " ",
+  ), cmd_args(
     ["exec"] + _loader_exec_prefix(gcc, py) + ["-m", "compileall", "-q"] + list(ctx.attrs.dirs),
     delimiter = " ",
   )]
   script, written = ctx.actions.write(ctx.attrs.name + ".sh", lines, is_executable = True, allow_args = True)
-  command = cmd_args(script, hidden = srcs + written + [gcc.gcc_dir, py.py_dir])
+  command = cmd_args(script, hidden = srcs + written + [gcc.gcc_dir, py.py_dir, checker, declared])
   return [
     DefaultInfo(default_output = script, other_outputs = written),
     RunInfo(args = command),
@@ -539,8 +616,8 @@ _py_compileall_check_rule = rule(
 # bootstrap-seeded cache used by the TypeScript lanes. No host pip installation
 # or network access is permitted after bootstrap.
 def _pyright_check_impl(ctx: AnalysisContext) -> list[Provider]:
-  _, roots = _merge_pyinfo(ctx.attrs.deps)
-  srcs, _ = _merge_pyinfo(ctx.attrs.deps)
+  srcs, _srcs_tset = _py_srcs(ctx, [], ctx.attrs.deps)
+  roots = _merge_roots(ctx.attrs.deps)
   deno_dir = ctx.attrs._deno_dir[DefaultInfo].default_outputs[0]
   deno = ctx.attrs._deno[DefaultInfo].default_outputs[0]
   stamp = ctx.actions.declare_output(ctx.attrs.name + ".stamp")
@@ -554,8 +631,13 @@ def _pyright_check_impl(ctx: AnalysisContext) -> list[Provider]:
       "CONFIG=$3",
       "STAMP=$4",
       "DENO=\"$DENO_ROOT/deno\"",
-      "chmod +x \"$DENO\"",
-      "WORK=$(mktemp -d)",
+      # Anchored under buck-out rather than a bare `mktemp -d` (host /tmp):
+      # /tmp is routinely a small tmpfs shared by every concurrent build on
+      # the machine, and this copies a whole DENO_DIR into it. Same
+      # rationale, and same shape, as rules/go.bzl's SCRATCH_BASE.
+      "SCRATCH_BASE=\"$(pwd)/buck-out/v2/tmp/pyright-check\"",
+      "mkdir -p \"$SCRATCH_BASE\"",
+      "WORK=$(mktemp -d \"$SCRATCH_BASE/tmp.XXXXXX\")",
       "trap 'rm -rf \"$WORK\"' EXIT",
       "mkdir -p \"$WORK/denodir\"",
       "cp -R \"$DENO_DIR_SRC\"/. \"$WORK/denodir\"/",
@@ -571,10 +653,16 @@ def _pyright_check_impl(ctx: AnalysisContext) -> list[Provider]:
     cmd_args(["/bin/sh", script, deno_dir, deno, ctx.attrs._config, stamp.as_output()], hidden = srcs + roots),
     category = "pyright_check",
     identifier = ctx.attrs.name,
+    env = action_env(),
   )
   command = cmd_args(["/bin/sh", "-c", "exit 0"], hidden = [stamp])
   return [
     DefaultInfo(default_output = stamp),
+    # RunInfo for parity with every other test rule in this file (py_test,
+    # py_compileall_check, py_lock_consistency_test) - `buck2 run` on this
+    # target used to fail with "target does not have RunInfo" purely because
+    # this one rule forgot it.
+    RunInfo(args = command),
     ExternalRunnerTestInfo(
       type = "pyright",
       command = [command],
@@ -653,6 +741,56 @@ _py_lock_consistency_test_rule = rule(
   attrs = _TOOLCHAIN_ATTRS,
 )
 
+# --- py_script_test: runs ONE repo-local Python script under the pinned
+# interpreter, with PYTHONPATH assembled from `deps` exactly the way py_test
+# does, and reports pass/fail straight from its exit status.
+#
+# py_test can only express unittest DISCOVERY over a directory, which does
+# not fit a standalone check script whose whole body is module-level
+# (cpp/lib/pyfast/leak_check.py: import the extension, hammer it, print the
+# allocated-block delta). Running it through discovery would work only by
+# accident - the import side effect - and would report "0 tests, OK" whether
+# it ran or not. This rule makes the script itself the test, so a crash, an
+# import failure or a non-zero exit is a red test rather than nothing at all.
+
+def _py_script_test_impl(ctx: AnalysisContext) -> list[Provider]:
+  gcc = _gcc_tools(ctx)
+  py = _python_tools(ctx)
+  srcs, _srcs_tset = _py_srcs(ctx, [ctx.attrs.main] + list(ctx.attrs.srcs), ctx.attrs.deps)
+  roots = _merge_roots(ctx.attrs.deps)
+  lines = ["#!/bin/sh", "set -eu"] + _pythonpath_env_lines(roots) + [
+    cmd_args(
+      ["exec"] + _loader_exec_prefix(gcc, py) + [ctx.attrs.main] + list(ctx.attrs.args),
+      delimiter = " ",
+    ),
+  ]
+  script, written = ctx.actions.write(ctx.attrs.name + ".sh", lines, is_executable = True, allow_args = True)
+  # `roots` in hidden for the same reason py_test does it: a py_extension
+  # dep's PYTHONPATH root is a BUILD OUTPUT, not a repo source, so a
+  # text-only reference inside the script is not enough for buck2 to
+  # materialize it under a non-default configuration (see this file's module
+  # docstring).
+  command = cmd_args(script, hidden = srcs + written + roots + [gcc.gcc_dir, py.py_dir])
+  return [
+    DefaultInfo(default_output = script, other_outputs = written),
+    RunInfo(args = command),
+    ExternalRunnerTestInfo(
+      type = "python_script",
+      command = [command],
+      run_from_project_root = True,
+    ),
+  ]
+
+_py_script_test_rule = rule(
+  impl = _py_script_test_impl,
+  attrs = {
+    "args": attrs.list(attrs.string(), default = []),
+    "deps": attrs.list(attrs.dep(providers = [PyInfo]), default = []),
+    "main": attrs.source(),
+    "srcs": attrs.list(attrs.source(), default = []),
+  } | _TOOLCHAIN_ATTRS,
+)
+
 # See rules/cxx.bzl's identical rationale for these macros: gives BUCK files
 # a resolved (dbg, native arch) configuration for free and don't need to
 # repeat `default_target_platform` on every target.
@@ -670,13 +808,18 @@ def py_binary(**kwargs):
   kwargs.setdefault("default_target_platform", _DEFAULT_PLATFORM)
   _py_binary_rule(**kwargs)
 
-def py_tests(**kwargs):
+def py_test(**kwargs):
   kwargs.setdefault("default_target_platform", _DEFAULT_PLATFORM)
   # See rules/cxx.bzl's cxx_test macro for why: the coverage bxl now depends on
-  # py_tests targets directly, which need to be reachable from the root
+  # py_test targets directly, which need to be reachable from the root
   # package without editing every existing python/test/BUCK call site.
   kwargs.setdefault("visibility", ["PUBLIC"])
   _py_test_rule(**kwargs)
+
+def py_script_test(**kwargs):
+  kwargs.setdefault("default_target_platform", _DEFAULT_PLATFORM)
+  kwargs.setdefault("visibility", ["PUBLIC"])
+  _py_script_test_rule(**kwargs)
 
 def py_compileall_check(**kwargs):
   kwargs.setdefault("default_target_platform", _DEFAULT_PLATFORM)

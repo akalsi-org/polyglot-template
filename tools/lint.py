@@ -16,7 +16,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import gen_toolchain_lock  # noqa: E402
 
 
-IGNORED_PARTS = {".git", ".local", "build", "dist", "__pycache__", "buck-out"}
+# node_modules and vendor hold third-party trees this repository does not own
+# and cannot fix; linting them only reports other people's files.
+IGNORED_PARTS = {
+  ".git",
+  ".local",
+  "build",
+  "dist",
+  "__pycache__",
+  "buck-out",
+  "node_modules",
+  "vendor",
+}
 
 
 def source_files(root: Path, suffix: str):
