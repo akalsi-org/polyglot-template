@@ -66,9 +66,26 @@ To read the interactive page from a CI run, download the artifact — GitHub
 never serves artifact content as a page, so there is no URL to open:
 
 ```bash
-gh run download --name coverage-x86_64-linux-musl
+token=$(secrets.sh get github.token)
+repo=akalsi-org/polyglot-template
+api="https://api.github.com/repos/$repo"
+# Resolve the artifact for the newest run on this branch, then unzip it.
+run=$(curl -fsSL -H "Authorization: Bearer $token" \
+  "$api/actions/runs?branch=main&per_page=1" | ./repo.sh python -c \
+  'import json,sys; print(json.load(sys.stdin)["workflow_runs"][0]["id"])')
+url=$(curl -fsSL -H "Authorization: Bearer $token" "$api/actions/runs/$run/artifacts" |
+  ./repo.sh python -c 'import json,sys
+artifacts = json.load(sys.stdin)["artifacts"]
+print(next(a["archive_download_url"] for a in artifacts
+           if a["name"] == "coverage-x86_64-linux-musl"))')
+curl -fsSL -H "Authorization: Bearer $token" -o coverage.zip "$url"
+unzip -o coverage.zip 'buck-out/coverage-report/coverage.html'
 # then open buck-out/coverage-report/coverage.html
 ```
+
+`secrets.sh get github.token` decrypts the token with `age`, so it prompts on
+a terminal; the token stays in a shell variable and is never written to a
+file or a URL query.
 
 Locally the same page is written directly by `./repo.sh coverage`, at
 `buck-out/coverage-report/coverage.html`; no download step is involved.
