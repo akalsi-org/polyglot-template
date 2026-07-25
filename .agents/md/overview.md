@@ -88,13 +88,23 @@ any combination.
 Two rules when touching that list. First, a new file that only exists to give
 a lane something that builds belongs to a group, and anything that starts
 *referencing* demo code — a BUCK dep list, a catalog entry, a hardcoded path
-in a `test/` contract — has to be added as an `Edit` on the owning group, or
-pruning silently produces a broken graph. Second, keep it to LEAF demo code:
+in a `test/` contract, a prose link in `docs/` — has to be added as an `Edit`
+on the owning group, or pruning silently produces a broken graph or dead
+links. Second, keep it to LEAF demo code:
 whole lanes (`go/`, `ts/`, `tsweb/`) and the demo package entries are
 deliberately not candidates, because removing those means rewriting
 `repo.sh`'s per-lane verbs, root `//:deno-cache`'s hand-listed closure,
 `go/BUCK`'s lint dep lists, `go.mod`/`vendor/`, and
 `.github/workflows/verify.yml`.
+
+Template identity that contains no `polyglot-template` needs its own rename
+list, because `RENAME_TARGETS` cannot catch it: package names
+(`polyglot-demo`), the deployment schema ids (`polyglot.deployment-plan/v1`),
+and the `pgt` C++ namespace each have one (`PACKAGE_RENAME_TARGETS`,
+`SCHEMA_RENAME_TARGETS`, `NAMESPACE_RENAME_TARGETS`). Those run AFTER pruning
+on purpose: the demo groups' edits anchor on the packages' original names, so
+renaming first would leave the anchors unmatchable and fail the run closed
+partway through.
 
 The KEEP-LIST in that module's docstring records the infrastructure that is
 never a candidate. Consult it before assuming a file is demo scaffolding:

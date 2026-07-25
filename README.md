@@ -50,6 +50,23 @@ is optional; omitting it keeps the current organization. `LICENSE` is left
 alone on purpose: its copyright line names a holder, not a namespace, and
 reassigning it is a claim only you can make.
 
+Three renames are worth calling out, because none of them contains the string
+`polyglot-template` and every one of them used to survive into forks:
+
+- **Package identity.** `polyglot-demo` and `polyglot-server` become
+  `<project>-demo` and `<project>-server` across `packages/catalog.bzl`,
+  `packages/BUCK`, `infra/deploy/BUCK`, both CI workflows (including their
+  cache-key prefixes), and the docs. The deployment plan/observation schema
+  identifiers (`polyglot.deployment-plan/v1`) rename with them.
+- **The C++ namespace.** `cpp/lib/pgt` becomes `cpp/lib/<slug>`, and
+  `namespace pgt`, `#include "pgt/core/types.hh"`, and
+  `//cpp/lib/pgt/core:pgt_core` follow. `<slug>` is the project name reduced
+  to a C++ identifier, so `acme-gateway` yields `acme_gateway`.
+- **This section, and the changelog.** The README's title becomes the project
+  name, these template-instantiation instructions are deleted, and
+  `CHANGELOG.md` resets to an empty `# Changelog` rather than shipping this
+  template's own release history.
+
 It then walks you, one file at a time, through this template's own
 self-referential test files (`test/docs-contract.sh`,
 `test/workflow-contract.sh`, and others) - contracts that assert exact strings
@@ -61,12 +78,16 @@ invocation from `repo.sh`'s `infra-test` gate. Answer non-interactively with
 `--keep-all-tests` or `--strip-all-tests` (e.g. for scripted forking); the
 command fails closed if stdin isn't a terminal and neither flag is given.
 
-A second pass then offers the leaf demo code itself - the greeting/hello
+A second pass then strips the leaf demo code itself - the greeting/hello
 example library and app in the C++ and Python lanes, which exist only so a
-fresh clone has something that builds. Removing a group also applies the edits
-that removal requires elsewhere (`cpp/test/BUCK`, `python/test/BUCK`,
-`packages/BUCK`, `packages/catalog.bzl`, `test/graph-compdb-contract.sh`), so
-the graph stays buildable rather than merely smaller; it then prints the
+fresh clone has something that builds, plus this template's own design history
+(`docs/IMPROVEMENT-ROADMAP.md`, `docs/DESIGN-README.md`, `docs/proposals/`,
+`docs/spikes/`), which records decisions your project did not make. Removing a
+group also applies the edits that removal requires elsewhere (`cpp/test/BUCK`,
+`python/test/BUCK`, `packages/BUCK`, `packages/catalog.bzl`,
+`test/graph-compdb-contract.sh`, and the prose in `docs/` that would otherwise
+be left pointing at deleted pages), so the graph stays buildable and the docs
+stay link-clean rather than merely smaller; it then prints the
 `repo.sh` lane verbs (`cpp-run`, `python-build`, ...) that now name a removed
 target and are yours to repoint. `--keep-all-demos` / `--strip-all-demos`
 answer this pass non-interactively.

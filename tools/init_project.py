@@ -121,6 +121,78 @@ RENAME_TARGETS = [
 # by hand.
 
 
+# The demo packages are named after this template, and their names contain no
+# "polyglot-template" for RENAME_TARGETS to catch: a fork shipped real
+# archives called polyglot-demo/polyglot-server, and .github/workflows/
+# verify.yml released `package=polyglot-demo` at `packages/polyglot-demo/
+# v0.1.0`. The "polyglot-" prefix is rewritten to "<project>-" in these files
+# AFTER the polyglot-template rename above has already run, so the only
+# remaining "polyglot-" occurrences are package names and CI cache-key
+# prefixes - both of which SHOULD carry the new project's name.
+PACKAGE_RENAME_TARGETS = [
+  "packages/catalog.bzl",
+  "packages/BUCK",
+  ".github/workflows/verify.yml",
+  ".github/workflows/package-release.yml",
+  "infra/deploy/BUCK",
+  "docs/ARCHITECTURE.md",
+  "docs/CI-RELEASE.md",
+  "docs/PRINCIPLES.md",
+  "README.md",
+  ".agents/md/overview.md",
+  # Rule and tool comments that name //packages:polyglot-demo as the worked
+  # example; they go stale the moment the package is renamed. NOT a blanket
+  # sweep of rules/ - rules/group.bzl names the retired `polyglot_package`
+  # rule, which is history rather than package identity and has no new name
+  # to take.
+  "rules/go.bzl",
+  "rules/package.bzl",
+  "rules/python.bzl",
+  "tools/package_release.py",
+  "tsweb/BUCK",
+  # A fixture string ("polyglot-test") written and read back by one testlib
+  # self-test; arbitrary, but it is the last thing in a fork still saying
+  # "polyglot", and renaming both halves keeps the assertion true.
+  "python/test/test_testlib.py",
+]
+OLD_PACKAGE_PREFIX = "polyglot-"
+
+# The deployment plan/observation schema identifiers are also named after this
+# template ("polyglot.deployment-plan/v1"). They are a wire contract between
+# rules/deploy.bzl and infra/deploy/readonly.py and appear nowhere else, so
+# they rename together safely.
+SCHEMA_RENAME_TARGETS = [
+  "infra/deploy/readonly.py",
+  "rules/deploy.bzl",
+]
+OLD_SCHEMA_PREFIX = "polyglot.deployment-"
+
+# The C++ namespace, its include root, and its Buck target are all named after
+# this template ("namespace pgt", `#include "pgt/core/types.hh"`,
+# //cpp/lib/pgt/core:pgt_core). Nothing here contains "polyglot-template"
+# either, so every fork kept a pgt:: namespace. cpp/lib/pgt is renamed to the
+# project's own slug and these files rewritten to match.
+OLD_NAMESPACE = "pgt"
+NAMESPACE_RENAME_TARGETS = [
+  "cpp/lib/pgt/core/BUCK",
+  "cpp/lib/pgt/core/platform.hh",
+  "cpp/lib/pgt/core/types.hh",
+  "cpp/test/BUCK",
+  "cpp/test/core_test.cc",
+  "rules/cxx.bzl",
+  "docs/LANGUAGE-GUIDE.md",
+]
+
+def namespace_slug(new_project: str) -> str:
+  """A C++-identifier-safe namespace derived from the project name."""
+  slug = re.sub(r"[^a-z0-9]+", "_", new_project.lower()).strip("_")
+  if not slug:
+    return OLD_NAMESPACE
+  if slug[0].isdigit():
+    slug = "ns_" + slug
+  return slug
+
+
 @dataclass
 class TestStripCandidate:
   path: str
@@ -212,6 +284,14 @@ class Edit:
     "drop_target"  - remove the whole top-level rule invocation whose body
                      declares `name = "<value>",`, plus the contiguous
                      comment block immediately above it.
+    "drop_range"   - remove the lines from the first one containing
+                     values[0] up to (not including) the next one containing
+                     values[1]. Used for whole prose sections, which are
+                     bounded by their neighbours rather than by exact text.
+    "replace_text" - exact substring values[0] -> values[1], anywhere in the
+                     file, including across line breaks. For prose surgery
+                     where a sentence, not a line, is the unit.
+    "reset_file"   - overwrite the file with values[0].
     "drop_item"    - starting at the line containing `anchor`, find the
                      first following line that mentions `"<value>"` and
                      remove that inline list item, and its separating comma,
@@ -224,6 +304,27 @@ class Edit:
   kind: str
   values: tuple[str, ...]
   anchor: str = ""
+
+
+# Applied unconditionally, because these are wrong in EVERY fork rather than
+# being a matter of taste: a spawned project whose README still explains how
+# to instantiate the template, and whose CHANGELOG is the template's own
+# release history.
+def template_prose_edits(new_project: str) -> tuple[Edit, ...]:
+  return (
+    Edit(
+      "README.md", "replace_text",
+      ("# Polyglot Template Bootstrap Slice", f"# {new_project}"),
+    ),
+    Edit(
+      "README.md", "drop_range",
+      (
+        "### Instantiating A New Repository From This Template",
+        "Running `./repo.sh` starts an interactive shell",
+      ),
+    ),
+    Edit("CHANGELOG.md", "reset_file", ("# Changelog\n",)),
+  )
 
 
 @dataclass
@@ -325,6 +426,63 @@ DEMO_STRIP_GROUPS = [
       "point it at your own py_binary or drop it.",
     ),
   ),
+  DemoStripGroup(
+    key="history-docs",
+    title="This template's own design history",
+    paths=(
+      "docs/IMPROVEMENT-ROADMAP.md",
+      "docs/DESIGN-README.md",
+      "docs/proposals",
+      "docs/spikes",
+    ),
+    edits=(
+      # Every surviving reference to the removed pages, so a fork is not left
+      # with dead links. Each fails closed if the prose has drifted.
+      Edit(
+        "README.md", "replace_text",
+        (
+          " See [the historical parallel-build spike](docs/spikes/parallel-build.md),"
+          " which predates the Buck2 migration.",
+          "",
+        ),
+      ),
+      Edit(
+        "docs/CURRENT-CAPABILITIES.md", "replace_text",
+        (
+          "verification. Design material in [DEPLOYMENT.md](proposals/DEPLOYMENT.md),\n"
+          "[FLEET.md](proposals/FLEET.md), and [DESIGN-README.md](DESIGN-README.md) remains a\n"
+          "proposal unless it is listed here.\n",
+          "verification.\n",
+        ),
+      ),
+      Edit(
+        "docs/PRINCIPLES.md", "replace_text",
+        (
+          "enforcement: proposed - P15 through P18 describe the deployment and "
+          "fleet design in docs/proposals/. Only the read-only",
+          "enforcement: proposed - only the read-only",
+        ),
+      ),
+      Edit(
+        "test/docs-contract.sh", "drop_lines",
+        (
+          "grep -Fq 'Status: the canonical catalog' \"$root/docs/IMPROVEMENT-ROADMAP.md\"",
+          "grep -Fq 'Status: the bootstrap-first README Quick Start' \"$root/docs/IMPROVEMENT-ROADMAP.md\"",
+          "grep -Fq 'Status: proposed implementation baseline' \"$root/docs/proposals/FLEET.md\"",
+          "grep -Fq 'Status: proposed design baseline' \"$root/docs/DESIGN-README.md\"",
+        ),
+      ),
+    ),
+    rationale=(
+      "The audit roadmap, design index, deployment/fleet proposals, and the\n"
+      "  parallel-build and serialization spikes are THIS template's own\n"
+      "  design history - roughly 60K of decisions your project did not make\n"
+      "  and cannot act on. The reference docs a fork actually uses\n"
+      "  (ARCHITECTURE, PRINCIPLES, LANGUAGE-GUIDE, TOOLCHAIN-LIFECYCLE,\n"
+      "  CI-RELEASE, CURRENT-CAPABILITIES, EDITOR, TROUBLESHOOTING) are kept,\n"
+      "  with their references to the removed pages rewritten."
+    ),
+  ),
 ]
 
 
@@ -346,6 +504,58 @@ def rename_project(root: str, new_project: str, new_org: str) -> None:
         f.write(updated)
       print(f"  updated: {relative_path}")
   print(f"\nProject '{new_project}' successfully initialized.")
+
+
+def rename_packages(root: str, new_project: str) -> None:
+  """Rewrite the demo packages' identity to the new project's own name.
+
+  Runs AFTER rename_project, so every "polyglot-template" is already gone and
+  the only "polyglot-" left is package identity (polyglot-demo,
+  polyglot-server) and CI cache-key prefixes - all of which should carry the
+  project's name.
+  """
+  substitutions = [
+    (PACKAGE_RENAME_TARGETS, OLD_PACKAGE_PREFIX, f"{new_project}-"),
+    (SCHEMA_RENAME_TARGETS, OLD_SCHEMA_PREFIX, f"{new_project}.deployment-"),
+  ]
+  for targets, old, new in substitutions:
+    for relative_path in targets:
+      full_path = os.path.join(root, relative_path)
+      if not os.path.isfile(full_path):
+        continue
+      with open(full_path, "r", encoding = "utf-8") as f:
+        content = f.read()
+      updated = content.replace(old, new)
+      if updated != content:
+        with open(full_path, "w", encoding = "utf-8") as f:
+          f.write(updated)
+        print(f"  packages: {relative_path}")
+
+
+def rename_namespace(root: str, new_project: str) -> None:
+  """Rename the pgt C++ namespace, include root, and Buck target to the project."""
+  slug = namespace_slug(new_project)
+  if slug == OLD_NAMESPACE:
+    return
+  for relative_path in NAMESPACE_RENAME_TARGETS:
+    full_path = os.path.join(root, relative_path)
+    if not os.path.isfile(full_path):
+      continue
+    with open(full_path, "r", encoding = "utf-8") as f:
+      content = f.read()
+    # "pgt" appears only as the namespace, the include root, and the target
+    # name in these files - all of which move together.
+    updated = content.replace(OLD_NAMESPACE, slug)
+    if updated != content:
+      with open(full_path, "w", encoding = "utf-8") as f:
+        f.write(updated)
+      print(f"  namespace: {relative_path}")
+  # Last, because every path above is relative to the pre-move location.
+  old_dir = os.path.join(root, "cpp", "lib", OLD_NAMESPACE)
+  new_dir = os.path.join(root, "cpp", "lib", slug)
+  if os.path.isdir(old_dir) and not os.path.exists(new_dir):
+    shutil.move(old_dir, new_dir)
+    print(f"  namespace: cpp/lib/{OLD_NAMESPACE}/ -> cpp/lib/{slug}/")
 
 
 def prompt_yes_no(question: str) -> bool:
@@ -531,6 +741,31 @@ def _apply_drop_item(lines: list[str], values: tuple[str, ...], anchor: str, pat
   return lines
 
 
+def _apply_drop_range(lines: list[str], values: tuple[str, ...], path: str) -> list[str]:
+  start_needle, end_needle = values
+  start = next((i for i, line in enumerate(lines) if start_needle in line), None)
+  if start is None:
+    sys.exit("init_project.py: {}: no line containing {!r}".format(path, start_needle))
+  end = next((i for i in range(start + 1, len(lines)) if end_needle in lines[i]), None)
+  if end is None:
+    sys.exit(
+      "init_project.py: {}: found {!r} but no following {!r} to bound the "
+      "section".format(path, start_needle, end_needle)
+    )
+  return lines[:start] + lines[end:]
+
+
+def _apply_replace_text(lines: list[str], values: tuple[str, ...], path: str) -> list[str]:
+  old, new = values
+  text = "".join(lines)
+  if old not in text:
+    sys.exit(
+      "init_project.py: {}: text to replace is absent - this file has drifted "
+      "from init_project.py:\n  {!r}".format(path, old)
+    )
+  return text.replace(old, new, 1).splitlines(keepends = True)
+
+
 def apply_edits(root: str, edits: tuple[Edit, ...]) -> None:
   for edit in edits:
     full_path = os.path.join(root, edit.path)
@@ -543,6 +778,12 @@ def apply_edits(root: str, edits: tuple[Edit, ...]) -> None:
       updated = _apply_drop_target(list(lines), edit.values, edit.path)
     elif edit.kind == "drop_item":
       updated = _apply_drop_item(list(lines), edit.values, edit.anchor, edit.path)
+    elif edit.kind == "drop_range":
+      updated = _apply_drop_range(list(lines), edit.values, edit.path)
+    elif edit.kind == "replace_text":
+      updated = _apply_replace_text(lines, edit.values, edit.path)
+    elif edit.kind == "reset_file":
+      updated = [edit.values[0]]
     else:
       sys.exit("init_project.py: unknown edit kind {!r}".format(edit.kind))
     if updated != lines:
@@ -679,6 +920,15 @@ def main() -> None:
     strip_demo_groups(root, demo_groups)
   else:
     print("\nNo demo code removed.")
+
+  # AFTER pruning, deliberately. The demo groups' edits anchor on the demo
+  # packages' original names ("name": "polyglot-demo"), so renaming package
+  # identity first would leave those anchors unmatchable and the run would
+  # fail closed partway through.
+  print("\nRenaming package identity, C++ namespace, and template prose:")
+  rename_packages(root, new_project)
+  rename_namespace(root, new_project)
+  apply_edits(root, template_prose_edits(new_project))
 
   if args.keep_history:
     print("\n--keep-history: leaving this clone's git history and 'origin' untouched.")
