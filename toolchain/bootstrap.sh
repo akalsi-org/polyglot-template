@@ -2,7 +2,8 @@
 set -euo pipefail
 
 ROOT=${POLYGLOT_ROOT:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)}
-LOCAL=${POLYGLOT_LOCAL_DIR:-$ROOT/.local}
+. "$ROOT/toolchain/localdir.sh"
+LOCAL=$(ensure_local_dir "$ROOT")
 POLYGLOT_LOCK_FILE=${POLYGLOT_LOCK_FILE:-$ROOT/tools.lock.toml}
 export POLYGLOT_LOCK_FILE
 . "$ROOT/toolchain/lock.sh"

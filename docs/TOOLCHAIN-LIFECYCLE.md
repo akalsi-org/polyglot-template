@@ -34,6 +34,35 @@ Starlark lock before the repository's Python toolchain can exist. It never
 fetches, builds, or runs a product lane. All artifact installation and probing
 remain behind `bootstrap` and the pinned artifact metadata.
 
+## Worktrees Share One `.local`
+
+A linked `git worktree` does not bootstrap its own toolchain. `repo.sh`,
+`toolchain/bootstrap.sh`, and `toolchain/doctor.sh` all resolve the directory
+through `toolchain/localdir.sh`, which points a linked worktree at the main
+worktree's `.local` and creates `<worktree>/.local` as a symlink to it. A
+worktree is therefore usable immediately, with no second download and no
+second 890M toolchain install.
+
+The symlink is not cosmetic. `rules/toolchain.bzl`'s staging action reads
+`.local/downloads/<sha256>-<archive>` as a path relative to the buck2 project
+root, so the toolchain must be reachable *at* `<root>/.local` no matter where
+it physically lives - setting `POLYGLOT_LOCAL_DIR` alone moves `repo.sh`'s
+view but not the graph's, and every `stage_toolchain_archive` action then
+fails with "run ./repo.sh bootstrap" even though bootstrap has run.
+
+Two consequences worth knowing:
+
+- Worktrees sharing a `.local` must agree on `tools.lock.toml`. `<local>/bin`'s
+  wrappers are regenerated from that lock on every `setup_environment`, so a
+  worktree on a toolchain-bump branch rewrites them for the others, and
+  concurrent `./repo.sh` runs across worktrees race on that directory.
+- An explicit `POLYGLOT_LOCAL_DIR` is honoured verbatim and no symlink is
+  created, which is what a throwaway toolchain (`test/bootstrap-smoke.sh`)
+  needs. Set it for a worktree that must not share.
+
+If `<worktree>/.local` already exists as a real directory, resolution fails
+closed rather than replacing somebody's installed toolchain.
+
 ## Recovery And Rollback
 
 Use the public commands; do not patch `.local/toolchain`, `.local/downloads`,

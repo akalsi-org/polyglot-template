@@ -3,7 +3,12 @@ set -euo pipefail
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 export POLYGLOT_ROOT=${POLYGLOT_ROOT:-$ROOT}
-export POLYGLOT_LOCAL_DIR=${POLYGLOT_LOCAL_DIR:-$ROOT/.local}
+. "$ROOT/toolchain/localdir.sh"
+# Always <root>/.local - a linked worktree gets a symlink to the main
+# worktree's copy. rules/toolchain.bzl reads .local/downloads relative to the
+# buck2 project root, so this path is not negotiable; see localdir.sh.
+POLYGLOT_LOCAL_DIR=$(ensure_local_dir "$ROOT")
+export POLYGLOT_LOCAL_DIR
 . "$ROOT/toolchain/wrappers.sh"
 
 # Every buck2 --show-output path below is relative to the repository root, so
