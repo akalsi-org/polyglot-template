@@ -28,14 +28,14 @@ py_test(
   srcs = [
     "test_example.py",
     "test_fastbytes.py",
-    "test_helpers_test.py",
+    "test_testlib.py",
     "test_pyfast_extension.py",
     "test_stubs.py",
   ],
   deps = [
     "//python/lib/fastbytes:fastbytes",
     "//python/lib/example:example",
-    "//python/lib:test_helpers",
+    "//python/lib:testlib",
     ":pyfast_test_extension",
   ],
 )
@@ -50,14 +50,14 @@ py_compileall_check(
   srcs = [
     "test_example.py",
     "test_fastbytes.py",
-    "test_helpers_test.py",
+    "test_testlib.py",
     "test_pyfast_extension.py",
     "test_stubs.py",
   ],
   deps = [
     "//python/lib/example:example",
     "//python/lib/fastbytes:fastbytes",
-    "//python/lib:test_helpers",
+    "//python/lib:testlib",
     "//python/app/hello:hello",
     # Contributes extension_init.py (this package's own py_extension
     # init_src), which is a real .py under python/test and therefore has to
@@ -71,7 +71,7 @@ pyright_check(
   deps = [
     "//python/lib/example:example",
     "//python/lib/fastbytes:fastbytes",
-    "//python/lib:test_helpers",
+    "//python/lib:testlib",
     "//python/app/hello:hello",
   ],
 )

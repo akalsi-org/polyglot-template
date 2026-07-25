@@ -27,7 +27,7 @@ class PythonTestRunnerTest(unittest.TestCase):
 
   def test_xfail_is_successful_and_reports_status(self) -> None:
     result, output = self._discover(
-      "from test_helpers import xfail\n"
+      "from testlib import xfail\n"
       "@xfail('known failure')\n"
       "def test_known_failure():\n"
       "  assert False\n"
@@ -39,7 +39,7 @@ class PythonTestRunnerTest(unittest.TestCase):
 
   def test_xpass_fails_and_reports_status(self) -> None:
     result, output = self._discover(
-      "from test_helpers import xfail\n"
+      "from testlib import xfail\n"
       "@xfail('fixed unexpectedly')\n"
       "def test_fixed():\n"
       "  assert True\n"
@@ -51,7 +51,7 @@ class PythonTestRunnerTest(unittest.TestCase):
 
   def test_skip_takes_precedence_over_xfail(self) -> None:
     result, output = self._discover(
-      "from test_helpers import skip, xfail\n"
+      "from testlib import skip, xfail\n"
       "@xfail('known failure')\n"
       "@skip('not applicable')\n"
       "def test_skipped():\n"
@@ -65,7 +65,7 @@ class PythonTestRunnerTest(unittest.TestCase):
 
   def test_parametrized_xfail_keeps_case_labels(self) -> None:
     result, output = self._discover(
-      "from test_helpers import parametrize, xfail\n"
+      "from testlib import parametrize, xfail\n"
       "@xfail('known failure')\n"
       "@parametrize([(1,), (2,)])\n"
       "def test_cases(value):\n"

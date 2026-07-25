@@ -534,7 +534,7 @@ _py_test_rule = rule(
 # files that some target named in `srcs`. An undeclared module therefore
 # imports and runs perfectly, but no action depends on it, so editing it
 # invalidates nothing - reproduced before this check existed by appending
-# invalid Python to python/lib/test_helpers.py, which left `./repo.sh
+# invalid Python to python/lib/testlib.py, which left `./repo.sh
 # coverage` reporting SUCCESS off a stale cached report.
 #
 # `dirs` is exactly the set of directories the lane claims to own, which

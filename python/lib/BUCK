@@ -3,7 +3,7 @@
 # python/lib/fastbytes, each with its own BUCK file and therefore its own
 # buck2 package boundary - a glob here could not see them anyway).
 #
-# test_helpers is imported by python/test/test_helpers_test.py and by
+# testlib is imported by python/test/test_testlib.py and by
 # tools/py_test_runner.py's own TestContext import, but belonged to no
 # target's srcs at all: the pinned interpreter resolved it off the live
 # PYTHONPATH tree while buck2 tracked nothing, so editing it invalidated
@@ -15,8 +15,8 @@
 load("//rules:python.bzl", "py_library")
 
 py_library(
-  name = "test_helpers",
+  name = "testlib",
   root = "python/lib",
-  srcs = ["test_helpers.py"],
+  srcs = ["testlib.py"],
   visibility = ["PUBLIC"],
 )

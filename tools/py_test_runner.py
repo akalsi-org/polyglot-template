@@ -12,9 +12,9 @@ import unittest
 from collections.abc import Callable, Sequence
 from typing import Any, TextIO
 
-# Import TestContext from python.lib.test_helpers if available or define fallback
+# Import TestContext from python.lib.testlib if available or define fallback
 try:
-  from test_helpers import TestContext
+  from testlib import TestContext
 except ImportError:
   import contextlib
 

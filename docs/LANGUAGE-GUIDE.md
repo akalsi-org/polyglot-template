@@ -53,7 +53,7 @@ database. Keep each extension's `.pyi` stub and `py.typed` marker in a checked-i
 source root so editor typing stays independent of the host target. Keep pure Python tests under
 `python/test/` as top-level `test_*` functions; `py_test()` discovers them
 with the repository's readable stdlib-only runner. Use `@parametrize`, `@skip`,
-`@skip_if`, and `@xfail` from `test_helpers` for function-test annotations.
+`@skip_if`, and `@xfail` from `testlib` for function-test annotations.
 `@xfail("reason")` reports a failing test as `XFAIL` with its reason; an xfail
 test that passes is an `XPASS` with its reason and fails the suite, so remove
 stale xfail annotations promptly.
