@@ -230,6 +230,10 @@ int runExpectingAbort(F&& f) {
       dup2(null, 1);
       dup2(null, 2);
     }
+    // Also reset the inherited doctest SIGABRT handler to the default, so the
+    // child's abort kills it directly instead of running doctest's crash
+    // narration at all (the stream redirect above is then defense in depth).
+    signal(SIGABRT, SIG_DFL);
     f();
     _exit(0);  // reaching here means the trap did NOT fire
   }

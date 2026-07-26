@@ -1,0 +1,53 @@
+# ThreadSanitizer suppressions for the pgt::mpsc queue tests.
+#
+#   TSAN_OPTIONS="suppressions=cpp/test/tsan.supp" ./mpsc_test
+#
+# WHAT IS SUPPRESSED, AND WHY IT IS A DECISION RATHER THAN AN INCONVENIENCE.
+#
+# The suppressed reports are all one class: a stale walker's atomic probe of a
+# descriptor slot -- the walk's acquire load, or a failed claim CAS (which TSan
+# counts as a write access) -- landing on bytes that concurrently serve as
+# another record's PAYLOAD, written and read with plain memcpy. This is
+# inherent to in-band descriptors in a variable-length ring: a walker starting
+# from a stale hint may compute a position that is currently interior to a live
+# record, probe it, and discard the result. The protocol is safe by content,
+# not by quiescence: a claim succeeds only against the exact freeWord(p) match
+# (Lemma 1 in the algorithm spec), so a probe of garbage can never produce a
+# valid claim, and the probed VALUE is never trusted -- only re-derived after
+# an acquire re-read.
+#
+# Formally, plain-write + concurrent atomic-read of the same location is still
+# a C++ data race, so TSan is right to report it and this file is the recorded
+# decision to accept it (team-lead ruling, 2026-07-25).
+#
+# THE CHEAP FIX, RECORDED SO NOBODY REDISCOVERS IT: descriptors only ever sit
+# at 64-byte (kGrain) boundaries, so only payload words at those offsets can be
+# racily probed. Writing just those words with relaxed atomic stores -- one
+# atomic store per 64 bytes of payload, the rest a plain memcpy -- would close
+# the formal race. Judged not worth the hot-path cost today; revisit if a
+# compiler or a non-TSO target ever gives a reason.
+#
+# SCOPE. Three rules because symbolization is not uniform across the shapes
+# this class produces (verified empirically -- each rule has shapes only it
+# matches, and together they take the suite to zero reports):
+#   - race:pgt::mpsc::Ring       payload memcpy frames inside Ring::write /
+#                                probes where the instantiation demangles with
+#                                its qualified name ([[gnu::always_inline]]
+#                                folds reserve into write, so the frame says
+#                                write, not reserve).
+#   - race:reserveSlow           instantiations over internal-linkage policies
+#                                (anonymous-namespace test policies) symbolize
+#                                as the BARE function name with no class.
+#   - race:*/pgt/mpsc/queue.hh   frames where the file survived but the
+#                                function name did not.
+#
+# WHAT THIS SHADOWS: a race whose stack passes through Ring code for any other
+# reason -- notably a genuine payload-vs-payload overlap between two writers --
+# is also suppressed. That class is independently caught by the differential
+# and stress tests' CONTENT validation (overlapping payloads cannot both
+# survive a byte-exact compare), which is why the shadow is acceptable. If the
+# library ever grows a TSan-aware inlining knob and stable symbolization,
+# tighten back to reserve/reserveSlow function rules only.
+race:pgt::mpsc::Ring
+race:reserveSlow
+race:*/pgt/mpsc/queue.hh

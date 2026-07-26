@@ -93,9 +93,15 @@ struct CountingPolicy : DefaultPolicy {
   void onBusy(u32_t) noexcept { std::this_thread::yield(); }
 };
 
+// NO-PROGRESS deadline, not an absolute budget: reset() on every delivered
+// record. A wedged queue still fails within one window; a slow-but-progressing
+// drain does not. The distinction matters on shared/CI boxes -- an absolute
+// budget made the oversubscribed regime flake purely under external load,
+// presenting as "passes standalone, fails in-suite".
 struct Deadline {
-  std::chrono::steady_clock::time_point end =
-      std::chrono::steady_clock::now() + std::chrono::seconds(60);
+  static constexpr std::chrono::seconds kWindow{60};
+  std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now() + kWindow;
+  void reset() { end = std::chrono::steady_clock::now() + kWindow; }
   [[nodiscard]] bool expired() const { return std::chrono::steady_clock::now() > end; }
 };
 
@@ -243,6 +249,7 @@ TEST_CASE_TEMPLATE("multi-writer randomized stress with aborts", Q, Mpsc) {
     }
     q.pop();
     ++delivered;
+    dl.reset();  // progress-based, same rationale as contentionRun
     REQUIRE_MESSAGE(bad == 0, "record ", delivered, " writer ", w, " seq ", seq, " corrupt");
   }
   for (auto& t : writers) t.join();
@@ -365,6 +372,7 @@ void contentionRun(u32_t writers, u32_t records, bool pin) {
     ++next_seq[w];
     q.pop();
     ++delivered;
+    dl.reset();  // progress: only a stall with NO delivery should expire it
   }
 
   stop.store(true, std::memory_order_relaxed);
@@ -463,7 +471,15 @@ TEST_CASE("reader recovers a forged dead kClaimed record and the ring resumes") 
   REQUIRE(r.data() != nullptr);
   CHECK(r.size() == sizeof(buf));
   q.pop();
-  CHECK(q.peek().data() == nullptr);  // aborted record skipped to the frontier
+  // Liveness is SPACED off the reader's busy path (Ring::kBusyPollsPerLiveness):
+  // /proc is consulted only after consecutive busy polls of the same record, so
+  // recovery needs polling, not one call. The busy record is never delivered
+  // meanwhile. (Edited by impl-queue when the spacing landed; a single peek()
+  // here previously recovered immediately, and the write() below then wedged
+  // this thread -- it is both writer and the only possible recoverer.)
+  for (int i = 0; i < 100000 && reclaims.load() == 0; ++i) {
+    CHECK(q.peek().data() == nullptr);
+  }
   CHECK(reclaims.load() == 1);
 
   // Recovery stamped the successor, so the ring accepts claims again; the new

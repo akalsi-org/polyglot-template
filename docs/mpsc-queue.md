@@ -539,6 +539,27 @@ store reintroduces the same failure on any weakly-ordered target.
 A `CLEARED` record needs no successor stamp — its owner already did that — so recovery
 there is the ABORTED store alone.
 
+### Liveness is spaced, not timed
+
+`threadAlive()` is an `open`/`read`/`close` of `/proc/<tid>/stat` — three syscalls.
+The reader reaches it whenever it meets an in-flight record, and a writer preempted
+inside its reserve-to-commit window makes that the reader's **hot** path, not a cold
+one. Measured under oversubscription before this was fixed: the reader went
+syscall-bound at ~450 records/s with 36 s of system time in a 60 s run.
+
+So the check is **spaced**: consulted only after `kBusyPollsPerLiveness` consecutive
+busy observations of the same record, with the streak reset on any progress.
+
+This is check-spacing, **not** a timeout, and the distinction is the one this whole
+design turns on. No wall-clock constant exists anywhere. Death is still only ever
+declared on proof, never inferred from elapsed time. What is delayed is how often the
+reader *asks* — a dead writer's recovery is deferred by a bounded number of spins, not
+by a duration, and a stopped-but-alive writer is treated exactly as before.
+
+Note the interaction with policy: a pure-spin `onBusy` plus a preempted writer is a
+syscall storm even with spacing. Any deployment that is not pinned and
+under-subscribed wants a policy whose `onBusy` yields.
+
 ### Liveness check
 
 ```c
@@ -858,9 +879,20 @@ underneath it. Baseline and mutant must be built from the *same* snapshot.
    static property, but no dynamic test manufactures a claimant stopped across a lap
    boundary holding a stale expected word.
 
-So: **the memory-ordering table is not dynamically testable on x86-64.** TSO hides
-weakened orderings, and ThreadSanitizer cannot see them either — it detects data races,
-and a weakened memory order is not a race. Those orderings are validated by the model
+So: **the memory-ordering table is not dynamically testable on x86-64** — and the
+reason is stronger than "TSO hides it". Weakening the commit or vouch store from
+release to relaxed produces **byte-identical machine code** on x86-64, verified by
+objdump diff: x86-TSO makes every store a release, and GCC does not exploit relaxed's
+reordering licence in this translation unit. There is only one binary, so no test, no
+stress duration, and no sanitizer could ever distinguish the two. ThreadSanitizer is
+doubly blind here — it detects data races, and a weakened memory order is not a race.
+
+On aarch64 the two differ genuinely: release emits `stlr`, relaxed emits a plain
+`str`, and the CPU may reorder the latter. A weakly-ordered machine is therefore the
+only dynamic instrument that can tell whether the suite guards the ordering table at
+all. `cpp/test/ordering_mutants.sh` runs that campaign; it must run on real aarch64
+hardware, since qemu-user executes guest threads under the *host's* memory model and
+an emulated pass is exactly as blind as x86. Those orderings are validated by the model
 check, by review, and by compiled evidence (GCC 13.3 `-O2`: `atomic_thread_fence(seq_cst)`
 lowers to `lock or [rsp],0` on x86-64, `dmb ish` on AArch64) — **and by nothing else.**
 Anyone editing them should know no test will catch a mistake. Closing that properly

@@ -316,8 +316,26 @@ class Ring {
           return {arena_ + ((rd_ + kHeaderSize) & mask_), committedLen(d)};
         case State::kClaimed:
         case State::kCleared: {
+          // Liveness stays OFF the busy path. threadAlive() is an open/read/
+          // close of /proc/<tid>/stat; consulting it on every busy poll turns a
+          // preempted writer into a syscall-bound reader (measured ~450 rec/s
+          // with 36s of sys time under oversubscription). Instead the check is
+          // SPACED: only after kBusyPollsPerLiveness consecutive busy
+          // observations of the same record, streak reset on any progress.
+          // This is check-spacing, NOT a timeout -- no wall-clock constant
+          // exists, exact-liveness semantics are unchanged, and a dead writer's
+          // recovery is delayed by a bounded spin, not by time.
+          if (rd_ != busy_pos_) {
+            busy_pos_ = rd_;
+            busy_streak_ = 0;
+          }
+          if (++busy_streak_ < kBusyPollsPerLiveness) {
+            policy_.onBusy(busy_streak_);
+            return {};
+          }
+          busy_streak_ = 0;  // alive verdicts re-space; recovery resets via pop
           if (threadAlive(tidOf(d))) {
-            policy_.onBusy(0);
+            policy_.onBusy(kBusyPollsPerLiveness);
             return {};
           }
           // MUST re-read. Between the load of d and the liveness check the owner
@@ -585,6 +603,15 @@ class Ring {
   u32_t shift_ = 0;
   u64_t epoch_ = 0;  // binding identity for WriterTls; 0 only while unbound
   u64_t rd_ = 0;     // reader-private cursor; a cache of read_pos
+
+  // Liveness check spacing for the reader's busy path (see peek). Iterations,
+  // not time: 128 relaxed polls of an L1-resident line is well under a live
+  // writer's typical reserve-to-commit window, so a live writer normally
+  // commits before the reader ever pays for /proc.
+  static constexpr u32_t kBusyPollsPerLiveness = 128;
+  u64_t busy_pos_ = kInvalidPos;  // record the busy streak is counting against
+  u32_t busy_streak_ = 0;         // consecutive busy polls at busy_pos_
+
   [[no_unique_address]] Policy policy_{};
 };
 
