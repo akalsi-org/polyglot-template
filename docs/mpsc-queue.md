@@ -838,12 +838,49 @@ passes proves nothing; this one demonstrably sees the defect classes that matter
 being killed at 12.5 GB — that configuration does not fit exhaustively on the machine
 used. Report it as bounded, never as exhaustive.
 
-**Not covered.** Spin is sequentially consistent, so **none of this validates the
-memory-ordering table**. That rests on the per-operation justifications and on compiled
-evidence (GCC 13.3 `-O2`: `atomic_thread_fence(seq_cst)` lowers to `lock or [rsp],0`
-on x86-64 and `dmb ish` on AArch64). Closing it properly wants a weak-memory tool —
-GenMC, Nidhugg, or CBMC — or herd7 for individual litmus shapes. Also outside every
-tool used: the OS-level ordering assumption documented under Liveness.
+**Mutation-tested.** Nine deliberate defects injected into a snapshot copy of the
+library were each caught by the suite: commit publishing the reservation extent rather
+than the used length, the short-commit trailer omitted, `pop` advancing by payload
+length, `recover()` skipping the successor stamp, a SIGSTOPped writer treated as dead,
+the double-commit trap disabled, `attach`'s magic/version check removed, the
+`freeWord(0)` stamp removed, and the FREE position truncated to 6 bits.
+
+The campaign itself needed a methodology fix worth recording: mutating the live tree
+while other work was landing produced a false "caught" — the baseline had changed
+underneath it. Baseline and mutant must be built from the *same* snapshot.
+
+**Three mutations were NOT caught, and this is the important result:**
+
+1. `commit`'s release store weakened to relaxed — no test fails, deterministically,
+   across the differential and a four-writer stress run.
+2. The vouch store weakened to relaxed — same.
+3. FREE-carries-position at the *protocol* level. A weakened encoding is caught as a
+   static property, but no dynamic test manufactures a claimant stopped across a lap
+   boundary holding a stale expected word.
+
+So: **the memory-ordering table is not dynamically testable on x86-64.** TSO hides
+weakened orderings, and ThreadSanitizer cannot see them either — it detects data races,
+and a weakened memory order is not a race. Those orderings are validated by the model
+check, by review, and by compiled evidence (GCC 13.3 `-O2`: `atomic_thread_fence(seq_cst)`
+lowers to `lock or [rsp],0` on x86-64, `dmb ish` on AArch64) — **and by nothing else.**
+Anyone editing them should know no test will catch a mistake. Closing that properly
+wants a weak-memory tool (GenMC, Nidhugg, CBMC) or herd7 for individual litmus shapes.
+
+Also outside every tool used: the OS-level ordering assumption documented under
+Liveness.
+
+**A known, deliberate data race.** A stale walker's atomic probe can land on bytes that
+are concurrently another record's payload, written by plain `memcpy`. Formally that is
+a C++ data race — plain write against atomic read — and ThreadSanitizer reports it.
+It is protocol-benign by Lemma 1: a stale read is discarded by the content check, and a
+claim can only succeed against an exact `freeWord(p)` match. It is inherent to in-band
+descriptors in a variable-length ring.
+
+The decision is to document and suppress rather than fix. The cheap fix, if it ever
+matters, is available and worth recording: descriptors only ever sit at 64-byte
+boundaries, so only payload words at those offsets can be racily read — writing just
+those with relaxed atomic stores would close it at a cost of one store per 64 bytes of
+payload, leaving the rest a plain `memcpy`.
 
 ## Known gaps
 
