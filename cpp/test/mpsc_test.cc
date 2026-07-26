@@ -606,19 +606,26 @@ TEST_CASE("Region: geometry, mirror aliasing, arena init") {
 }
 
 TEST_CASE("Region: control area sizes the writer registry past one page") {
-  // 100 shards: 128 + 100*256 + 2*8 + 100*8 control bytes, ~7 pages. The
-  // registry must be genuinely RESERVED in the control area, not fitting in
-  // page padding by luck -- SpscRing does its claim fetch_or on these words.
+  // 127 shards, DELIBERATELY not a rounder number: the registry must be
+  // genuinely RESERVED in the control area, not fitting in page-align slack by
+  // luck (SpscRing does its claim fetch_or on these words). At 100 shards,
+  // deleting the WriterSlot term from controlBytes() is INVISIBLE -- 25744 and
+  // 26544 bytes both round to 7 pages (impl-spsc's finding). At 127, the slot
+  // table is exactly what pushes the control area across its final page
+  // boundary (32656 -> 8 pages without it, 33672 -> 9 with), so that break
+  // fails the layout REQUIRE below deterministically. The constant is
+  // 4 KiB-page-specific.
+  constexpr u32_t kShards = 127;
   Config cfg;
   cfg.capacity = 4096;
-  cfg.shards = 100;
+  cfg.shards = kShards;
   Region r;
   REQUIRE(Region::create(cfg, r));
   CHECK(r.bitmapWords() == 2);
-  CHECK(reinterpret_cast<std::byte*>(r.writerSlots() + 100) <= r.arena(0));
+  REQUIRE(reinterpret_cast<std::byte*>(r.writerSlots() + kShards) <= r.arena(0));
   CHECK((reinterpret_cast<uintptr_t>(r.arena(0)) & (pageSize() - 1)) == 0);
   CHECK(r.writerBitmap()[1] == 0);
-  for (u32_t i = 0; i < 100; ++i) {
+  for (u32_t i = 0; i < kShards; ++i) {
     u64_t w;
     std::memcpy(&w, r.arena(i), sizeof(w));
     REQUIRE(w == freeWord(0));
@@ -627,13 +634,13 @@ TEST_CASE("Region: control area sizes the writer registry past one page") {
   int const fd = dup(r.fd());
   Region s;
   REQUIRE(Region::attach(fd, s));
-  CHECK(s.shardCount() == 100);
+  CHECK(s.shardCount() == kShards);
   CHECK(s.bitmapWords() == 2);
   // Registry writes made through one mapping are visible through the other.
-  s.writerSlots()[99].owner_tid = 4242;
+  s.writerSlots()[kShards - 1].owner_tid = 4242;
   asm volatile("" ::: "memory");
-  CHECK(r.writerSlots()[99].owner_tid == 4242);
-  s.writerSlots()[99].owner_tid = 0;
+  CHECK(r.writerSlots()[kShards - 1].owner_tid == 4242);
+  s.writerSlots()[kShards - 1].owner_tid = 0;
 }
 
 TEST_CASE("Region: attach verifies magic, version, and file size") {

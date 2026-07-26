@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include <bit>
+#include <cassert>
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
@@ -262,6 +263,15 @@ bool Region::create(Config const& cfg, Region& out) noexcept {
   r.arena_ = base + ctrl;
   r.capacity_ = cap;
   r.shard_count_ = cfg.shards;
+  // The control layout is computed TWICE, independently: controlBytes() sums
+  // it, the accessors walk it pointer by pointer. They agree today, but
+  // nothing structural keeps them agreeing -- a field added to one and not the
+  // other diverges silently, and at an exact-fit shard count that puts the
+  // WriterSlot table inside arena 0, where registration corrupts the first
+  // records written. Check the walk against the reservation at EVERY shard
+  // count, not only in the boundary test's configuration.
+  assert(reinterpret_cast<std::byte const*>(r.writerSlots() + r.shardCount()) <= r.arena(0) &&
+         "control-area accessors walk past controlBytes()'s reservation");
   out = std::move(r);
   return true;
 }
@@ -317,6 +327,12 @@ bool Region::attach(int fd, Region& out) noexcept {
   r.arena_ = base + ctrl;
   r.capacity_ = hdr.capacity;
   r.shard_count_ = hdr.shards;
+  // Same accessor-walk-vs-controlBytes() agreement check as create(); see the
+  // comment there. attach() needs it independently -- a version skew between
+  // the creating and attaching binaries is exactly a divergence of the two
+  // computations.
+  assert(reinterpret_cast<std::byte const*>(r.writerSlots() + r.shardCount()) <= r.arena(0) &&
+         "control-area accessors walk past controlBytes()'s reservation");
   out = std::move(r);
   return true;
 }
