@@ -36,6 +36,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <thread>
@@ -759,6 +760,89 @@ TEST_CASE("xproc: last-slot claim in a multi-word bitmap never touches arena 0")
   u32_t const b = popTag(q);
   CHECK(a + b == 14099);  // {7000, 7099} in either order
   CHECK(q.peek().data() == nullptr);
+  q.detachWriter();  // release this thread's Sharded binding for later tests
+}
+
+// ---------------------------------------------------------------------------
+// 10. Registry at the EXACT-FIT shard count (per team-lead's analysis). The
+// control layout is computed twice -- controlBytes() sums it, the region.hh
+// accessors walk it -- and a divergence between them is only OBSERVABLE from
+// outside when the control area has no page-align slack to hide it. At most
+// counts the slack is hundreds of bytes (2128 at the 100 shards the geometry
+// test uses); at the exact-fit count it is ZERO, so any accessor walking one
+// byte past the reservation lands in arena 0, where registry writes corrupt
+// the first records written. The count is DERIVED from the live page size and
+// struct sizes -- hardcoding 15 would silently stop being a boundary test on
+// a 16 KiB-page machine. Complements test 9 (which catches the converse:
+// controlBytes() under-reserving) and the create()/attach() assert in
+// region.cc (which catches both at every count, debug builds only).
+// ---------------------------------------------------------------------------
+namespace {
+
+// Shard count whose control area fills its final page exactly (zero slack).
+// Where the host page size admits none below the cap, the tightest-slack
+// count is returned and the test degrades to a near-boundary test.
+u32_t exactFitShards(sz_t page, sz_t* slack_out) {
+  u32_t best = 1;
+  sz_t best_slack = page;
+  for (u32_t s = 1; s <= 256; ++s) {
+    sz_t const bytes = sizeof(Control) + s * sizeof(ShardControl) +
+                       ((s + 63) / 64) * sizeof(u64_t) + s * sizeof(WriterSlot);
+    sz_t const slack = (page - bytes % page) % page;
+    if (slack < best_slack) {
+      best_slack = slack;
+      best = s;
+      if (slack == 0) break;
+    }
+  }
+  *slack_out = best_slack;
+  return best;
+}
+
+void runRegistryBoundary(u32_t shards, sz_t page) {
+  auto* const qp = new MultiSpsc;  // fresh heap instance; deliberately leaked
+  MultiSpsc& q = *qp;
+  REQUIRE(MultiSpsc::create(smallConfig(shards), q));
+  REQUIRE(q.attachReader());
+  Region const& r = q.region();
+
+  REQUIRE(reinterpret_cast<std::byte const*>(r.writerSlots() + shards) <= r.arena(0));
+  REQUIRE(reinterpret_cast<std::uintptr_t>(r.arena(0)) % page == 0);
+
+  // A committed record in arena 0 as the canary...
+  REQUIRE(q.attachWriter());  // slot 0
+  pushTag(q, 8000);
+
+  // ...then exercise EVERY byte the registry protocol can ever write -- all
+  // occupancy bits, every owner_tid, every generation, through the LAST slot,
+  // whose final byte is exactly what an overflow pushes into arena 0.
+  for (u32_t s = 1; s < shards; ++s) {
+    std::atomic_ref<u64_t>(r.writerBitmap()[s / 64])
+        .fetch_or(1ull << (s % 64), std::memory_order_acq_rel);
+    std::atomic_ref<u32_t>(r.writerSlots()[s].owner_tid)
+        .store(100000u + s, std::memory_order_release);
+    std::atomic_ref<u32_t>(r.writerSlots()[s].generation).fetch_add(1, std::memory_order_acq_rel);
+  }
+  std::atomic_ref<u32_t>(r.writerSlots()[0].generation).fetch_add(1, std::memory_order_acq_rel);
+
+  // The canary drains intact: no registry write reached ring bytes.
+  CHECK(popTag(q) == 8000);
+  CHECK(q.peek().data() == nullptr);
+  q.detachWriter();
+}
+
+}  // namespace
+
+TEST_CASE("xproc: registry writes at the exact-fit shard count stay out of arena 0") {
+  sz_t const page = static_cast<sz_t>(::sysconf(_SC_PAGESIZE));
+  REQUIRE(page > 0);
+  sz_t slack = 0;
+  u32_t const s = exactFitShards(page, &slack);
+  CAPTURE(page);
+  CAPTURE(s);
+  CAPTURE(slack);  // 0 on 4 KiB pages (s == 15); tightest available otherwise
+  runRegistryBoundary(s, page);      // zero slack: the only observable-overflow count
+  runRegistryBoundary(s + 1, page);  // first count past the boundary: spills to a new page
 }
 
 }  // namespace
