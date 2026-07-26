@@ -31,8 +31,16 @@ set -u
 
 REPS="${ORDERING_MUTANT_REPS:-20}"
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-DT="$ROOT/.local/toolchain/x86_64-linux-musl/doctest-2.5.3/doctest-2.5.3"
-[ -d "$DT" ] || DT="$(find "$ROOT/.local/toolchain" -maxdepth 3 -type d -name 'doctest-*' | head -1)/$(basename "$(find "$ROOT/.local/toolchain" -maxdepth 4 -type d -name 'doctest-*' | head -1)")"
+# Locate doctest by the header itself, never by a triple: this script's whole
+# purpose is to run on aarch64, so hardcoding an x86 toolchain path would break
+# it on the one machine it exists for. The include root is the directory holding
+# doctest/doctest.h.
+DT_HDR="$(find "$ROOT/.local/toolchain" -path '*/doctest/doctest.h' -print -quit 2>/dev/null)"
+if [ -z "$DT_HDR" ]; then
+  echo "INVALID: doctest headers not found under .local/toolchain -- run ./repo.sh bootstrap" >&2
+  exit 2
+fi
+DT="$(dirname "$(dirname "$DT_HDR")")"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 

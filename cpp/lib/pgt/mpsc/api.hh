@@ -116,6 +116,14 @@
 // participant. This is a contract on callers, not something the queue can defend
 // against -- the no-timeout rule means a slow writer and a hung writer are
 // deliberately indistinguishable.
+//
+// A corollary for SINGLE-THREADED writer+reader use: recovery and busy-record
+// progress happen only inside peek(). A thread that is both the writer and the
+// reader can therefore wedge itself -- if its write path blocks on the ring
+// (e.g. behind a dead writer's record awaiting recovery, or behind capacity
+// that only draining frees), the peek() that would unblock it never runs.
+// Such a caller must interleave peek()/pop() with its writes and must not spin
+// in reserve()/write() retry loops.
 
 #include "pgt/core/types.hh"
 #include "pgt/mpsc/desc.hh"
