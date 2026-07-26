@@ -2,11 +2,18 @@
 //
 // NOT part of the doctest unit-test path -- build and run by hand:
 //
-//   g++ -std=c++20 -O2 -march=native -Wall -Wextra -I cpp/lib
+//   g++ -std=c++20 -O2 -DNDEBUG -march=native -Wall -Wextra -I cpp/lib
 //       cpp/bench/mpsc/bench_ring.cc cpp/lib/pgt/mpsc/queue.cc
 //       cpp/lib/pgt/mpsc/region.cc cpp/lib/pgt/mpsc/policy.cc
 //       -lpthread -o bench_ring          (one command line)
 //   /tmp/bench_ring <mode> [args]      (run with no args for usage)
+//
+// -DNDEBUG IS NOT OPTIONAL, and -O2 does not imply it. Without it the debug
+// misuse asserts run inside the measured loops -- including a gettid() syscall
+// per commit -- which inflated an entire campaign by ~3.5x and INVERTED its
+// headline result (clear-forward appeared to beat fetch_add at w=1; it does
+// not). The #error below makes that mistake impossible rather than merely
+// documented.
 //
 // Build a second binary with -DPGT_MPSC_NO_PREFETCH for the prefetch A/B.
 //
@@ -24,6 +31,11 @@
 // the same extent) and has no identity, no recovery, and no misuse guards.
 // That is the point: it prices the claim mechanism alone, and the restriction
 // FAVORS fetch_add.
+
+// A debug build measures the asserts, not the queue. See the note above.
+#ifndef NDEBUG
+#error "bench_ring must be built with -DNDEBUG; -O2 alone does not define it"
+#endif
 
 #include "pgt/mpsc/queue.hh"
 
