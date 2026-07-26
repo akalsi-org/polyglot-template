@@ -29,7 +29,10 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <fstream>
+#include <iterator>
 #include <random>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -295,6 +298,56 @@ TEST_CASE("REGRESSION: Sharded<Ring> K>=2 attachReader succeeds and delivers") {
   REQUIRE(ShardedMpsc::create(tinyConfig(4), q));
   REQUIRE(q.attachReader());   // K=4: requires holder-idempotent Ring::attachReader
   perWriterDifferential(q, /*writers=*/4, /*per_writer=*/500, /*max_payload=*/64);
+}
+
+// Memory-ordering conformance: pins the ordering table as SOURCE TEXT.
+//
+// On x86 an ordering weakening is provably unobservable at runtime -- release
+// and relaxed stores compile to byte-identical code (verified by objdump diff
+// of stock vs mutated queue.cc at -O2) -- so no behavioral test on an x86 dev
+// box can catch release->relaxed. This check is the only same-machine tripwire
+// that can exist: it verifies TEXT, not SEMANTICS. The semantic instrument is
+// cpp/test/ordering_mutants.sh run on weakly-ordered hardware (the
+// ubuntu-24.04-arm CI runner); the authority is the "Memory ordering" table in
+// docs/mpsc-queue.md. Several anchors below are also the sed anchors that
+// ordering_mutants.sh mutates -- rewording them breaks the campaign, which is
+// why anchor drift must fail loudly here.
+TEST_CASE("ordering table conformance -- TEXT, not semantics") {
+  // Locate queue.hh from this file's compile-time path; skip loudly if the
+  // layout moved rather than passing vacuously.
+  std::string path = __FILE__;
+  sz_t const cut = path.rfind("cpp/test/");
+  REQUIRE(cut != std::string::npos);
+  path = path.substr(0, cut) + "cpp/lib/pgt/mpsc/queue.hh";
+  std::ifstream in(path);
+  REQUIRE_MESSAGE(in.good(), "cannot open ", path,
+                  " -- ordering conformance NOT checked; fix the path derivation");
+  std::string const src((std::istreambuf_iterator<char>(in)),
+                        std::istreambuf_iterator<char>());
+  auto expect = [&](char const* anchor, char const* which) {
+    std::string const msg =
+        std::string("ordering anchor missing: ") + which + " [" + anchor +
+        "]. This test verifies TEXT, not SEMANTICS. If the change is deliberate:"
+        " update the Memory ordering table in docs/mpsc-queue.md, this anchor, and"
+        " the sed anchors in cpp/test/ordering_mutants.sh in the SAME commit. The"
+        " semantic check is ordering_mutants.sh on the arm64 CI runner; x86 cannot"
+        " observe the difference (byte-identical codegen).";
+    REQUIRE_MESSAGE(src.find(anchor) != std::string::npos, msg);
+  };
+  // The two anchors ordering_mutants.sh mutates (comment text load-bearing):
+  expect("std::memory_order_release);  // publishes the payload", "commit store release");
+  expect("std::memory_order_release);  // vouch (I2)", "vouch release");
+  // The rest of the table:
+  expect("hintRef().store(q, std::memory_order_release)", "write_hint store release");
+  expect("hintRef().load(std::memory_order_acquire)", "write_hint load acquire");
+  expect("readPosRef().store(rd_, std::memory_order_release)", "read_pos store release");
+  expect("readPosRef().load(std::memory_order_acquire)", "read_pos load acquire");
+  expect("compare_exchange_strong(expected, mine, std::memory_order_acquire",
+         "claim CAS acquire on success");
+  expect("descRef(p).load(std::memory_order_acquire)", "walk load acquire");
+  expect("descRef(rd_).load(std::memory_order_acquire)", "reader peek load acquire");
+  expect("withState(d, State::kAborted), std::memory_order_release",
+         "recover ABORTED store release");
 }
 
 TEST_CASE("registration: Spsc rejects a second writer; MultiSpsc reports kNoSlot") {

@@ -328,14 +328,22 @@ class Ring {
           if (rd_ != busy_pos_) {
             busy_pos_ = rd_;
             busy_streak_ = 0;
+            busy_threshold_ = kBusyPollsPerLiveness;
           }
-          if (++busy_streak_ < kBusyPollsPerLiveness) {
+          if (++busy_streak_ < busy_threshold_) {
             policy_.onBusy(busy_streak_);
             return {};
           }
-          busy_streak_ = 0;  // alive verdicts re-space; recovery resets via pop
+          busy_streak_ = 0;
           if (threadAlive(tidOf(d))) {
-            policy_.onBusy(kBusyPollsPerLiveness);
+            // Alive verdict: re-space GEOMETRICALLY (128, 256, ... capped). A
+            // record held across a whole scheduling quantum would otherwise
+            // cost a /proc call every ~100ns of spin; doubling keeps the
+            // first-check latency while flattening the steady-state syscall
+            // rate. Dead-writer recovery latency is unaffected -- growth
+            // happens only on alive verdicts, and any progress resets it.
+            if (busy_threshold_ < kBusyPollsPerLivenessMax) busy_threshold_ *= 2;
+            policy_.onBusy(busy_threshold_);
             return {};
           }
           // MUST re-read. Between the load of d and the liveness check the owner
@@ -609,8 +617,10 @@ class Ring {
   // writer's typical reserve-to-commit window, so a live writer normally
   // commits before the reader ever pays for /proc.
   static constexpr u32_t kBusyPollsPerLiveness = 128;
+  static constexpr u32_t kBusyPollsPerLivenessMax = 1u << 16;  // cap on re-spacing
   u64_t busy_pos_ = kInvalidPos;  // record the busy streak is counting against
   u32_t busy_streak_ = 0;         // consecutive busy polls at busy_pos_
+  u32_t busy_threshold_ = kBusyPollsPerLiveness;  // doubles per alive verdict
 
   [[no_unique_address]] Policy policy_{};
 };

@@ -692,4 +692,73 @@ TEST_CASE_TEMPLATE("xproc: dead reader process yields kReaderDead on the full pa
   q.detachWriter();
 }
 
+// ---------------------------------------------------------------------------
+// 9. Adversarial registry geometry, cross-process (extends mpsc_test's
+// 100-shard geometry test per impl-region). With enough shards to spill the
+// bitmap into a second word, a fresh process is steered onto the LAST slot --
+// its claim fetch_or lands in the final bitmap word -- and every registry
+// write must stay inside the control area: the record committed in arena 0
+// before the claims must drain intact afterwards, and no bit beyond the valid
+// range may appear. An under-sized control area fails the bound check first.
+// ---------------------------------------------------------------------------
+TEST_CASE("xproc: last-slot claim in a multi-word bitmap never touches arena 0") {
+  // 127 shards: bitmapWords() == 2 AND, on a 4 KiB-page host, the WriterSlot
+  // table is what pushes the control area across its final page boundary --
+  // chosen so that a controlBytes() that stops reserving the slot table is
+  // NOT absorbed by page-align slack but fails the bound check below.
+  // (Verified: with the slot-table term deleted from controlBytes, this
+  // REQUIRE fires; at 100 shards the alignment slack swallowed the bug.)
+  constexpr u32_t kShards = 127;  // valid bits in word 1: 0..62
+  static MultiSpsc q;
+  REQUIRE(MultiSpsc::create(smallConfig(kShards), q));
+  REQUIRE(q.attachReader());
+  Region const& r = q.region();
+  int const fd = r.fd();
+
+  // Layout bound: the registry ends at or before arena 0. This is the check
+  // that fails FAST if controlBytes() ever stops reserving the slot table.
+  REQUIRE(reinterpret_cast<std::byte const*>(r.writerSlots() + kShards) <= r.arena(0));
+  REQUIRE(r.bitmapWords() == 2);
+
+  // A real record in arena 0 first, so registry writes have something to hit.
+  REQUIRE(q.attachWriter());  // this thread wins slot 0
+  pushTag(q, 7000);
+
+  // Steer the next attacher onto slot 99: mark slots 1..98 occupied-mid-handoff
+  // (bit set, owner 0 -- the state the recycler must skip). White-box, but only
+  // through the shared words the registry contract already publishes.
+  for (u32_t s = 1; s < kShards - 1; ++s) {
+    std::atomic_ref<u64_t>(r.writerBitmap()[s / 64]).fetch_or(1ull << (s % 64),
+                                                              std::memory_order_acq_rel);
+  }
+
+  pid_t const w = fork();
+  REQUIRE(w >= 0);
+  if (w == 0) {
+    alarm(20);
+    static MultiSpsc cq;
+    if (!MultiSpsc::attach(fd, cq)) _exit(1);
+    if (!cq.attachWriter()) _exit(2);  // only slot 99 is claimable
+    if (!childWriteTag(cq, 7099)) _exit(3);
+    _exit(0);
+  }
+  int const st = waitFor(w);
+  REQUIRE(WIFEXITED(st));
+  REQUIRE(WEXITSTATUS(st) == 0);
+
+  // The child's claim is visible here (shared registry, second mapping)...
+  u64_t const word1 = std::atomic_ref<u64_t>(r.writerBitmap()[1]).load(std::memory_order_acquire);
+  CHECK((word1 & (1ull << 62)) != 0);   // slot 126's bit, the last valid one
+  CHECK((word1 >> 63) == 0);            // nothing landed beyond the table
+  CHECK(std::atomic_ref<u32_t>(r.writerSlots()[kShards - 1].owner_tid)
+            .load(std::memory_order_acquire) != 0);
+
+  // ...and neither the claims nor the slot writes touched ring bytes: both
+  // records drain intact, ring 0's first and ring 99's only.
+  u32_t const a = popTag(q);
+  u32_t const b = popTag(q);
+  CHECK(a + b == 14099);  // {7000, 7099} in either order
+  CHECK(q.peek().data() == nullptr);
+}
+
 }  // namespace

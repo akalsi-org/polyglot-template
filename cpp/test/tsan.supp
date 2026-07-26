@@ -27,27 +27,15 @@
 # the formal race. Judged not worth the hot-path cost today; revisit if a
 # compiler or a non-TSO target ever gives a reason.
 #
-# SCOPE. Three rules because symbolization is not uniform across the shapes
-# this class produces (verified empirically -- each rule has shapes only it
-# matches, and together they take the suite to zero reports):
-#   - race:pgt::mpsc::Ring       payload memcpy frames inside Ring::write /
-#                                probes where the instantiation demangles with
-#                                its qualified name ([[gnu::always_inline]]
-#                                folds reserve into write, so the frame says
-#                                write, not reserve).
-#   - race:reserveSlow           instantiations over internal-linkage policies
-#                                (anonymous-namespace test policies) symbolize
-#                                as the BARE function name with no class.
-#   - race:*/pgt/mpsc/queue.hh   frames where the file survived but the
-#                                function name did not.
+# SCOPE: one rule. PGT_MPSC_HOT (queue.hh) drops [[gnu::always_inline]] under
+# TSan, so the reserve/reserveSlow frame survives on the atomic side of every
+# report in this class; the substring match covers both the qualified name and
+# the bare "reserveSlow" that internal-linkage (anonymous-namespace policy)
+# instantiations symbolize to. Verified empirically: 5 reports without the
+# rule, 0 with it, across the full suite including the contention regimes.
 #
-# WHAT THIS SHADOWS: a race whose stack passes through Ring code for any other
-# reason -- notably a genuine payload-vs-payload overlap between two writers --
-# is also suppressed. That class is independently caught by the differential
-# and stress tests' CONTENT validation (overlapping payloads cannot both
-# survive a byte-exact compare), which is why the shadow is acceptable. If the
-# library ever grows a TSan-aware inlining knob and stable symbolization,
-# tighten back to reserve/reserveSlow function rules only.
-race:pgt::mpsc::Ring
-race:reserveSlow
-race:*/pgt/mpsc/queue.hh
+# WHAT THIS DOES NOT SHADOW (the earlier broad rules did): a genuine
+# payload-vs-payload overlap between two writers reports with only
+# Ring::write/memcpy frames, matches nothing here, and stays visible. If a
+# new report survives this file, treat it as real.
+race:reserve
