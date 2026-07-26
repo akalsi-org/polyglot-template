@@ -1,0 +1,23 @@
+# Variable-length MPSC shared-memory queues (see api.hh for the contract and
+# the queue variants). Consumers include "pgt/mpsc/*.hh" via the staged
+# cpp/lib include tree (see rules/cxx.bzl's IncludeTreeSet).
+load("//rules:cxx.bzl", "cxx_library")
+
+cxx_library(
+  name = "mpsc",
+  srcs = [
+    "policy.cc",
+    "queue.cc",
+    "region.cc",
+  ],
+  hdrs = [
+    "api.hh",
+    "desc.hh",
+    "liveness.hh",
+    "policy.hh",
+    "queue.hh",
+    "region.hh",
+  ],
+  deps = ["//cpp/lib/pgt/core:pgt_core"],
+  visibility = ["//cpp/..."],
+)

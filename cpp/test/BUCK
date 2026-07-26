@@ -37,3 +37,26 @@ cxx_test(
   srcs = ["core_test.cc"],
   deps = ["//cpp/lib/pgt/core:pgt_core"],
 )
+
+cxx_test(
+  name = "mpsc_test",
+  srcs = ["mpsc_test.cc"],
+  deps = ["//cpp/lib/pgt/mpsc:mpsc"],
+)
+
+# Fork-based fault injection (killed/stopped writers, misuse death tests).
+# Separate from mpsc_test so that one stays runnable under TSan.
+cxx_test(
+  name = "mpsc_fault_test",
+  srcs = ["mpsc_fault_test.cc"],
+  deps = ["//cpp/lib/pgt/mpsc:mpsc"],
+)
+
+# Variant coverage beyond Mpsc: Spsc, ShardedMpsc (K >= 2), MultiSpsc.
+# Per-writer-subsequence differential, registration semantics, and the
+# K >= 2 attachReader regression. Owner: impl-queue.
+cxx_test(
+  name = "mpsc_variants_test",
+  srcs = ["mpsc_variants_test.cc"],
+  deps = ["//cpp/lib/pgt/mpsc:mpsc"],
+)
