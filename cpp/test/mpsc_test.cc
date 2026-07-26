@@ -15,13 +15,19 @@
 //
 // Fork-based fault injection (killed/stopped writers, misuse death tests) is in
 // mpsc_fault_test.cc, kept separate so this file stays runnable under TSan.
+// TSan: run with TSAN_OPTIONS="suppressions=cpp/test/tsan.supp" -- the file
+// documents the one accepted race class (stale walker probes vs plain payload
+// bytes, inherent to in-band descriptors) and the recorded cheap fix.
 
+#include "pgt/core/platform.hh"
 #include "pgt/mpsc/desc.hh"
 #include "pgt/mpsc/queue.hh"
 #include "pgt/mpsc/region.hh"
 
 #include <doctest/doctest.h>
 
+#include <pthread.h>
+#include <sched.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
@@ -69,12 +75,22 @@ class ReferenceQueue {
 struct CountingPolicy : DefaultPolicy {
   std::atomic<u64_t>* reclaims = nullptr;
   std::atomic<u64_t>* wraps = nullptr;
+  std::atomic<u64_t>* contended = nullptr;
   void onReclaim(u64_t, u32_t, u64_t) noexcept {
     if (reclaims != nullptr) reclaims->fetch_add(1, std::memory_order_relaxed);
   }
   void onWrap(u64_t) noexcept {
     if (wraps != nullptr) wraps->fetch_add(1, std::memory_order_relaxed);
   }
+  void onContended(u32_t) noexcept {
+    if (contended != nullptr) contended->fetch_add(1, std::memory_order_relaxed);
+    cpuRelax();
+  }
+  // Yield on busy rather than pure spin: peek() consults /proc for EVERY
+  // in-flight encounter, so a spinning reader in a preemption-heavy regime
+  // goes syscall-bound (measured: ~450 records/s, 36s of sys time) -- and the
+  // yield is also what hands a preempted mid-window writer its core back.
+  void onBusy(u32_t) noexcept { std::this_thread::yield(); }
 };
 
 struct Deadline {
@@ -97,10 +113,8 @@ Config smallConfig() {
 // Differential against the reference, single writer, exact byte-stream compare.
 // ---------------------------------------------------------------------------
 TEST_CASE_TEMPLATE("differential vs reference queue with short commits", Q, Mpsc) {
-  // Static storage in every writer-bearing test: Ring's writer TLS identifies
-  // its queue by address, so stack-frame reuse across tests can leak a stale
-  // read_cache into a fresh queue (regression test in mpsc_fault_test.cc).
-  static Q q;
+  Q q;  // stack-constructed, as a caller would: the epoch-identity regression
+        // (mpsc_fault_test.cc) lived exactly in the recreate-at-same-address path
   REQUIRE(Q::create(smallConfig(), q));
   REQUIRE(q.attachReader());
   ReferenceQueue ref;
@@ -164,7 +178,7 @@ TEST_CASE_TEMPLATE("multi-writer randomized stress with aborts", Q, Mpsc) {
   constexpr u32_t kWriters = 4;
   constexpr u32_t kRecords = 8000;  // per writer; ~2000 laps of a 4 KiB ring
 
-  static Q q;  // static: see the differential test
+  Q q;
   REQUIRE(Q::create(smallConfig(), q));
   REQUIRE(q.attachReader());
 
@@ -172,7 +186,7 @@ TEST_CASE_TEMPLATE("multi-writer randomized stress with aborts", Q, Mpsc) {
   std::vector<std::thread> writers;
   writers.reserve(kWriters);
   for (u32_t w = 0; w < kWriters; ++w) {
-    writers.emplace_back([&failed, w] {  // q has static storage: no capture needed
+    writers.emplace_back([&q, &failed, w] {
       REQUIRE(q.attachWriter());
       std::mt19937 rng(w * 7919u + 17u);
       std::byte buf[512];
@@ -241,11 +255,152 @@ TEST_CASE_TEMPLATE("multi-writer randomized stress with aborts", Q, Mpsc) {
 }
 
 // ---------------------------------------------------------------------------
+// Contention regimes. An unpinned test can go green without ever contending --
+// the scheduler runs the writers sequentially and the claim CAS never loses --
+// so each regime ASSERTS contention happened (nonzero onContended). A
+// contention test recording zero contention did not test what it claims.
+// ---------------------------------------------------------------------------
+namespace {
+
+// Shared body: W writer threads x R tagged records into a 4 KiB ring, reader
+// validates per-writer FIFO + integrity + completeness. `pin` fixes writer i
+// to core i+1 and the reader to core 0 for real cross-core coherence traffic;
+// unpinned oversubscription instead forces preemption inside the
+// reserve-to-commit window.
+// NO doctest assertions inside the hot loops: each recorded assertion costs
+// more than the queue op it checks, and an assertion-throttled reader under
+// oversubscription fails the deadline without testing anything. Errors are
+// recorded in plain state; every thread is JOINED before the first assertion
+// fires (a throwing REQUIRE with joinable threads is std::terminate).
+void contentionRun(u32_t writers, u32_t records, bool pin) {
+  std::atomic<u64_t> contended{0};
+  CountingPolicy pol;
+  pol.contended = &contended;
+  Ring<CountingPolicy> q{pol};
+  REQUIRE(Ring<CountingPolicy>::create(smallConfig(), q));
+  REQUIRE(q.attachReader());
+  // Affinity is INHERITED by spawned threads and outlives the test, so save
+  // the entry mask and restore it on every exit path -- a leaked pin quietly
+  // collapses every later test onto one core.
+  cpu_set_t entry_mask;
+  CPU_ZERO(&entry_mask);
+  REQUIRE(pthread_getaffinity_np(pthread_self(), sizeof(entry_mask), &entry_mask) == 0);
+  struct AffinityGuard {
+    cpu_set_t const* mask;
+    ~AffinityGuard() { pthread_setaffinity_np(pthread_self(), sizeof(*mask), mask); }
+  } guard{&entry_mask};
+  if (pin) {
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    CPU_SET(0, &set);
+    REQUIRE(pthread_setaffinity_np(pthread_self(), sizeof(set), &set) == 0);
+  }
+
+  std::atomic<bool> stop{false};
+  std::atomic<u32_t> writer_errors{0};
+  std::vector<std::thread> ts;
+  ts.reserve(writers);
+  for (u32_t w = 0; w < writers; ++w) {
+    ts.emplace_back([&q, &stop, &writer_errors, w, records] {
+      if (!q.attachWriter()) {
+        writer_errors.fetch_add(1, std::memory_order_relaxed);
+        return;
+      }
+      std::byte buf[96];
+      for (u32_t seq = 0; seq < records && !stop.load(std::memory_order_relaxed); ++seq) {
+        sz_t const n = 8 + (w * 31 + seq) % 80;
+        std::memcpy(buf, &w, 4);
+        std::memcpy(buf + 4, &seq, 4);
+        for (sz_t i = 8; i < n; ++i) buf[i] = patternByte(w, seq, i);
+        while (!q.write(buf, n)) {
+          if (q.status() != Status::kFull || stop.load(std::memory_order_relaxed)) {
+            writer_errors.fetch_add(1, std::memory_order_relaxed);
+            return;
+          }
+          std::this_thread::yield();
+        }
+      }
+      q.detachWriter();
+    });
+    if (pin) {
+      cpu_set_t set;
+      CPU_ZERO(&set);
+      CPU_SET(static_cast<int>(w + 1), &set);
+      if (pthread_setaffinity_np(ts.back().native_handle(), sizeof(set), &set) != 0) {
+        writer_errors.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+  }
+
+  std::vector<u32_t> next_seq(writers, 0);
+  u64_t delivered = 0;
+  u64_t const expected = static_cast<u64_t>(writers) * records;
+  char error[128] = {0};
+  Deadline dl;
+  while (delivered < expected) {
+    ReadSpan const r = q.peek();
+    if (r.data() == nullptr) {
+      if (dl.expired()) {
+        std::snprintf(error, sizeof(error), "timed out with %llu/%llu delivered",
+                      static_cast<unsigned long long>(delivered),
+                      static_cast<unsigned long long>(expected));
+        break;
+      }
+      continue;
+    }
+    u32_t w = ~0u;
+    u32_t seq = ~0u;
+    bool ok = r.size() >= 8;
+    if (ok) {
+      std::memcpy(&w, r.data(), 4);
+      std::memcpy(&seq, r.data() + 4, 4);
+      ok = w < writers && seq == next_seq[w];
+    }
+    for (sz_t i = 8; ok && i < r.size(); ++i) ok = r[i] == patternByte(w, seq, i);
+    if (!ok) {
+      std::snprintf(error, sizeof(error), "record %llu (writer %u seq %u) corrupt",
+                    static_cast<unsigned long long>(delivered), w, seq);
+      break;
+    }
+    ++next_seq[w];
+    q.pop();
+    ++delivered;
+  }
+
+  stop.store(true, std::memory_order_relaxed);
+  // On the error path writers may sit in the full-ring retry loop; they exit
+  // on observing `stop` (the retry loop checks it), so joining cannot hang.
+  for (auto& t : ts) t.join();
+
+  REQUIRE_MESSAGE(error[0] == '\0', error);
+  CHECK(writer_errors.load() == 0);
+  for (u32_t w = 0; w < writers; ++w) CHECK(next_seq[w] == records);
+  // The loop-closer: the claim CAS demonstrably lost at least once, so the
+  // interleavings this test exists for actually occurred.
+  CHECK(contended.load() > 0);
+}
+
+}  // namespace
+
+TEST_CASE("pinned one-writer-per-core contention with proof of contention") {
+  unsigned const cores = std::thread::hardware_concurrency();
+  if (cores < 3) return;  // need the reader's core plus two writer cores
+  u32_t const writers = std::min(4u, cores - 1);
+  contentionRun(writers, 20000, /*pin=*/true);
+}
+
+TEST_CASE("oversubscribed writers preempted inside the reserve-to-commit window") {
+  unsigned const cores = std::max(1u, std::thread::hardware_concurrency());
+  u32_t const writers = std::min(2 * cores, 48u);  // deliberately > core count
+  contentionRun(writers, 24000u / writers + 100, /*pin=*/false);
+}
+
+// ---------------------------------------------------------------------------
 // Capacity behaviour: kFull under backpressure, recovery after draining,
 // kTooLarge for records that can never fit.
 // ---------------------------------------------------------------------------
 TEST_CASE_TEMPLATE("full is backpressure and too-large is permanent", Q, Mpsc) {
-  static Q q;  // static: see the differential test
+  Q q;
   REQUIRE(Q::create(smallConfig(), q));
   REQUIRE(q.attachReader());
 
@@ -281,9 +436,10 @@ TEST_CASE_TEMPLATE("full is backpressure and too-large is permanent", Q, Mpsc) {
 // kCleared flavour deterministically; this covers the kClaimed flavour.)
 // ---------------------------------------------------------------------------
 TEST_CASE("reader recovers a forged dead kClaimed record and the ring resumes") {
-  static std::atomic<u64_t> reclaims{0};
-  static CountingPolicy pol{{}, &reclaims, nullptr};
-  static Ring<CountingPolicy> q{pol};  // static: see the differential test
+  std::atomic<u64_t> reclaims{0};
+  CountingPolicy pol;
+  pol.reclaims = &reclaims;
+  Ring<CountingPolicy> q{pol};
   REQUIRE(Ring<CountingPolicy>::create(smallConfig(), q));
   REQUIRE(q.attachReader());
 
@@ -327,7 +483,7 @@ TEST_CASE("reader recovers a forged dead kClaimed record and the ring resumes") 
 // asserts that rather than exactly-once.
 // ---------------------------------------------------------------------------
 TEST_CASE("reader restart resumes at read_pos with at-least-once delivery") {
-  static Mpsc q;  // static: see the differential test
+  Mpsc q;
   REQUIRE(Mpsc::create(smallConfig(), q));
 
   auto push_tagged = [&](u32_t tag) {
@@ -376,7 +532,7 @@ TEST_CASE("reader restart resumes at read_pos with at-least-once delivery") {
 }
 
 TEST_CASE("attachReader refuses a rival while the holder lives, re-admits the holder") {
-  static Mpsc q;  // static: see the differential test
+  Mpsc q;
   REQUIRE(Mpsc::create(smallConfig(), q));
   REQUIRE(q.attachReader());  // this thread, alive
 
@@ -431,6 +587,37 @@ TEST_CASE("Region: geometry, mirror aliasing, arena init") {
     CHECK(r.writerSlots()[i].generation == 0);
   }
   CHECK(reinterpret_cast<std::byte*>(r.writerSlots() + 3) <= r.arena(0));
+}
+
+TEST_CASE("Region: control area sizes the writer registry past one page") {
+  // 100 shards: 128 + 100*256 + 2*8 + 100*8 control bytes, ~7 pages. The
+  // registry must be genuinely RESERVED in the control area, not fitting in
+  // page padding by luck -- SpscRing does its claim fetch_or on these words.
+  Config cfg;
+  cfg.capacity = 4096;
+  cfg.shards = 100;
+  Region r;
+  REQUIRE(Region::create(cfg, r));
+  CHECK(r.bitmapWords() == 2);
+  CHECK(reinterpret_cast<std::byte*>(r.writerSlots() + 100) <= r.arena(0));
+  CHECK((reinterpret_cast<uintptr_t>(r.arena(0)) & (pageSize() - 1)) == 0);
+  CHECK(r.writerBitmap()[1] == 0);
+  for (u32_t i = 0; i < 100; ++i) {
+    u64_t w;
+    std::memcpy(&w, r.arena(i), sizeof(w));
+    REQUIRE(w == freeWord(0));
+  }
+  // Attach re-derives the multi-page geometry.
+  int const fd = dup(r.fd());
+  Region s;
+  REQUIRE(Region::attach(fd, s));
+  CHECK(s.shardCount() == 100);
+  CHECK(s.bitmapWords() == 2);
+  // Registry writes made through one mapping are visible through the other.
+  s.writerSlots()[99].owner_tid = 4242;
+  asm volatile("" ::: "memory");
+  CHECK(r.writerSlots()[99].owner_tid == 4242);
+  s.writerSlots()[99].owner_tid = 0;
 }
 
 TEST_CASE("Region: attach verifies magic, version, and file size") {
@@ -488,7 +675,9 @@ TEST_CASE("Region: kFile create over a dirty reused file still initialises") {
   REQUIRE(Region::create(cfg, r));
   u64_t w;
   std::memcpy(&w, r.arena(0), sizeof(w));
-  CHECK(w == freeWord(0));
+  // REQUIRE, not CHECK: with a garbage descriptor at position 0 the ring
+  // exercise below spins forever, so fail here instead of hanging.
+  REQUIRE(w == freeWord(0));
   CHECK(r.control()->reader_tid == 0);
   CHECK(r.writerBitmap()[0] == 0);
 

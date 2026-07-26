@@ -81,12 +81,11 @@ u32_t drainTagged(FaultRing& q, u32_t next, u32_t upto) {
 // record, and everything committed before and after is delivered exactly once.
 // ---------------------------------------------------------------------------
 TEST_CASE("killed mid-reservation writer is reclaimed; no loss, no duplication") {
-  // Static queue storage in every test here: Ring's writer TLS identifies its
-  // queue by address, and stack-frame reuse across tests leaks a stale
-  // read_cache into a fresh queue (see the REGRESSION test at the bottom).
-  static std::atomic<u64_t> reclaims{0};
-  static CountingPolicy pol{{}, &reclaims};
-  static FaultRing q{pol};
+  std::atomic<u64_t> reclaims{0};
+  CountingPolicy pol;
+  pol.reclaims = &reclaims;
+  FaultRing q{pol};  // stack-constructed, as a caller would (the epoch-identity
+                     // regression at the bottom pins why this is safe now)
   REQUIRE(FaultRing::create(smallConfig(), q));
   REQUIRE(q.attachReader());
   REQUIRE(q.attachWriter());  // registers the atfork handler before any fork
@@ -127,9 +126,10 @@ TEST_CASE("killed mid-reservation writer is reclaimed; no loss, no duplication")
 // order and reclaims exactly the dead reservations.
 // ---------------------------------------------------------------------------
 TEST_CASE("repeated writer kills across wraps") {
-  static std::atomic<u64_t> reclaims{0};
-  static CountingPolicy pol{{}, &reclaims};
-  static FaultRing q{pol};  // static: see the first test
+  std::atomic<u64_t> reclaims{0};
+  CountingPolicy pol;
+  pol.reclaims = &reclaims;
+  FaultRing q{pol};
   REQUIRE(FaultRing::create(smallConfig(), q));
   REQUIRE(q.attachReader());
   REQUIRE(q.attachWriter());
@@ -164,9 +164,10 @@ TEST_CASE("repeated writer kills across wraps") {
 // SIGCONT the writer finishes and its record arrives intact.
 // ---------------------------------------------------------------------------
 TEST_CASE("stopped writer is never reclaimed and resumes cleanly on SIGCONT") {
-  static std::atomic<u64_t> reclaims{0};
-  static CountingPolicy pol{{}, &reclaims};
-  static FaultRing q{pol};  // static: see the first test
+  std::atomic<u64_t> reclaims{0};
+  CountingPolicy pol;
+  pol.reclaims = &reclaims;
+  FaultRing q{pol};
   REQUIRE(FaultRing::create(smallConfig(), q));
   REQUIRE(q.attachReader());
   REQUIRE(q.attachWriter());
@@ -218,9 +219,17 @@ template <typename F>
 int runExpectingAbort(F&& f) {
   pid_t const pid = fork();
   if (pid == 0) {
-    // Quiet the trap's stderr line so test output stays readable.
+    // Quiet BOTH streams. stderr carries the trap's diagnostic line; stdout
+    // carries doctest's inherited SIGABRT handler, which narrates "test case
+    // CRASHED" plus a partial "Status: FAILURE!" summary from a child that was
+    // never going to finish the run -- _exit discipline does not help here,
+    // because a signal handler is not an atexit handler. The abort itself is
+    // what the parent asserts on; the child's output is pure pollution.
     int const null = open("/dev/null", O_WRONLY);
-    if (null >= 0) dup2(null, 2);
+    if (null >= 0) {
+      dup2(null, 1);
+      dup2(null, 2);
+    }
     f();
     _exit(0);  // reaching here means the trap did NOT fire
   }
@@ -231,11 +240,9 @@ int runExpectingAbort(F&& f) {
 }  // namespace
 
 TEST_CASE("misuse traps abort the process instead of corrupting") {
-  static FaultRing q;  // static: see the first test; created once across SUBCASEs
-  static bool const created = FaultRing::create(smallConfig(), q);
-  static bool const attached = created && q.attachWriter();
-  REQUIRE(created);
-  REQUIRE(attached);  // atfork handler in place before the forks below
+  FaultRing q;
+  REQUIRE(FaultRing::create(smallConfig(), q));
+  REQUIRE(q.attachWriter());  // atfork handler in place before the forks below
 
   SUBCASE("double commit") {
     int const st = runExpectingAbort([&] {
@@ -289,7 +296,7 @@ TEST_CASE("misuse traps abort the process instead of corrupting") {
 // A dead reader turns permanent backpressure into a definite error.
 // ---------------------------------------------------------------------------
 TEST_CASE("writer distinguishes a dead reader from a slow one") {
-  static FaultRing q;  // static: see the first test
+  FaultRing q;
   REQUIRE(FaultRing::create(smallConfig(), q));
 
   // A reader attaches from a thread that then exits: its tid goes dead.
@@ -309,15 +316,13 @@ TEST_CASE("writer distinguishes a dead reader from a slow one") {
 }  // namespace
 
 // ---------------------------------------------------------------------------
-// KNOWN BUG (reported): Ring's WriterTls identifies its owning queue by
-// pointer. A queue constructed at the address of a destroyed one -- guaranteed
-// here by running the same noinline frame twice -- inherits the previous
-// queue's read_cache, which then LEADS the new ring's reader. That violates
-// read_cache's own contract ("may lag, never leads"): reserveSlow treats every
-// walk as stale and spins forever, and the same stale value reaching the
-// admission check can over-admit into unconsumed records. may_fail: this
-// documents the defect without blocking the suite; it flips to passing when
-// queue identity gains a generation/epoch.
+// Regression, now load-bearing: WriterTls once identified its owning queue by
+// POINTER, so a queue constructed at the address of a destroyed one --
+// guaranteed here by running the same noinline frame twice -- inherited the
+// previous queue's read_cache, which then LED the new ring's reader (its own
+// contract: may lag, never leads) and reserveSlow span forever. Fixed by
+// giving queue identity a never-zero epoch; this test found the bug and now
+// pins the fix.
 // ---------------------------------------------------------------------------
 namespace {
 [[gnu::noinline]] void tlsEpisode(int rounds) {
@@ -333,8 +338,7 @@ namespace {
 }
 }  // namespace
 
-TEST_CASE("REGRESSION: queue recreated at a reused address inherits stale writer TLS"
-          * doctest::may_fail()) {
+TEST_CASE("REGRESSION: queue recreated at a reused address must not inherit writer TLS") {
   pid_t const pid = fork();
   REQUIRE(pid >= 0);
   if (pid == 0) {

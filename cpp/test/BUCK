@@ -52,11 +52,35 @@ cxx_test(
   deps = ["//cpp/lib/pgt/mpsc:mpsc"],
 )
 
+# CROSS-PROCESS fault injection: children attach by fd into fresh mappings and
+# objects (never the parent's), then are killed, stopped, zombified, or forked
+# mid-protocol. Every break of the recovery/liveness/registry protocol was
+# verified to make one of these tests fail before it was trusted to pass.
+cxx_test(
+  name = "mpsc_xproc_test",
+  srcs = ["mpsc_xproc_test.cc"],
+  deps = ["//cpp/lib/pgt/mpsc:mpsc"],
+)
+
 # Variant coverage beyond Mpsc: Spsc, ShardedMpsc (K >= 2), MultiSpsc.
 # Per-writer-subsequence differential, registration semantics, and the
-# K >= 2 attachReader regression. Owner: impl-queue.
+# K >= 2 attachReader regression. Also the affinity regimes: pinned
+# one-writer-per-core for real cross-core coherence traffic, and
+# oversubscribed for preemption inside the reserve-to-commit window, with an
+# onContended witness asserting the run actually contended.
 cxx_test(
   name = "mpsc_variants_test",
   srcs = ["mpsc_variants_test.cc"],
+  deps = ["//cpp/lib/pgt/mpsc:mpsc"],
+)
+
+# Cross-process fault injection over a shared memfd: writers killed
+# mid-reservation, SIGSTOPped writers correctly NOT reclaimed, zombie writers
+# treated as dead, reader restart, and slot recycling gated on both proven
+# death and a drained ring. These paths are reachable only with real
+# processes and real signals -- no unit test and no model check covers them.
+cxx_test(
+  name = "mpsc_xproc_test",
+  srcs = ["mpsc_xproc_test.cc"],
   deps = ["//cpp/lib/pgt/mpsc:mpsc"],
 )

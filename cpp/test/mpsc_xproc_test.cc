@@ -18,6 +18,10 @@
 //     recycled; drained ring must be; generation bumps on recycle
 //   * fork with an inherited reservation on the sharded SPSC path: the child
 //     traps instead of committing, then wins its OWN slot and writes
+//   * kShm named rendezvous: a successor reader shm_opens the name UNAIDED --
+//     no inherited fd -- and resumes; the one thing kShm buys over kMemfd
+//   * dead reader turns full into kReaderDead on Spsc / ShardedMpsc /
+//     MultiSpsc (the Mpsc flavor lives in mpsc_fault_test)
 
 #include "pgt/mpsc/queue.hh"
 #include "pgt/mpsc/region.hh"
@@ -26,6 +30,7 @@
 
 #include <fcntl.h>
 #include <signal.h>
+#include <sys/mman.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -577,6 +582,114 @@ TEST_CASE("xproc: forked child cannot commit an inherited reservation; re-regist
   u32_t const b = popTag(q);
   CHECK(a + b == 9000);  // {4000, 5000} in either order
   CHECK(q.peek().data() == nullptr);
+}
+
+// ---------------------------------------------------------------------------
+// 7. kShm named rendezvous. Same restart shape as test 4, but both readers
+// reach the region by shm_open on the NAME, with no inherited fd in play --
+// which is the one thing the kShm backend buys over kMemfd, and the deployment
+// where reader restart earns its keep: the crashed reader's successor needs no
+// surviving donor for the descriptor.
+// ---------------------------------------------------------------------------
+TEST_CASE("xproc: shm-named reader restart; successor rendezvous by name, at-least-once") {
+  char name[64];
+  std::snprintf(name, sizeof(name), "/pgt_xproc_%d", getpid());
+  ::shm_unlink(name);  // clear a stale name from any crashed prior run
+  Config cfg = smallConfig();
+  cfg.backend = Backend::kShm;
+  cfg.name = name;
+  static Mpsc q;
+  REQUIRE(Mpsc::create(cfg, q));
+  REQUIRE(q.attachWriter());
+  for (u32_t t = 0; t < 10; ++t) pushTag(q, t);
+
+  Pipe ready, go;
+  pid_t const r1 = fork();
+  REQUIRE(r1 >= 0);
+  if (r1 == 0) {
+    alarm(30);
+    int const sfd = ::shm_open(name, O_RDWR, 0);  // rendezvous BY NAME, unaided
+    if (sfd < 0) _exit(1);
+    static Mpsc cq;
+    if (!Mpsc::attach(sfd, cq)) _exit(2);
+    if (!cq.attachReader()) _exit(3);
+    ready.csend('A');
+    if (go.crecv() != 'g') _exit(4);
+    u32_t tag = 0;
+    for (u32_t t = 0; t < 3; ++t) {
+      if (!childPopTag(cq, &tag) || tag != t) _exit(5);
+    }
+    if (!childPopTag(cq, &tag, /*pop=*/false) || tag != 3) _exit(6);  // peek, no pop
+    ready.csend('B');
+    raise(SIGKILL);
+    _exit(7);
+  }
+  REQUIRE(ready.recv() == 'A');
+  go.send('g');
+  REQUIRE(ready.recv() == 'B');
+  int st = waitFor(r1);
+  REQUIRE(WIFSIGNALED(st));
+
+  pid_t const r2 = fork();
+  REQUIRE(r2 >= 0);
+  if (r2 == 0) {
+    alarm(30);
+    int const sfd = ::shm_open(name, O_RDWR, 0);
+    if (sfd < 0) _exit(1);
+    static Mpsc cq;
+    if (!Mpsc::attach(sfd, cq)) _exit(2);
+    if (!cq.attachReader()) _exit(3);  // takeover from the proven-dead R1
+    u32_t tag = 0;
+    for (u32_t t = 3; t < 10; ++t) {  // tag 3 redelivered: at-least-once
+      if (!childPopTag(cq, &tag) || tag != t) _exit(10 + t);
+    }
+    _exit(0);
+  }
+  st = waitFor(r2);
+  REQUIRE(WIFEXITED(st));
+  CHECK(WEXITSTATUS(st) == 0);
+  // The caller owns the name's lifetime (region.cc): unlink it here.
+  REQUIRE(::shm_unlink(name) == 0);
+}
+
+// ---------------------------------------------------------------------------
+// 8. A dead reader turns permanent backpressure into a definite error, on the
+// variants mpsc_fault_test does not cover (its flavor is Mpsc, thread-exit,
+// same process). Here the reader is a separate PROCESS that attached and
+// exited, and the writer discovers its death through the full path's liveness
+// check: kReaderDead, never kFull.
+// ---------------------------------------------------------------------------
+TEST_CASE_TEMPLATE("xproc: dead reader process yields kReaderDead on the full path", Q,  //
+                   Spsc, ShardedMpsc, MultiSpsc) {
+  static Q* qs = new Q;  // fresh heap instance per instantiation; never reused
+  Q& q = *qs;
+  REQUIRE(Q::create(smallConfig(/*shards=*/2), q));
+  int const fd = q.region().fd();
+  REQUIRE(fd >= 0);
+
+  // The reader attaches from a process that then exits: its recorded tid is
+  // provably dead once reaped.
+  pid_t const r = fork();
+  REQUIRE(r >= 0);
+  if (r == 0) {
+    alarm(20);
+    static Q cq;
+    if (!Q::attach(fd, cq)) _exit(1);
+    if (!cq.attachReader()) _exit(2);
+    _exit(0);
+  }
+  int const st = waitFor(r);
+  REQUIRE(WIFEXITED(st));
+  REQUIRE(WEXITSTATUS(st) == 0);
+
+  REQUIRE(q.attachWriter());
+  std::byte buf[64] = {};
+  int writes = 0;
+  while (q.write(buf, sizeof(buf))) {
+    REQUIRE(++writes < 1000);  // one ring's worth at most; runaway means no full
+  }
+  CHECK(q.status() == Status::kReaderDead);
+  q.detachWriter();
 }
 
 }  // namespace

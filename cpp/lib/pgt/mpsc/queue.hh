@@ -101,6 +101,24 @@ inline constexpr u64_t kInvalidPos = ~u64_t{0};
   std::abort();
 }
 
+// Hot-path force-inline, degraded under TSan. TSan erases inlined frames from
+// race stacks, which forces cpp/test/tsan.supp into file-wide rules that shadow
+// real races (a payload-vs-payload overlap would hide behind them); with the
+// frames intact the suppressions can name exact functions. Zero cost to
+// production builds -- the attribute is unchanged when TSan is off.
+#if defined(__SANITIZE_THREAD__)
+#define PGT_MPSC_TSAN 1
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define PGT_MPSC_TSAN 1
+#endif
+#endif
+#if defined(PGT_MPSC_TSAN)
+#define PGT_MPSC_HOT
+#else
+#define PGT_MPSC_HOT [[gnu::always_inline]]
+#endif
+
 template <typename Policy = DefaultPolicy>
 class Ring {
  public:
@@ -157,7 +175,7 @@ class Ring {
   // corrupts). Workaround if simultaneous reservations are needed: give the
   // rings distinct Policy types, which gives them distinct instantiations and
   // therefore distinct reservation slots.
-  [[gnu::always_inline]] inline WriteSpan reserve(sz_t n) noexcept {
+  PGT_MPSC_HOT inline WriteSpan reserve(sz_t n) noexcept {
     WriterTls& t = tls_;
     assert(t.p == kInvalidPos && "reserve while a reservation is held");  // misuse (d)
     if (t.owner_epoch != epoch_) [[unlikely]] {
@@ -462,7 +480,7 @@ class Ring {
   }
 
   // Post-claim protocol, shared by both claim paths. Small enough to inline.
-  [[gnu::always_inline]] inline WriteSpan finishClaim(u64_t p, u64_t need, sz_t n, u64_t mine,
+  PGT_MPSC_HOT inline WriteSpan finishClaim(u64_t p, u64_t need, sz_t n, u64_t mine,
                                                       u32_t hops) noexcept {
     u64_t const q = p + need;
     // Stamp the successor as FREE(q). CAS from observed -- belt and braces; by
@@ -979,27 +997,37 @@ class Sharded {
 
   // ---- writer ----------------------------------------------------------------
 
+  // The attachment guard is a release-mode TRAP, not an assert (verified by
+  // mpsc_xproc_test's fork scenario, which delivers a half-filled record to
+  // the reader when this check is compiled out): an unattached thread routes
+  // to shard 0 by default, and the worst caller of that shape is a fork()
+  // child -- the atfork handler cleared its routing TLS, but a single-writer
+  // ring's reservation lives in the ring OBJECT, which the child inherited by
+  // copy. Letting the call through commits the parent's in-flight reservation
+  // from a second process: silent corruption on a ring whose correctness
+  // argument is sole ownership. The sticky-binding cross-check stays
+  // debug-only; it guards refactors of this class, not caller misuse.
   [[nodiscard, gnu::always_inline]] inline WriteSpan reserve(sz_t n) noexcept {
     WriterTls const& t = tls_;
-    assert(t.q == this && "calling thread is not attached to this queue");
+    if (t.q != this) [[unlikely]] misuseTrap("Sharded write-side call by an unattached thread");
     assert(t.shard == t.bound_shard && "sticky shard binding violated: migration is forbidden");
     return rings_[t.shard].reserve(n);
   }
   [[gnu::always_inline]] inline void commit(sz_t actual_n) noexcept {
     WriterTls const& t = tls_;
-    assert(t.q == this && "calling thread is not attached to this queue");
+    if (t.q != this) [[unlikely]] misuseTrap("Sharded write-side call by an unattached thread");
     assert(t.shard == t.bound_shard && "sticky shard binding violated: migration is forbidden");
     rings_[t.shard].commit(actual_n);
   }
   void abort() noexcept {
     WriterTls const& t = tls_;
-    assert(t.q == this && "calling thread is not attached to this queue");
+    if (t.q != this) [[unlikely]] misuseTrap("Sharded write-side call by an unattached thread");
     assert(t.shard == t.bound_shard && "sticky shard binding violated: migration is forbidden");
     rings_[t.shard].abort();
   }
   bool write(void const* data, sz_t n) noexcept {
     WriterTls const& t = tls_;
-    assert(t.q == this && "calling thread is not attached to this queue");
+    if (t.q != this) [[unlikely]] misuseTrap("Sharded write-side call by an unattached thread");
     assert(t.shard == t.bound_shard && "sticky shard binding violated: migration is forbidden");
     return rings_[t.shard].write(data, n);
   }
@@ -1121,7 +1149,10 @@ class Sharded {
 
   [[gnu::noinline, gnu::cold]] void detachWriter() noexcept {
     WriterTls& t = tls_;
-    assert(t.q == this && "detach from a queue this thread is not attached to");
+    // Trap, not assert: an unattached thread would detach shard 0's writer --
+    // releasing a slot some OTHER live writer owns, which a later attach then
+    // double-claims. Corruption-class, so it stays on in release.
+    if (t.q != this) [[unlikely]] misuseTrap("Sharded::detachWriter by an unattached thread");
     assert(t.shard == t.bound_shard && "sticky shard binding violated: migration is forbidden");
     // Detach ends this writer's FIFO epoch. A later re-registration may land
     // on a different shard, and ordering ACROSS registrations is not promised:
