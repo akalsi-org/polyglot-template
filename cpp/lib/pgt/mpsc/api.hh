@@ -120,6 +120,14 @@
 // 16% at w=1, 1.6x at w=2, 3.9x at w=4, ~5x at w=8 -- so the causal-chain
 // serialisation, not the claim instruction, is the cost driver.
 //
+// All figures above are medians of 11 interleaved independent runs on a quiet
+// box, and every adjacent pair quoted is separated (no IQR overlap). Two
+// caveats on precision: ShardedMpsc at w=4/K=4 is the least precise point in
+// the table (25.7 Mrec/s, IQR ~20%) and should be quoted with its interval;
+// and machine load is the dominant error term here -- an earlier campaign run
+// while other processes compiled was wrong by 3.5x and inverted a headline
+// result, so re-measure on a quiet box before trusting any change.
+//
 // WHAT IS ESTABLISHED, AND WHAT IS NOT. The medians above are separated under
 // repetition (interleaved runs, IQR 2-6%) and can be relied on: MultiSpsc is
 // ~2x ShardedMpsc at the p50 and ~1.55x on throughput at w=8/K=8.
