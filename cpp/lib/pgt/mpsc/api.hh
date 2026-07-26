@@ -67,28 +67,39 @@
 // with maxWriters(): kUnboundedWriters for the others. Generic code that must
 // handle both should branch on that rather than discovering kNoSlot at runtime.
 //
-// CHOOSING ONE. Measured, Zen 5, 56 B records, aggregate Mrec/s:
+// CHOOSING ONE. Measured, Zen 5, 56 B records, push latency in ns:
 //
-//   Spsc         w=1              64.2    p50 21 ns    the ceiling
-//   Mpsc         w=1              53.7    p50 31 ns
-//   Mpsc         w=2              ~19
-//   Mpsc         w=8              2.3     p50 1.4 us   collapsed
-//   ShardedMpsc  w=8,  K=8        29.6
-//   ShardedMpsc  w=16, K=16       35.7
-//   MultiSpsc    w=8              70.6    p50 136 ns
+//                          Mrec/s    p50     p95     p99     p99.99
+//   Spsc        w=1          64.2     21       -       -          -
+//   Mpsc        w=1          53.7     32      74      96        298
+//   Mpsc        w=8           2.3   1722   16316   28912      66945
+//   ShardedMpsc w=8, K=8     29.6    191     468    6144      44633
+//   MultiSpsc   w=8          70.6     53     276    1159      18347
 //
 //   Total order across ALL writers      -> Mpsc. Excellent to 2 writers,
 //                                          collapses beyond; shard past that.
 //   Many writers, per-shard order OK    -> ShardedMpsc, K >= writers.
-//   Per-writer FIFO is enough           -> MultiSpsc. ~2.4x ShardedMpsc again,
-//                                          but writer count is capped at K.
+//   Per-writer FIFO is enough           -> MultiSpsc. Fastest at every
+//                                          percentile; writer count capped at K.
 //   Single producer                     -> Spsc.
 //
-// The two prices worth knowing: a total order across all writers costs ~30x
-// under contention (Mpsc vs MultiSpsc at w=8), while per-SHARD total order costs
-// only ~2.4x over per-writer order. Ordering is expensive globally and cheap
-// locally, which is the whole argument for sharding rather than abandoning
-// order.
+// A total order across all writers costs ~30x under contention (Mpsc vs
+// MultiSpsc at w=8); per-SHARD order costs ~2.4x over per-writer order at the
+// median. Ordering is expensive globally and cheap locally -- the argument for
+// sharding rather than abandoning order.
+//
+// BUT SHARDING FIXES THE MEDIAN, NOT THE TAIL. ShardedMpsc improves Mpsc's p50
+// by 9x while its p99.99 (45 us) converges back toward Mpsc's (67 us), and stays
+// 2.4x worse than MultiSpsc's (18 us). Head-of-line blocking is a PER-RING
+// property: more shards means fewer writers stuck behind any one stall, but a
+// writer stalled in its own reserve-to-commit window still pins its ring's
+// reader progress no matter how many other rings exist. If you are choosing
+// ShardedMpsc for tail latency rather than for ordering, that is the wrong
+// reason -- take MultiSpsc.
+//
+// (Maxima are omitted deliberately: on the measurement box every run tripped
+// the >8x-p99 OS-jitter check, so observed maxima were scheduler preemption,
+// not queue behaviour. They need bare metal to mean anything.)
 //
 // The API is deliberately two-phase. A single-shot write() cannot express a short
 // commit -- the caller must be able to reserve an upper bound, discover the actual
