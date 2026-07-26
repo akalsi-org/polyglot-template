@@ -78,8 +78,7 @@
 //   ShardedMpsc w=8, K=8     28.0    170     445    17160      2.3%
 //   MultiSpsc   w=8          43.4     74     382    10878      1.7%
 //
-//   Total order across ALL writers      -> Mpsc. Excellent to 2 writers,
-//                                          collapses beyond; shard past that.
+//   Total order across ALL writers      -> Mpsc, but see the collapse curve.
 //   Many writers, per-shard order OK    -> ShardedMpsc, K >= writers.
 //   Per-writer FIFO is enough           -> MultiSpsc. Lower write cost at every
 //                                          percentile; writer count capped at K.
@@ -89,6 +88,37 @@
 // MultiSpsc at w=8); per-SHARD order costs ~2.3x over per-writer order at the
 // p50 and ~1.55x on throughput. Ordering is expensive globally and cheap
 // locally -- the argument for sharding rather than abandoning order.
+//
+// THE Mpsc COLLAPSE IS A CLIFF, AND ITS TAIL GOES FIRST. Quiet-box medians,
+// adjacent pairs separated:
+//
+//   writers        1       2       4       8
+//   Mrec/s      41.4    27.0     5.5     2.1
+//   step          --   x0.65   x0.20   x0.38
+//   write p99   96 ns  1.6 us  8.6 us  33 us
+//
+// The 2->4 doubling loses 80% of throughput in one step; the doublings either
+// side are ordinary. But the p99 grows ~17x across 1->2, BEFORE throughput
+// falls much -- so the two thresholds differ:
+//
+//   tail-sensitive       -> shard at 2 writers
+//   throughput-sensitive -> shard at 3+
+//
+// Mpsc's retried fraction is 0.00% at every writer count measured (1, 2, 4, 8):
+// the ring never fills, because reserve() declines only on capacity exhaustion
+// and absorbs contention internally. So ALL of Mpsc's contended cost is
+// claim-path, never backpressure, and sharding is the fix rather than a faster
+// reader.
+//
+// For the sharded pair, admission delay FADES IN rather than crossing a
+// threshold -- retried% at w=2/4/8 is 0.01/1.16/2.33 (ShardedMpsc) and
+// 0.14/0.87/1.74 (MultiSpsc), roughly doubling per doubling of writers. Below
+// ~1% retried (w<=4 at these parameters) admission is noise; by w=8 it owns the
+// combined tail.
+//
+// The fetch_add A/B widens with contention as the spec predicted -- cf loses
+// 16% at w=1, 1.6x at w=2, 3.9x at w=4, ~5x at w=8 -- so the causal-chain
+// serialisation, not the claim instruction, is the cost driver.
 //
 // WHAT IS ESTABLISHED, AND WHAT IS NOT. The medians above are separated under
 // repetition (interleaved runs, IQR 2-6%) and can be relied on: MultiSpsc is
