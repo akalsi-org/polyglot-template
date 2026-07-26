@@ -149,7 +149,10 @@ struct HopsPolicy : DefaultPolicy {
 struct RunResult {
   u64_t records = 0;
   double secs = 0;
-  std::vector<u64_t> lat;  // pooled per-push rdtscp samples (1 in 64 pushes)
+  std::vector<u64_t> lat;  // WRITE COST: the successful attempt only (1 in 64)
+  std::vector<u64_t> adm;  // ADMISSION DELAY: retry wait before it (retried samples)
+  u64_t sampled = 0;
+  u64_t retried = 0;
 };
 
 double g_ghz = 0;  // TSC GHz, calibrated once in main
@@ -178,16 +181,23 @@ void printLat(char const* tag, std::vector<u64_t>& s, double ghz) {
 
 // Generic producer/consumer run over any queue with write()/reader ops.
 // setup(w) runs once in each writer thread before the start barrier (writer
-// registration for the variants that need it).
-template <typename SetupFn, typename WriteFn, typename DrainFn>
-RunResult runFor(unsigned writers, double secs, SetupFn&& setup, WriteFn&& writeOne,
+// registration for the variants that need it). tryOne(w) makes ONE admission
+// attempt and returns success -- the retry loop lives HERE so sampled pushes
+// can split WRITE COST (the successful attempt alone: reserve+memcpy+commit)
+// from ADMISSION DELAY (the retry wait before it). Merged, a full-ring stall
+// masquerades as queue latency: "p99 = 29us" reads as a slow queue when the
+// truth may be "the write costs 200ns and the reader was 28us behind" -- a
+// different conclusion pointing at a different fix.
+template <typename SetupFn, typename TryFn, typename DrainFn>
+RunResult runFor(unsigned writers, double secs, SetupFn&& setup, TryFn&& tryOne,
                  DrainFn&& drainSome) {
   std::atomic<bool> stop{false};
   std::atomic<unsigned> ready{0};
   std::atomic<bool> go{false};
   std::atomic<unsigned> finished{0};
   std::vector<u64_t> counts(writers, 0);
-  std::vector<std::vector<u64_t>> lats(writers);
+  std::vector<std::vector<u64_t>> costs(writers), adms(writers);
+  std::vector<u64_t> sampled(writers, 0), retried(writers, 0);
   std::vector<std::thread> ts;
   ts.reserve(writers);
   for (unsigned w = 0; w < writers; ++w) {
@@ -197,15 +207,26 @@ RunResult runFor(unsigned writers, double secs, SetupFn&& setup, WriteFn&& write
       ready.fetch_add(1);
       while (!go.load(std::memory_order_acquire)) cpuRelax();
       u64_t n = 0;
-      auto& lat = lats[w];
+      auto& cost = costs[w];
+      auto& adm = adms[w];
       while (!stop.load(std::memory_order_relaxed)) {
         if ((n & 63) == 0) {  // sample 1 in 64: percentiles at ~1.5% perturbation
           unsigned aux;
-          u64_t const c0 = __rdtscp(&aux);
-          writeOne(w);
-          lat.push_back(__rdtscp(&aux) - c0);
+          u64_t const t0 = __rdtscp(&aux);
+          u64_t ta = t0;  // start of the eventually-successful attempt
+          while (!tryOne(w)) {
+            cpuRelax();
+            ta = __rdtscp(&aux);
+          }
+          u64_t const t1 = __rdtscp(&aux);
+          cost.push_back(t1 - ta);
+          ++sampled[w];
+          if (ta != t0) {
+            adm.push_back(ta - t0);
+            ++retried[w];
+          }
         } else {
-          writeOne(w);
+          while (!tryOne(w)) cpuRelax();
         }
         ++n;
       }
@@ -229,7 +250,10 @@ RunResult runFor(unsigned writers, double secs, SetupFn&& setup, WriteFn&& write
   RunResult r;
   for (auto c : counts) r.records += c;
   r.secs = std::chrono::duration<double>(t1 - t0).count();
-  for (auto& v : lats) r.lat.insert(r.lat.end(), v.begin(), v.end());
+  for (auto& v : costs) r.lat.insert(r.lat.end(), v.begin(), v.end());
+  for (auto& v : adms) r.adm.insert(r.adm.end(), v.begin(), v.end());
+  for (auto s : sampled) r.sampled += s;
+  for (auto s : retried) r.retried += s;
   return r;
 }
 
@@ -242,6 +266,17 @@ void spinWrite(Q& q, void const* buf, sz_t n) {
     }
     cpuRelax();
   }
+}
+
+// ONE admission attempt, for runFor's cost/admission split.
+template <typename Q>
+bool tryWrite(Q& q, void const* buf, sz_t n) {
+  if (q.write(buf, n)) return true;
+  if (q.status() == Status::kReaderDead) {
+    std::fprintf(stderr, "reader dead?\n");
+    std::exit(2);
+  }
+  return false;
 }
 
 // Drains up to `batch` records; returns how many.
@@ -269,7 +304,7 @@ RunResult benchRing(sz_t capacity, unsigned writers, double secs, sz_t payload,
   }
   if (!q.attachReader()) std::exit(1);
   return runFor(
-      writers, secs, [](unsigned) {}, [&](unsigned) { spinWrite(q, payload_buf, payload); },
+      writers, secs, [](unsigned) {}, [&](unsigned) { return tryWrite(q, payload_buf, payload); },
       [&] { return drainBatch(q); });
 }
 
@@ -288,7 +323,8 @@ RunResult benchQueue(Q& q, unsigned writers, double secs, sz_t payload, bool att
           std::exit(1);
         }
       },
-      [&](unsigned) { spinWrite(q, payload_buf, payload); }, [&] { return drainBatch(q); });
+      [&](unsigned) { return tryWrite(q, payload_buf, payload); },
+      [&] { return drainBatch(q); });
 }
 
 template <typename Q>
@@ -305,8 +341,12 @@ RunResult makeAndBench(sz_t cap_per_shard, u32_t shards, unsigned writers, doubl
 RunResult benchFetchAdd(sz_t capacity, unsigned writers, double secs, sz_t payload) {
   FetchAddRing q;
   if (!q.create(capacity)) std::exit(1);
+  // NOTE on the split: fetch_add CANNOT decline admission, so its backpressure
+  // wait happens INSIDE write() and lands in write-cost, never in
+  // admission-delay. That is not a harness artifact -- it is the design
+  // difference itself (see "Why not fetch_add" in the spec).
   return runFor(
-      writers, secs, [](unsigned) {}, [&](unsigned) { q.write(payload_buf, payload); },
+      writers, secs, [](unsigned) {}, [&](unsigned) { return q.write(payload_buf, payload); },
       [&] {
         u64_t n = 0;
         for (unsigned i = 0; i < 256; ++i) {
@@ -323,7 +363,12 @@ void report(char const* name, unsigned writers, sz_t payload, RunResult r) {
   std::printf("%-24s w=%-2u payload=%-6zu %10.2f Mrec/s  %8.2f GB/s  %8.1f ns/rec\n", name,
               writers, payload, mrps, gbs, 1e3 / mrps);
   std::fflush(stdout);
-  printLat("push", r.lat, g_ghz);
+  printLat("write-cost", r.lat, g_ghz);
+  if (r.sampled != 0) {
+    std::printf("  admission-retried      %.2f%% of %llu sampled pushes\n",
+                100.0 * r.retried / r.sampled, static_cast<unsigned long long>(r.sampled));
+  }
+  printLat("admission-delay", r.adm, g_ghz);
 }
 
 int usage() {
@@ -552,6 +597,30 @@ int main(int argc, char** argv) {
       report(name, w, 56, makeAndBench<ShardedMpsc>(1u << 20, w, w, secs, 56, true));
       std::snprintf(name, sizeof(name), "multi-spsc K=%u", w);
       report(name, w, 56, makeAndBench<MultiSpsc>(1u << 20, w, w, secs, 56, true));
+    }
+    return 0;
+  }
+
+  // One configuration per process invocation: the unit of the repetition
+  // methodology. Statistical campaigns run N independent PROCESSES per config,
+  // interleaved across configs by the driver script -- process-level variance
+  // is the thing being measured around, so in-process repetition is not a
+  // substitute.
+  if (mode == "one") {
+    std::string const which = argc > 2 ? argv[2] : "";
+    u32_t const shards = argc > 3 ? std::atoi(argv[3]) : 1;
+    unsigned const w = argc > 4 ? std::atoi(argv[4]) : 1;
+    double const secs = argc > 5 ? std::atof(argv[5]) : 2.0;
+    if (which == "cf") {
+      report("clear-forward", w, 56, benchRing(1u << 20, w, secs, 56));
+    } else if (which == "fa") {
+      report("fetch_add", w, 56, benchFetchAdd(1u << 20, w, secs, 56));
+    } else if (which == "shmpsc") {
+      report("sharded-mpsc", w, 56, makeAndBench<ShardedMpsc>(1u << 20, shards, w, secs, 56, true));
+    } else if (which == "multi") {
+      report("multi-spsc", w, 56, makeAndBench<MultiSpsc>(1u << 20, shards, w, secs, 56, true));
+    } else {
+      return usage();
     }
     return 0;
   }

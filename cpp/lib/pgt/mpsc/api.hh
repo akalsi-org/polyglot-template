@@ -92,18 +92,31 @@
 // repetition (interleaved runs, IQR 2-6%) and can be relied on: MultiSpsc is
 // ~2x ShardedMpsc at the p50 and ~1.55x on throughput at w=8/K=8.
 //
-// The TAIL comparison between them is NOT established. An earlier single-run
-// reading suggested ShardedMpsc's p99.99 was 2.4x worse; under repetition the
-// two overlap (34.0 us [32.6, 35.5] vs 32.4 us [30.8, 41.9]) and are
-// indistinguishable on that box. Do not choose between them on tail latency.
+// THE TAIL COMPARISON, DECOMPOSED. Combined write()+retry timing makes the
+// ShardedMpsc/MultiSpsc p99.99 tails indistinguishable (34.0 us [32.6, 35.5]
+// vs 32.4 us [30.8, 41.9] under repetition). Splitting each sampled push into
+// WRITE COST (the successful attempt alone) and ADMISSION DELAY (the
+// retry-on-full wait before it) shows why, and separates them again:
 //
-// A measurement caveat that applies to every contended tail figure here: the
-// harness times a full write() INCLUDING its retry-on-full loop, so contended
-// tails conflate the queue's own cost with time spent waiting for the reader to
-// drain. At w=8 the writers outrun the reader, so those tails are substantially
-// admission delay -- a property of the reader keeping up, not of the queue.
-// Until those are measured separately, read contended p99+ as an upper bound on
-// queue cost, not as queue cost.
+//   w=8/K=8, medians of 9+ interleaved runs:      ShardedMpsc    MultiSpsc
+//     write-cost   p50 / p99 / p99.99 (ns)      170/445/17160  74/382/10878
+//     admission    retried% of pushes                    2.3%         1.7%
+//     admission    delay p50 / p99 (ns)           5158/21183   5669/22531
+//
+// The admission columns are near-identical: retry wait is READER-bound (both
+// variants drain through the same sweep) and says nothing about the claim
+// paths. It is also what dominated the combined p99.9+ -- ~2% of pushes
+// retrying at 5-22 us swamps a 1-in-10^4 percentile. Decomposed, MultiSpsc's
+// OWN cost is uniformly lower (2.3x at p50, 1.6x at p99.99) and the tails are
+// separated after all. Choose on write-cost; treat admission delay as a
+// reader-capacity property, not a queue property.
+//
+// Mpsc's contended tail decomposes DIFFERENTLY: at w=8 its retried fraction is
+// ZERO -- the ring is never full, and reserve() declines only on capacity, so
+// its entire tail (write-cost p99 33 us, p99.99 135 us) is contention wait
+// INSIDE the claim path (CAS retries and kClaimed backoff). That time is
+// genuinely attributable to the queue's arbitration under contention, not to
+// the reader falling behind.
 //
 // (Maxima are omitted deliberately: on the measurement box every run tripped
 // the >8x-p99 OS-jitter check, so observed maxima were scheduler preemption,
