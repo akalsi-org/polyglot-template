@@ -1,7 +1,7 @@
-#include "pgt/mpsc/region.hh"
+#include "../mpsc/region.hh"
 
-#include "pgt/core/platform.hh"
-#include "pgt/mpsc/desc.hh"
+#include "../core/platform.hh"
+#include "../mpsc/desc.hh"
 
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -39,14 +39,13 @@ inline constexpr u32_t kVersion = 1;
 [[nodiscard]] bool mapMirrored(int fd, sz_t ctrl, u64_t capacity, u32_t shards, std::byte*& base,
                                sz_t& reservation) noexcept {
   sz_t const span = ctrl + static_cast<sz_t>(shards) * 2 * capacity;
-  void* const hole = mmap(nullptr, span, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE,
-                          -1, 0);
+  void* const hole =
+    mmap(nullptr, span, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
   if (hole == MAP_FAILED) return false;
   auto* const b = static_cast<std::byte*>(hole);
 
   auto fix = [&](sz_t at, sz_t len, off_t off) noexcept {
-    return mmap(b + at, len, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, off) !=
-           MAP_FAILED;
+    return mmap(b + at, len, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, off) != MAP_FAILED;
   };
 
   // Control page once, then each arena TWICE back to back from the same file

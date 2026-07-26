@@ -39,8 +39,8 @@
 // address computation, which removes all wrap ambiguity from comparisons and is
 // what lets the descriptor encoding distinguish laps.
 
-#include "pgt/core/types.hh"
-#include "pgt/mpsc/api.hh"
+#include "../core/types.hh"
+#include "../mpsc/api.hh"
 
 #include <cstddef>
 

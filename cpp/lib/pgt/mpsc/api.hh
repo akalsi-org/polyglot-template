@@ -106,8 +106,7 @@
 // against -- the no-timeout rule means a slow writer and a hung writer are
 // deliberately indistinguishable.
 
-#include "pgt/core/types.hh"
-#include "pgt/mpsc/desc.hh"
+#include "../core/types.hh"
 
 #include <cstddef>
 #include <span>

@@ -21,7 +21,7 @@
 // the coherence traffic these queues are built to avoid. Counters must be
 // thread-local and aggregated at teardown.
 
-#include "pgt/core/types.hh"
+#include "../core/types.hh"
 
 #if defined(__x86_64__)
 #include <emmintrin.h>

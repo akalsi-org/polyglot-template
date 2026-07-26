@@ -1,4 +1,4 @@
-#include "pgt/mpsc/queue.hh"
+#include "../mpsc/queue.hh"
 
 // The variants are templates over their policy, so the definitions live in the
 // header. This TU pins the default instantiations and checks the contract, so

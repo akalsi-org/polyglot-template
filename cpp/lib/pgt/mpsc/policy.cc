@@ -1,4 +1,4 @@
-#include "pgt/mpsc/policy.hh"
+#include "../mpsc/policy.hh"
 
 #include <sched.h>
 #include <time.h>

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "pgt/core/types.hh"
+#include "types.hh"
 
 #include <bit>
 

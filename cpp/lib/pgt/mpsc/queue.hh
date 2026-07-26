@@ -63,12 +63,12 @@
 // time -- q = p + need is known before the CAS, and that cold miss dominates the
 // causal chain between consecutive claims.
 
-#include "pgt/core/types.hh"
-#include "pgt/mpsc/api.hh"
-#include "pgt/mpsc/desc.hh"
-#include "pgt/mpsc/liveness.hh"
-#include "pgt/mpsc/policy.hh"
-#include "pgt/mpsc/region.hh"
+#include "../core/types.hh"
+#include "../mpsc/api.hh"
+#include "../mpsc/desc.hh"
+#include "../mpsc/liveness.hh"
+#include "../mpsc/policy.hh"
+#include "../mpsc/region.hh"
 
 #include <pthread.h>
 
@@ -79,8 +79,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
-#include <mutex>
-#include <span>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -112,8 +110,7 @@ class Ring {
   // view plus per-endpoint cursors, and the protocol state lives entirely in
   // the mapping. The policy is copied -- policies are small stateless hook
   // bundles by design.
-  Ring(Region const& region, u32_t shard_index, Policy& policy) noexcept
-      : policy_(policy) {
+  Ring(Region const& region, u32_t shard_index, Policy& policy) noexcept : policy_(policy) {
     bind(region, shard_index);
   }
   Ring(Region const& region, u32_t shard_index) noexcept { bind(region, shard_index); }
@@ -240,12 +237,12 @@ class Ring {
     // without a trailer. The trailer store is relaxed: no path reaches p + used
     // except through an acquire of the commit word.
     if (used < t.need) {
-      descRef(t.p + used).store(packRecord(t.need - used, 0, State::kAborted, t.tid),
-                                std::memory_order_relaxed);
+      descRef(t.p + used)
+        .store(packRecord(t.need - used, 0, State::kAborted, t.tid), std::memory_order_relaxed);
     }
     descRef(t.p).store(
-        packRecord(used, static_cast<u32_t>(actual_n & (kGrain - 1)), State::kCommitted, t.tid),
-        std::memory_order_release);  // publishes the payload
+      packRecord(used, static_cast<u32_t>(actual_n & (kGrain - 1)), State::kCommitted, t.tid),
+      std::memory_order_release);  // publishes the payload
     policy_.onCommit(t.p, used);
     t.p = kInvalidPos;  // poison
   }
@@ -492,7 +489,7 @@ class Ring {
     for (;;) {
       u64_t p = hintRef().load(std::memory_order_acquire);
       u32_t hops = 0;
-      for (;;) {  // walk to the true frontier
+      for (;;) {                              // walk to the true frontier
         if (++hops > max_hops) goto restart;  // bounded: stale walk
         u64_t const d = descRef(p).load(std::memory_order_acquire);
         State const s = stateOf(d);
@@ -517,8 +514,7 @@ class Ring {
           // drain, so report that distinctly rather than looping forever. An
           // unattached reader (tid 0) may yet attach, so it counts as full.
           u32_t const reader = readerTidRef().load(std::memory_order_acquire);
-          t.status =
-              (reader != 0 && !threadAlive(reader)) ? Status::kReaderDead : Status::kFull;
+          t.status = (reader != 0 && !threadAlive(reader)) ? Status::kReaderDead : Status::kFull;
           return {};  // fail fast; the caller owns the retry policy
         }
       }
@@ -671,7 +667,8 @@ class SpscRing {
       return {};
     }
     u64_t const tail = wr_tail_;
-    if (tail + need - wr_read_cache_ > cap_) [[unlikely]] return reserveSlow(n, need);
+    if (tail + need - wr_read_cache_ > cap_) [[unlikely]]
+      return reserveSlow(n, need);
     res_pos_ = tail;
     res_need_ = need;
     wr_status_ = Status::kOk;
@@ -691,9 +688,9 @@ class SpscRing {
     u64_t const p = res_pos_;
     // Relaxed: the reader cannot reach this header until the tail release
     // below publishes it together with the payload.
-    descRef(p).store(packRecord(used, static_cast<u32_t>(actual_n & (kGrain - 1)),
-                                State::kCommitted, wr_tid_),
-                     std::memory_order_relaxed);
+    descRef(p).store(
+      packRecord(used, static_cast<u32_t>(actual_n & (kGrain - 1)), State::kCommitted, wr_tid_),
+      std::memory_order_relaxed);
     wr_tail_ = p + used;
     publishRef().store(wr_tail_, std::memory_order_release);  // publication
     res_pos_ = kInvalidPos;                                   // poison
@@ -789,7 +786,7 @@ class SpscRing {
     // A freed slot passes through owner == 0 (detachWriter zeroes the owner
     // BEFORE clearing the bit), so a mid-handoff slot is never mistaken for a
     // dead one: takeover requires CAS-ing out a nonzero dead tid.
-    if (cur == 0 || threadAlive(cur)) return false;                          // gate (a)
+    if (cur == 0 || threadAlive(cur)) return false;  // gate (a)
     u64_t const tail = publishRef().load(std::memory_order_acquire);
     if (readPosRef().load(std::memory_order_acquire) != tail) return false;  // gate (b)
     // Arbitrating concurrent recyclers by CAS is acceptable HERE: takeover is
@@ -1106,9 +1103,8 @@ class Sharded {
         }
         if (best == kNoShard) break;  // every shard at its writer limit
         u32_t expected = best_count;
-        if (!counts_[best].compare_exchange_strong(expected, best_count + 1,
-                                                   std::memory_order_acq_rel,
-                                                   std::memory_order_relaxed)) {
+        if (!counts_[best].compare_exchange_strong(
+              expected, best_count + 1, std::memory_order_acq_rel, std::memory_order_relaxed)) {
           continue;  // raced another attacher; rescan
         }
         if (rings_[best].attachWriter()) return bindTls(t, best);
@@ -1223,8 +1219,8 @@ class Sharded {
   std::vector<RingT> rings_;
   std::unique_ptr<std::atomic<u32_t>[]> counts_;  // writers per shard (placement only)
   u32_t shard_count_ = 0;
-  u32_t sweep_start_ = 0;   // reader-private rotation cursor
-  u32_t cur_ = 0;           // shard the last peek() delivered from
+  u32_t sweep_start_ = 0;  // reader-private rotation cursor
+  u32_t cur_ = 0;          // shard the last peek() delivered from
   u32_t empty_iters_ = 0;
   [[no_unique_address]] Policy policy_{};
 };
@@ -1233,9 +1229,9 @@ class Sharded {
 // SECTION: public aliases
 // ============================================================================
 
-using Mpsc = Ring<>;                   // one shared ring, total order
-using Spsc = SpscRing<>;               // one ring, one writer, wait-free
-using ShardedMpsc = Sharded<Ring<>>;   // K shared rings, per-shard total order
-using MultiSpsc = Sharded<SpscRing<>>; // K SPSC rings, one per writer, wait-free
+using Mpsc = Ring<>;                    // one shared ring, total order
+using Spsc = SpscRing<>;                // one ring, one writer, wait-free
+using ShardedMpsc = Sharded<Ring<>>;    // K shared rings, per-shard total order
+using MultiSpsc = Sharded<SpscRing<>>;  // K SPSC rings, one per writer, wait-free
 
 }  // namespace pgt::mpsc

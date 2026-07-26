@@ -41,7 +41,7 @@
 // kAborted been 0, an untouched word would decode as a zero-extent aborted record
 // and a walker reaching one would advance by zero.
 
-#include "pgt/core/types.hh"
+#include "../core/types.hh"
 
 namespace pgt::mpsc {
 

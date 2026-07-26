@@ -23,7 +23,7 @@
 // tid reads as alive and blocks recovery: a false-ALIVE, which hangs rather than
 // corrupting -- the safe direction.
 
-#include "pgt/core/types.hh"
+#include "../core/types.hh"
 
 #include <fcntl.h>
 #include <unistd.h>
