@@ -320,24 +320,28 @@ struct Reservation {           // writer-private, thread-local
     uint64_t word;             // the claim word we wrote (carries our tid)
 };
 
-std::span<std::byte> reserve(size_t n);   // claim, stamp successor, vouch
-void commit(size_t actual_n);             // actual_n <= n; publishes
-void abort();                             // publishes ABORTED, no payload
+std::span<std::byte> reserve(size_t n);              // claim, stamp successor, vouch
+void commit(std::span<std::byte> reservation, size_t n);  // exact reservation; n <= reservation.size()
+void abort();                                             // publishes ABORTED, no payload
 
 bool write(const void *data, size_t n) {  // convenience: reserve + copy + commit
     auto s = reserve(n);
-    if (s.empty()) return false;
-    memcpy(s.data(), data, n);
-    commit(n);
+    if (s.data() == nullptr) return false;
+    if (n != 0) memcpy(s.data(), data, n);
+    commit(s, n);
     return true;
 }
 ```
 
-**The span returned by `reserve` is valid only until `commit` or `abort`.** The reader
-may overwrite those bytes once it has passed the record, and `read_pos` publication is
-what licenses that — so a caller must finish writing before committing, and must not
-retain the span afterwards. Symmetrically on the read side, the span from `peek` is
-valid only until `pop`.
+**The span returned by `reserve` is valid only until `commit` or `abort`.** `commit`
+requires that exact pointer-and-length span, not merely another span of the same rounded
+descriptor extent; this rejects accidental wrong spans, subspans, and same-grain
+over-commits. It is a misuse guard rather than cryptographic provenance: a caller that
+intentionally reconstructs the same pointer and length (or a stale span after address
+reuse on wrap) is indistinguishable. The reader may overwrite those bytes once it has
+passed the record, and `read_pos` publication is what licenses that — so a caller must
+finish writing before committing, and must not retain the span afterwards. Symmetrically
+on the read side, the span from `peek` is valid only until `pop`.
 
 ### Misuse guards
 
@@ -346,10 +350,12 @@ correctness guards rather than hardening, and belong in the code from day one. A
 thread-local checks with no shared-state cost.
 
 ```c
-void commit(size_t actual_n) {
-    assert(res.p != INVALID);                          // (b) double commit
-    assert(gettid() == tid_of(res.word));              // (e) fork / wrong thread
-    assert(align64(8 + actual_n) <= res.need);         // (c) grown commit
+void commit(std::span<std::byte> reservation, size_t actual_n) {
+    trap_if(res.p == INVALID);                         // (b) double commit
+    trap_if(reservation.data() != payload(res.p) ||
+            reservation.size() != res.n);              // wrong reservation span
+    trap_if(actual_n > res.n ||
+            align64(8 + actual_n) > res.need);         // (c) grown commit
     ...
     res.p = INVALID;                                   // poison
 }

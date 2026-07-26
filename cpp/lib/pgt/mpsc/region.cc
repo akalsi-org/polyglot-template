@@ -209,9 +209,16 @@ bool Region::create(Config const& cfg, Region& out) noexcept {
     return false;
   }
 
+  // Reject before bit_ceil: rounding a value above the largest encodable
+  // power of two is undefined/zero rather than a recoverable invalid geometry.
+  u64_t const requested = cfg.capacity < page ? static_cast<u64_t>(page) : cfg.capacity;
+  if (requested > kMaxExtent) {
+    errno = EINVAL;
+    return false;
+  }
   // Round capacity up to a power of two that is at least a page; page sizes are
   // powers of two, so bit_ceil covers the multiple-of-page requirement too.
-  u64_t const cap = std::bit_ceil(cfg.capacity < page ? static_cast<u64_t>(page) : cfg.capacity);
+  u64_t const cap = std::bit_ceil(requested);
   // A record extent may be as large as the whole arena, so the descriptor's
   // size field must be able to encode `cap` itself.
   if (cap > kMaxExtent) {

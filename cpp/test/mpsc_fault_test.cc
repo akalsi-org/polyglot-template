@@ -185,7 +185,7 @@ TEST_CASE("stopped writer is never reclaimed and resumes cleanly on SIGCONT") {
     u32_t const tag = 1;
     std::memcpy(s.data(), &tag, 4);
     for (sz_t i = 4; i < 24; ++i) s[i] = static_cast<std::byte>(tag * 31 + i);
-    cq.commit(24);
+    cq.commit(s, 24);
     _exit(0);
   }
   int st = 0;
@@ -252,8 +252,38 @@ TEST_CASE("misuse traps abort the process instead of corrupting") {
     int const st = runExpectingAbort([&] {
       WriteSpan const s = q.reserve(16);
       if (s.data() == nullptr) _exit(9);
-      q.commit(16);
-      q.commit(16);  // must trap: the delayed-stamper defect via the API
+      q.commit(s, 16);
+      q.commit(s, 16);  // must trap: the delayed-stamper defect via the API
+    });
+    CHECK(WIFSIGNALED(st));
+    CHECK(WTERMSIG(st) == SIGABRT);
+  }
+
+  SUBCASE("same-grain payload over-commit") {
+    int const st = runExpectingAbort([&] {
+      WriteSpan const s = q.reserve(16);
+      if (s.data() == nullptr) _exit(9);
+      q.commit(s, 17);  // both lengths round to one grain; the API must still reject it
+    });
+    CHECK(WIFSIGNALED(st));
+    CHECK(WTERMSIG(st) == SIGABRT);
+  }
+
+  SUBCASE("wrong reservation span size") {
+    int const st = runExpectingAbort([&] {
+      WriteSpan const s = q.reserve(16);
+      if (s.data() == nullptr) _exit(9);
+      q.commit(WriteSpan{s.data(), 8}, 8);
+    });
+    CHECK(WIFSIGNALED(st));
+    CHECK(WTERMSIG(st) == SIGABRT);
+  }
+
+  SUBCASE("wrong reservation span pointer") {
+    int const st = runExpectingAbort([&] {
+      WriteSpan const s = q.reserve(16);
+      if (s.data() == nullptr) _exit(9);
+      q.commit(WriteSpan{s.data() + 1, s.size()}, 16);
     });
     CHECK(WIFSIGNALED(st));
     CHECK(WTERMSIG(st) == SIGABRT);
@@ -263,7 +293,7 @@ TEST_CASE("misuse traps abort the process instead of corrupting") {
     int const st = runExpectingAbort([&] {
       WriteSpan const s = q.reserve(16);
       if (s.data() == nullptr) _exit(9);
-      q.commit(500);  // extent grows past the reservation: fictitious boundary
+      q.commit(s, 500);  // extent grows past the reservation: fictitious boundary
     });
     CHECK(WIFSIGNALED(st));
     CHECK(WTERMSIG(st) == SIGABRT);
@@ -275,7 +305,7 @@ TEST_CASE("misuse traps abort the process instead of corrupting") {
       if (s.data() == nullptr) _exit(9);
       pid_t const gc = fork();
       if (gc == 0) {
-        q.commit(16);  // child's reservation state was cleared by atfork: trap
+        q.commit(s, 16);  // child's reservation state was cleared by atfork: trap
         _exit(0);
       }
       int gst = 0;
@@ -294,6 +324,25 @@ TEST_CASE("misuse traps abort the process instead of corrupting") {
     CHECK(WIFSIGNALED(st));
     CHECK(WTERMSIG(st) == SIGABRT);
   }
+}
+
+TEST_CASE("standalone Spsc rejects inherited writer ownership") {
+  Spsc q;
+  REQUIRE(Spsc::create(smallConfig(), q));
+  REQUIRE(q.attachWriter());
+
+  WriteSpan const s = q.reserve(16);
+  REQUIRE(s.data() != nullptr);
+  int const st = runExpectingAbort([&] { q.commit(s, 16); });
+  CHECK(WIFSIGNALED(st));
+  CHECK(WTERMSIG(st) == SIGABRT);
+
+  // The child must not affect the parent's writer-private reservation.
+  q.abort();
+  WriteSpan const next = q.reserve(0);
+  REQUIRE(next.data() != nullptr);
+  q.commit(next, 0);
+  q.detachWriter();
 }
 
 // ---------------------------------------------------------------------------

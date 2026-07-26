@@ -166,7 +166,7 @@ void perWriterDifferential(Q& q, u32_t writers, u32_t per_writer, u32_t max_payl
           continue;
         }
         fillRecord(s.data(), w, seq, n);
-        q.commit(n);  // ...commit low: exercises the short-commit trailer
+        q.commit(s, n);  // ...commit low: exercises the short-commit trailer
         ++seq;
       }
       q.detachWriter();

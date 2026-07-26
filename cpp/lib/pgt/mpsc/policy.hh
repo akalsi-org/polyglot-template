@@ -33,7 +33,7 @@ inline void cpuRelax() noexcept {
 #if defined(__x86_64__)
   _mm_pause();
 #elif defined(__aarch64__)
-  __asm__ __volatile__("isb" ::: "memory");
+  __asm__ __volatile__("yield" ::: "memory");
 #endif
 }
 

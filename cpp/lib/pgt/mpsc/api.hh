@@ -269,7 +269,9 @@ struct Config {
   bool preallocate = true;
 };
 
-// Returned by reserve(): empty when the queue cannot accept the record.
+// Returned by reserve(): empty when the queue cannot accept the record. commit()
+// takes this exact pointer-and-length span plus an actual length no greater than
+// its size, so same-grain over-commits and accidental subspans are rejected.
 using WriteSpan = std::span<std::byte>;
 using ReadSpan = std::span<std::byte const>;
 
@@ -292,7 +294,7 @@ concept QueueLike = requires(Q q, void const* p, sz_t n, u32_t slot) {
 
   // Writer. reserve() returns an empty span on failure; status() reports why.
   { q.reserve(n) }        -> std::same_as<WriteSpan>;
-  { q.commit(n) }         -> std::same_as<void>;
+  { q.commit(WriteSpan{}, n) } -> std::same_as<void>;
   { q.abort() }           -> std::same_as<void>;
   { q.write(p, n) }       -> std::same_as<bool>;
   { q.status() }          -> std::same_as<Status>;

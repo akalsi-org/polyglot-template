@@ -75,7 +75,7 @@ bool childWriteTag(Q& q, u32_t tag) {
   WriteSpan const s = q.reserve(kRecLen);
   if (s.data() == nullptr) return false;
   fillTag<Q>(s, tag);
-  q.commit(kRecLen);
+  q.commit(s, kRecLen);
   return true;
 }
 
@@ -84,7 +84,7 @@ void pushTag(Q& q, u32_t tag) {
   WriteSpan const s = q.reserve(kRecLen);
   REQUIRE(s.data() != nullptr);
   fillTag<Q>(s, tag);
-  q.commit(kRecLen);
+  q.commit(s, kRecLen);
 }
 
 // Parent-side: pops the next record within the deadline and returns its tag,
@@ -260,7 +260,7 @@ TEST_CASE("xproc: stopped fresh-attach writer blocks the reader and resumes clea
     if (s.data() == nullptr) _exit(3);
     raise(SIGSTOP);  // returns after SIGCONT
     fillTag<XRing>(s, 1);
-    cq.commit(kRecLen);
+    cq.commit(s, kRecLen);
     _exit(0);
   }
   int st = 0;
@@ -547,7 +547,7 @@ TEST_CASE("xproc: forked child cannot commit an inherited reservation; re-regist
         ::dup2(null, 1);
         ::dup2(null, 2);
       }
-      cq.commit(kRecLen);  // MUST trap: routing TLS was cleared
+      cq.commit(s, kRecLen);  // MUST trap: routing TLS was cleared
       _exit(5);            // reaching here means it committed
     }
     int gst = 0;
@@ -556,7 +556,7 @@ TEST_CASE("xproc: forked child cannot commit an inherited reservation; re-regist
 
     // Parent's reservation is intact; finish it so the ring stays clean.
     fillTag<MultiSpsc>(s, 4000);
-    cq.commit(kRecLen);
+    cq.commit(s, kRecLen);
 
     // A fresh child may re-register and gets its OWN slot.
     pid_t const g2 = fork();

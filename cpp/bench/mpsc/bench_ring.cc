@@ -28,9 +28,10 @@
 //
 // The fetch_add comparison ring is FIXED-EXTENT ONLY (the reader zeroes retired
 // descriptors, which only lands on descriptor boundaries when every record has
-// the same extent) and has no identity, no recovery, and no misuse guards.
-// That is the point: it prices the claim mechanism alone, and the restriction
-// FAVORS fetch_add.
+// the same extent) and has no identity, recovery, or misuse guards.  It is a
+// deliberately stripped fixed-extent comparison, not a full queue substitute:
+// the omitted safeguards favor fetch_add, while the 56-byte benchmark gives
+// both implementations the same fixed extent.
 
 // A debug build measures the asserts, not the queue. See the note above.
 #ifndef NDEBUG
@@ -49,6 +50,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <map>
 #include <string>
 #include <thread>
 #include <vector>
@@ -60,20 +63,64 @@ using namespace pgt::mpsc;
 
 using Clock = std::chrono::steady_clock;
 
+std::vector<unsigned> g_cpus;
+
+[[noreturn]] void benchmarkError(char const* message) {
+  std::fprintf(stderr, "benchmark setup failed: %s\n", message);
+  std::exit(2);
+}
+
 void pinTo(unsigned cpu) {
   cpu_set_t set;
   CPU_ZERO(&set);
   CPU_SET(cpu, &set);
-  if (pthread_setaffinity_np(pthread_self(), sizeof(set), &set) != 0) {
-    std::fprintf(stderr, "warning: could not pin to cpu %u\n", cpu);
+  int const rc = pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
+  if (rc != 0) {
+    std::fprintf(stderr, "benchmark setup failed: could not pin to cpu %u: %s\n", cpu,
+                 std::strerror(rc));
+    std::exit(2);
   }
 }
 
-// SMT siblings enumerate as (0,1),(2,3),... here (verified via topology);
-// spread threads across physical cores first.
-unsigned cpuForSlot(unsigned slot) {
-  unsigned const cores = 12;
-  return (slot < cores) ? slot * 2 : (slot - cores) * 2 + 1;
+// Use only CPUs available to this process (which may be a cpuset subset), and
+// put one logical CPU from each physical core before SMT siblings.  The old
+// numeric mapping described one particular host, not this benchmark's host.
+void discoverCpus() {
+  cpu_set_t allowed;
+  CPU_ZERO(&allowed);
+  if (sched_getaffinity(0, sizeof(allowed), &allowed) != 0) {
+    benchmarkError("sched_getaffinity failed");
+  }
+
+  std::map<std::string, std::vector<unsigned>> by_core;
+  for (unsigned cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
+    if (!CPU_ISSET(cpu, &allowed)) continue;
+    std::ifstream package("/sys/devices/system/cpu/cpu" + std::to_string(cpu) +
+                          "/topology/physical_package_id");
+    std::ifstream core("/sys/devices/system/cpu/cpu" + std::to_string(cpu) +
+                       "/topology/core_id");
+    std::string package_id;
+    std::string core_id;
+    if (!(package >> package_id) || !(core >> core_id)) {
+      benchmarkError("could not read CPU package/core topology");
+    }
+    by_core[package_id + ":" + core_id].push_back(cpu);
+  }
+  if (by_core.empty()) benchmarkError("the process has no allowed CPUs");
+
+  for (auto const& [_, siblings] : by_core) g_cpus.push_back(siblings.front());
+  for (auto const& [_, siblings] : by_core) {
+    g_cpus.insert(g_cpus.end(), siblings.begin() + 1, siblings.end());
+  }
+}
+
+void pinToSlot(unsigned slot) {
+  if (slot >= g_cpus.size()) {
+    std::fprintf(stderr, "benchmark setup failed: need %u CPUs, but only %zu are allowed\n", slot + 1,
+                 g_cpus.size());
+    std::exit(2);
+  }
+  pinTo(g_cpus[slot]);
 }
 
 double tscGhz() {
@@ -142,14 +189,20 @@ class FetchAddRing {
 // ---------------------------------------------------------------------------
 
 struct HopsState {
-  std::atomic<u64_t> hist[64];
+  u64_t hist[64]{};
 };
 
 struct HopsPolicy : DefaultPolicy {
-  HopsState* state = nullptr;
-  void onClaim(u64_t, u64_t, u32_t hops) noexcept {
-    state->hist[hops < 64 ? hops : 63].fetch_add(1, std::memory_order_relaxed);
+  std::vector<HopsState>* states = nullptr;
+  inline static thread_local HopsState* local = nullptr;
+
+  void bindWriter(unsigned writer) noexcept { local = &(*states)[writer]; }
+  void reset() noexcept {
+    for (auto& state : *states) {
+      for (u64_t& count : state.hist) count = 0;
+    }
   }
+  void onClaim(u64_t, u64_t, u32_t hops) noexcept { ++local->hist[hops < 64 ? hops : 63]; }
   void onBusy(u32_t) noexcept { cpuRelax(); }
   void onContended(u32_t) noexcept { cpuRelax(); }
 };
@@ -200,12 +253,14 @@ void printLat(char const* tag, std::vector<u64_t>& s, double ghz) {
 // masquerades as queue latency: "p99 = 29us" reads as a slow queue when the
 // truth may be "the write costs 200ns and the reader was 28us behind" -- a
 // different conclusion pointing at a different fix.
-template <typename SetupFn, typename TryFn, typename DrainFn>
+template <typename SetupFn, typename TryFn, typename DrainFn, typename ResetFn>
 RunResult runFor(unsigned writers, double secs, SetupFn&& setup, TryFn&& tryOne,
-                 DrainFn&& drainSome) {
-  std::atomic<bool> stop{false};
+                 DrainFn&& drainSome, ResetFn&& resetStats) {
+  enum class Phase : unsigned char { kWait, kWarmup, kArmed, kMeasure, kStop };
+  constexpr auto kWarmup = std::chrono::milliseconds(250);
+  std::atomic<Phase> phase{Phase::kWait};
   std::atomic<unsigned> ready{0};
-  std::atomic<bool> go{false};
+  std::atomic<unsigned> armed{0};
   std::atomic<unsigned> finished{0};
   std::vector<u64_t> counts(writers, 0);
   std::vector<std::vector<u64_t>> costs(writers), adms(writers);
@@ -214,14 +269,28 @@ RunResult runFor(unsigned writers, double secs, SetupFn&& setup, TryFn&& tryOne,
   ts.reserve(writers);
   for (unsigned w = 0; w < writers; ++w) {
     ts.emplace_back([&, w] {
-      pinTo(cpuForSlot(w + 1));  // slot 0 is the reader
+      pinToSlot(w + 1);  // slot 0 is the reader
       setup(w);
       ready.fetch_add(1);
-      while (!go.load(std::memory_order_acquire)) cpuRelax();
+      while (phase.load(std::memory_order_acquire) == Phase::kWait) cpuRelax();
       u64_t n = 0;
       auto& cost = costs[w];
       auto& adm = adms[w];
-      while (!stop.load(std::memory_order_relaxed)) {
+      while (true) {
+        Phase const current = phase.load(std::memory_order_relaxed);
+        if (current == Phase::kStop) break;
+        if (current == Phase::kWarmup) {
+          while (!tryOne(w)) cpuRelax();
+          continue;
+        }
+        if (current == Phase::kArmed) {
+          armed.fetch_add(1, std::memory_order_release);
+          while (phase.load(std::memory_order_acquire) == Phase::kArmed) cpuRelax();
+          continue;
+        }
+        // The count and samples begin only after every writer is armed.  The
+        // reader remains active through shutdown so a writer blocked at the
+        // deadline can exit.
         if ((n & 63) == 0) {  // sample 1 in 64: percentiles at ~1.5% perturbation
           unsigned aux;
           u64_t const t0 = __rdtscp(&aux);
@@ -246,22 +315,27 @@ RunResult runFor(unsigned writers, double secs, SetupFn&& setup, TryFn&& tryOne,
       finished.fetch_add(1, std::memory_order_release);
     });
   }
-  pinTo(cpuForSlot(0));
+  pinToSlot(0);
   while (ready.load() != writers) cpuRelax();
-  auto const t0 = Clock::now();
-  go.store(true, std::memory_order_release);
-  while (std::chrono::duration<double>(Clock::now() - t0).count() < secs) {
-    drainSome();
-  }
-  stop.store(true, std::memory_order_relaxed);
-  // Keep draining until every writer has exited: one may be blocked on a full
-  // ring and needs the reader to make room before it can see the stop flag.
+  phase.store(Phase::kWarmup, std::memory_order_release);
+  auto const warmup_start = Clock::now();
+  while (Clock::now() - warmup_start < kWarmup) drainSome();
+
+  phase.store(Phase::kArmed, std::memory_order_release);
+  while (armed.load(std::memory_order_acquire) != writers) drainSome();
+  resetStats();
+  auto const timed_start = Clock::now();
+  phase.store(Phase::kMeasure, std::memory_order_release);
+  while (Clock::now() - timed_start < std::chrono::duration<double>(secs)) drainSome();
+  auto const timed_end = Clock::now();
+  phase.store(Phase::kStop, std::memory_order_release);
+
+  // This is shutdown/drain work, deliberately outside the throughput interval.
   while (finished.load(std::memory_order_acquire) != writers) drainSome();
   for (auto& t : ts) t.join();
-  auto const t1 = Clock::now();
   RunResult r;
   for (auto c : counts) r.records += c;
-  r.secs = std::chrono::duration<double>(t1 - t0).count();
+  r.secs = std::chrono::duration<double>(timed_end - timed_start).count();
   for (auto& v : costs) r.lat.insert(r.lat.end(), v.begin(), v.end());
   for (auto& v : adms) r.adm.insert(r.adm.end(), v.begin(), v.end());
   for (auto s : sampled) r.sampled += s;
@@ -305,6 +379,15 @@ u64_t drainBatch(Q& q, unsigned batch = 256) {
 }
 
 char payload_buf[65536];
+volatile u64_t g_payload_sink = 0;
+
+u64_t touchPayload(ReadSpan const& payload) {
+  u64_t sum = 0;
+  for (sz_t i = 0; i < payload.size(); ++i) {
+    sum += std::to_integer<unsigned char>(payload.data()[i]);
+  }
+  return sum;
+}
 
 template <typename PolicyT = DefaultPolicy>
 RunResult benchRing(sz_t capacity, unsigned writers, double secs, sz_t payload,
@@ -316,8 +399,16 @@ RunResult benchRing(sz_t capacity, unsigned writers, double secs, sz_t payload,
   }
   if (!q.attachReader()) std::exit(1);
   return runFor(
-      writers, secs, [](unsigned) {}, [&](unsigned) { return tryWrite(q, payload_buf, payload); },
-      [&] { return drainBatch(q); });
+      writers, secs,
+      [&](unsigned writer) {
+        if constexpr (requires(PolicyT& p, unsigned w) { p.bindWriter(w); }) {
+          q.policy().bindWriter(writer);
+        }
+      },
+      [&](unsigned) { return tryWrite(q, payload_buf, payload); }, [&] { return drainBatch(q); },
+      [&] {
+        if constexpr (requires(PolicyT& p) { p.reset(); }) q.policy().reset();
+      });
 }
 
 // Any QueueLike variant. attach=true registers each writer thread first.
@@ -336,7 +427,7 @@ RunResult benchQueue(Q& q, unsigned writers, double secs, sz_t payload, bool att
         }
       },
       [&](unsigned) { return tryWrite(q, payload_buf, payload); },
-      [&] { return drainBatch(q); });
+      [&] { return drainBatch(q); }, [] {});
 }
 
 template <typename Q>
@@ -366,14 +457,14 @@ RunResult benchFetchAdd(sz_t capacity, unsigned writers, double secs, sz_t paylo
           ++n;
         }
         return n;
-      });
+      }, [] {});
 }
 
 void report(char const* name, unsigned writers, sz_t payload, RunResult r) {
   double const mrps = r.records / r.secs / 1e6;
   double const gbs = r.records / r.secs * extentFor(payload) / 1e9;
-  std::printf("%-24s w=%-2u payload=%-6zu %10.2f Mrec/s  %8.2f GB/s  %8.1f ns/rec\n", name,
-              writers, payload, mrps, gbs, 1e3 / mrps);
+  std::printf("%-24s w=%-2u payload=%-6zu timed=%.3fs %10.2f Mrec/s  %8.2f GB/s  %8.1f ns/rec\n",
+              name, writers, payload, r.secs, mrps, gbs, 1e3 / mrps);
   std::fflush(stdout);
   printLat("write-cost", r.lat, g_ghz);
   if (r.sampled != 0) {
@@ -403,7 +494,7 @@ void pushLatency(char const* name, u32_t shards, unsigned writers, sz_t samples,
   std::vector<std::thread> ts;
   for (unsigned w = 0; w < writers; ++w) {
     ts.emplace_back([&, w] {
-      pinTo(cpuForSlot(w + 1));
+      pinToSlot(w + 1);
       if (attach && !q.attachWriter()) std::exit(1);
       auto& v = lat[w];
       v.reserve(samples);
@@ -417,7 +508,7 @@ void pushLatency(char const* name, u32_t shards, unsigned writers, sz_t samples,
       done.fetch_add(1);
     });
   }
-  pinTo(cpuForSlot(0));
+  pinToSlot(0);
   while (done.load() != writers) drainBatch(q);
   for (auto& t : ts) t.join();
   std::vector<u64_t> all;
@@ -439,7 +530,7 @@ void sweepCost(u32_t shards, unsigned writers, double secs, double ghz) {
   std::vector<std::thread> ts;
   for (unsigned w = 0; w < writers; ++w) {
     ts.emplace_back([&, w] {
-      pinTo(cpuForSlot(w + 1));
+      pinToSlot(w + 1);
       if (!q.attachWriter()) std::exit(1);
       while (!stop.load(std::memory_order_relaxed)) {
         u64_t stamp[7];  // 56 bytes
@@ -450,7 +541,7 @@ void sweepCost(u32_t shards, unsigned writers, double secs, double ghz) {
       }
     });
   }
-  pinTo(cpuForSlot(0));
+  pinToSlot(0);
   std::vector<u64_t> deltas;
   deltas.reserve(4'000'000);
   auto const t0 = Clock::now();
@@ -473,6 +564,7 @@ void sweepCost(u32_t shards, unsigned writers, double secs, double ghz) {
 
 int main(int argc, char** argv) {
   if (argc < 2) return usage();
+  discoverCpus();
   std::string const mode = argv[1];
   std::memset(payload_buf, 0x5a, sizeof(payload_buf));
   g_ghz = tscGhz();
@@ -528,7 +620,7 @@ int main(int argc, char** argv) {
     std::vector<std::thread> ts;
     for (unsigned w = 0; w < writers; ++w) {
       ts.emplace_back([&, w] {
-        pinTo(cpuForSlot(w + 1));
+        pinToSlot(w + 1);
         auto& v = lat[w];
         v.reserve(samples);
         unsigned aux;
@@ -541,7 +633,7 @@ int main(int argc, char** argv) {
         done.fetch_add(1);
       });
     }
-    pinTo(cpuForSlot(0));
+    pinToSlot(0);
     while (done.load() != writers) drainBatch(q);
     stop.store(true);
     for (auto& t : ts) t.join();
@@ -555,16 +647,20 @@ int main(int argc, char** argv) {
   if (mode == "hops") {
     unsigned const writers = argc > 2 ? std::atoi(argv[2]) : 8;
     double const secs = argc > 3 ? std::atof(argv[3]) : 2.0;
-    static HopsState hs{};
+    std::vector<HopsState> states(writers);
     HopsPolicy pol;
-    pol.state = &hs;
+    pol.states = &states;
     auto r = benchRing<HopsPolicy>(1u << 20, writers, secs, 56, pol);
     report("ring+hops", writers, 56, r);
+    u64_t hist[64]{};
+    for (auto const& state : states) {
+      for (unsigned i = 0; i < 64; ++i) hist[i] += state.hist[i];
+    }
     u64_t total = 0;
-    for (auto& h : hs.hist) total += h.load();
+    for (u64_t c : hist) total += c;
     std::printf("hops histogram (claims=%llu):\n", (unsigned long long)total);
     for (unsigned i = 0; i < 64; ++i) {
-      u64_t const c = hs.hist[i].load();
+      u64_t const c = hist[i];
       if (c) std::printf("  %2u hops: %10llu  (%.3f%%)\n", i, (unsigned long long)c,
                          100.0 * c / total);
     }
@@ -577,22 +673,27 @@ int main(int argc, char** argv) {
     Ring<> q;
     if (!Ring<>::create(Config{.capacity = cap}, q)) return 1;
     if (!q.attachReader()) return 1;
-    pinTo(cpuForSlot(1));
+    pinToSlot(0);
     u64_t filled = 0;
     while (q.write(payload_buf, 56)) ++filled;  // fill to backpressure
-    pinTo(cpuForSlot(0));
+    pinToSlot(0);
     auto const t0 = Clock::now();
     u64_t drained = 0;
+    u64_t payload_sum = 0;
     while (true) {
       auto s = q.peek();
       if (s.data() == nullptr) break;
+      payload_sum += touchPayload(s);
       q.pop();
       ++drained;
     }
+    g_payload_sink = payload_sum;  // retain the payload reads in the timed loop
     auto const dt = std::chrono::duration<double>(Clock::now() - t0).count();
-    std::printf("drain: %llu records (%zu MiB ring) in %.3fs = %.2f Mrec/s, %.2f ns/rec\n",
-                (unsigned long long)drained, mib, dt, drained / dt / 1e6,
-                dt * 1e9 / drained);
+    double const payload_mib = drained * 56.0 / (1u << 20);
+    std::printf("payload-touch drain: %llu records (%.2f MiB payload from %zu MiB ring) in %.3fs = "
+                "%.2f Mrec/s, %.2f MiB/s, %.2f ns/rec\n",
+                (unsigned long long)drained, payload_mib, mib, dt, drained / dt / 1e6,
+                payload_mib / dt, dt * 1e9 / drained);
     return 0;
   }
 

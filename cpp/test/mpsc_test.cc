@@ -26,6 +26,8 @@
 
 #include <doctest/doctest.h>
 
+#include <cerrno>
+
 #include <pthread.h>
 #include <sched.h>
 #include <sys/mman.h>
@@ -163,7 +165,7 @@ TEST_CASE_TEMPLATE("differential vs reference queue with short commits", Q, Mpsc
         bytes[i] = static_cast<std::byte>(byte_seed >> 56);
       }
       std::memcpy(s.data(), bytes.data(), m);
-      q.commit(m);
+      q.commit(s, m);
       pushed_bytes += extentFor(m);
       ref.push(std::move(bytes));
     }
@@ -567,6 +569,47 @@ TEST_CASE("attachReader refuses a rival while the holder lives, re-admits the ho
   CHECK(same_thread.attachReader());
 }
 
+TEST_CASE("Spsc: direct short commit and zero-length write") {
+  Spsc q;
+  REQUIRE(Spsc::create(smallConfig(), q));
+  REQUIRE(q.attachWriter());
+  REQUIRE(q.attachReader());
+
+  WriteSpan const s = q.reserve(31);
+  REQUIRE(s.data() != nullptr);
+  std::memset(s.data(), 0x5a, 17);
+  q.commit(s, 17);
+  ReadSpan r = q.peek();
+  REQUIRE(r.data() != nullptr);
+  CHECK(r.size() == 17);
+  CHECK(r[0] == std::byte{0x5a});
+  q.pop();
+
+  REQUIRE(q.write(nullptr, 0));
+  r = q.peek();
+  REQUIRE(r.data() != nullptr);
+  CHECK(r.size() == 0);
+  q.pop();
+
+  // A second view cannot take over live writer-private cursors. Explicitly
+  // detach the first owner before transferring the shared slot to a fresh view.
+  SpscRing<> fresh(q.region(), 0);
+  CHECK(!fresh.attachWriter());
+  q.detachWriter();
+  REQUIRE(fresh.attachWriter());
+  // The detached view is stale even though both views have the same thread id.
+  // It must not regain ownership while `fresh` owns the shared slot.
+  CHECK(!q.attachWriter());
+  REQUIRE(fresh.write(nullptr, 0));
+  r = q.peek();
+  REQUIRE(r.data() != nullptr);
+  CHECK(r.size() == 0);
+  q.pop();
+  fresh.detachWriter();
+  REQUIRE(q.attachWriter());
+  q.detachWriter();
+}
+
 // ---------------------------------------------------------------------------
 // Region.
 // ---------------------------------------------------------------------------
@@ -603,6 +646,15 @@ TEST_CASE("Region: geometry, mirror aliasing, arena init") {
     CHECK(r.writerSlots()[i].generation == 0);
   }
   CHECK(reinterpret_cast<std::byte*>(r.writerSlots() + 3) <= r.arena(0));
+}
+
+TEST_CASE("Region: rejects an unencodable capacity before rounding") {
+  Config cfg;
+  cfg.capacity = kMaxExtent + 1;
+  Region r;
+  errno = 0;
+  CHECK(!Region::create(cfg, r));
+  CHECK(errno == EINVAL);
 }
 
 TEST_CASE("Region: control area sizes the writer registry past one page") {
