@@ -88,14 +88,22 @@
 // median. Ordering is expensive globally and cheap locally -- the argument for
 // sharding rather than abandoning order.
 //
-// BUT SHARDING FIXES THE MEDIAN, NOT THE TAIL. ShardedMpsc improves Mpsc's p50
-// by 9x while its p99.99 (45 us) converges back toward Mpsc's (67 us), and stays
-// 2.4x worse than MultiSpsc's (18 us). Head-of-line blocking is a PER-RING
-// property: more shards means fewer writers stuck behind any one stall, but a
-// writer stalled in its own reserve-to-commit window still pins its ring's
-// reader progress no matter how many other rings exist. If you are choosing
-// ShardedMpsc for tail latency rather than for ordering, that is the wrong
-// reason -- take MultiSpsc.
+// WHAT IS ESTABLISHED, AND WHAT IS NOT. The medians above are separated under
+// repetition (interleaved runs, IQR 2-6%) and can be relied on: MultiSpsc is
+// ~2x ShardedMpsc at the p50 and ~1.55x on throughput at w=8/K=8.
+//
+// The TAIL comparison between them is NOT established. An earlier single-run
+// reading suggested ShardedMpsc's p99.99 was 2.4x worse; under repetition the
+// two overlap (34.0 us [32.6, 35.5] vs 32.4 us [30.8, 41.9]) and are
+// indistinguishable on that box. Do not choose between them on tail latency.
+//
+// A measurement caveat that applies to every contended tail figure here: the
+// harness times a full write() INCLUDING its retry-on-full loop, so contended
+// tails conflate the queue's own cost with time spent waiting for the reader to
+// drain. At w=8 the writers outrun the reader, so those tails are substantially
+// admission delay -- a property of the reader keeping up, not of the queue.
+// Until those are measured separately, read contended p99+ as an upper bound on
+// queue cost, not as queue cost.
 //
 // (Maxima are omitted deliberately: on the measurement box every run tripped
 // the >8x-p99 OS-jitter check, so observed maxima were scheduler preemption,
@@ -179,16 +187,16 @@ struct Config {
   //   one Ring, writers   1      2      4      8      16
   //   Mrec/s              53.7   ~19    5.0    2.3    1.6
   //
-  // Sharding recovers it, and the curve never flattens and never regresses --
-  // 16 writers spread over K shards, measured:
+  // Sharding recovers it, and the curve never flattens and never regresses.
+  // Per-halving ratios under repetition (all separated, n=8): 16->8 wps x2.73,
+  // 8->4 x2.23, 4->2 x2.06, 2->1 x1.73. So roughly 2x per halving through the
+  // middle, better than that at the contended end, and under-delivering on the
+  // last halving.
   //
-  //   K (wps)   1 (16)   2 (8)   4 (4)   8 (2)   16 (1)
-  //   Mrec/s    1.5      4.0     7.3     17.8    35.7
-  //
-  // Roughly 2x per halving of wps, all the way down. So: **wps = 1 is optimal**;
-  // wps = 2 is the reasonable compromise at half the memory; every doubling
-  // beyond that costs about half the aggregate. (Two earlier estimates here --
-  // 8-16 and then 2-4 writers per shard -- were both too conservative.)
+  // So: **wps = 1 is optimal**; wps = 2 is the reasonable compromise at half the
+  // memory; every doubling beyond that costs about half the aggregate. (Two
+  // earlier estimates here -- 8-16 and then 2-4 writers per shard -- were both
+  // too conservative.)
   //
   // Shard count itself is nearly free for the reader: sparse-traffic delivery
   // p50 measured 84 / 86 / 117 ns at K = 8 / 32 / 128, so the sweep costs ~33ns
