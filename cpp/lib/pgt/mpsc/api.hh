@@ -67,26 +67,28 @@
 // with maxWriters(): kUnboundedWriters for the others. Generic code that must
 // handle both should branch on that rather than discovering kNoSlot at runtime.
 //
-// CHOOSING ONE. Measured, Zen 5, 56 B records, push latency in ns:
+// CHOOSING ONE. Zen 5, 56 B records, medians of interleaved independent runs.
+// WRITE COST only -- the successful attempt, excluding retry-on-full wait,
+// which is a reader-capacity property and is broken out separately below.
 //
-//                          Mrec/s    p50     p95     p99     p99.99
-//   Spsc        w=1          64.2     21       -       -          -
-//   Mpsc        w=1          53.7     32      74      96        298
-//   Mpsc        w=8           2.3   1722   16316   28912      66945
-//   ShardedMpsc w=8, K=8     29.6    191     468    6144      44633
-//   MultiSpsc   w=8          70.6     53     276    1159      18347
+//                          Mrec/s    p50     p99   p99.99   retried
+//   Spsc        w=1          64.2     21       -        -        0%
+//   Mpsc        w=1          41.4     64      96      366        0%
+//   Mpsc        w=8           2.3    833   33000   135000        0%
+//   ShardedMpsc w=8, K=8     28.0    170     445    17160      2.3%
+//   MultiSpsc   w=8          43.4     74     382    10878      1.7%
 //
 //   Total order across ALL writers      -> Mpsc. Excellent to 2 writers,
 //                                          collapses beyond; shard past that.
 //   Many writers, per-shard order OK    -> ShardedMpsc, K >= writers.
-//   Per-writer FIFO is enough           -> MultiSpsc. Fastest at every
+//   Per-writer FIFO is enough           -> MultiSpsc. Lower write cost at every
 //                                          percentile; writer count capped at K.
 //   Single producer                     -> Spsc.
 //
-// A total order across all writers costs ~30x under contention (Mpsc vs
-// MultiSpsc at w=8); per-SHARD order costs ~2.4x over per-writer order at the
-// median. Ordering is expensive globally and cheap locally -- the argument for
-// sharding rather than abandoning order.
+// A total order across all writers is expensive under contention (Mpsc vs
+// MultiSpsc at w=8); per-SHARD order costs ~2.3x over per-writer order at the
+// p50 and ~1.55x on throughput. Ordering is expensive globally and cheap
+// locally -- the argument for sharding rather than abandoning order.
 //
 // WHAT IS ESTABLISHED, AND WHAT IS NOT. The medians above are separated under
 // repetition (interleaved runs, IQR 2-6%) and can be relied on: MultiSpsc is
