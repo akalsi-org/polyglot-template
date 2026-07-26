@@ -67,28 +67,100 @@
 // with maxWriters(): kUnboundedWriters for the others. Generic code that must
 // handle both should branch on that rather than discovering kNoSlot at runtime.
 //
-// CHOOSING ONE. Measured, Zen 5, 56 B records, aggregate Mrec/s:
+// CHOOSING ONE. Zen 5, 56 B records, medians of interleaved independent runs.
+// WRITE COST only -- the successful attempt, excluding retry-on-full wait,
+// which is a reader-capacity property and is broken out separately below.
 //
-//   Spsc         w=1              64.2    p50 21 ns    the ceiling
-//   Mpsc         w=1              53.7    p50 31 ns
-//   Mpsc         w=2              ~19
-//   Mpsc         w=8              2.3     p50 1.4 us   collapsed
-//   ShardedMpsc  w=8,  K=8        29.6
-//   ShardedMpsc  w=16, K=16       35.7
-//   MultiSpsc    w=8              70.6    p50 136 ns
+//                          Mrec/s    p50     p99   p99.99   retried
+//   Spsc        w=1          64.2     21       -        -        0%
+//   Mpsc        w=1          41.4     64      96      366        0%
+//   Mpsc        w=8           2.3    833   33000   135000        0%
+//   ShardedMpsc w=8, K=8     28.0    170     445    17160      2.3%
+//   MultiSpsc   w=8          43.4     74     382    10878      1.7%
 //
-//   Total order across ALL writers      -> Mpsc. Excellent to 2 writers,
-//                                          collapses beyond; shard past that.
+//   Total order across ALL writers      -> Mpsc, but see the collapse curve.
 //   Many writers, per-shard order OK    -> ShardedMpsc, K >= writers.
-//   Per-writer FIFO is enough           -> MultiSpsc. ~2.4x ShardedMpsc again,
-//                                          but writer count is capped at K.
+//   Per-writer FIFO is enough           -> MultiSpsc. Lower write cost at every
+//                                          percentile; writer count capped at K.
 //   Single producer                     -> Spsc.
 //
-// The two prices worth knowing: a total order across all writers costs ~30x
-// under contention (Mpsc vs MultiSpsc at w=8), while per-SHARD total order costs
-// only ~2.4x over per-writer order. Ordering is expensive globally and cheap
-// locally, which is the whole argument for sharding rather than abandoning
-// order.
+// A total order across all writers is expensive under contention (Mpsc vs
+// MultiSpsc at w=8); per-SHARD order costs ~2.3x over per-writer order at the
+// p50 and ~1.55x on throughput. Ordering is expensive globally and cheap
+// locally -- the argument for sharding rather than abandoning order.
+//
+// THE Mpsc COLLAPSE IS A CLIFF, AND ITS TAIL GOES FIRST. Quiet-box medians,
+// adjacent pairs separated:
+//
+//   writers        1       2       4       8
+//   Mrec/s      41.4    27.0     5.5     2.1
+//   step          --   x0.65   x0.20   x0.38
+//   write p99   96 ns  1.6 us  8.6 us  33 us
+//
+// The 2->4 doubling loses 80% of throughput in one step; the doublings either
+// side are ordinary. But the p99 grows ~17x across 1->2, BEFORE throughput
+// falls much -- so the two thresholds differ:
+//
+//   tail-sensitive       -> shard at 2 writers
+//   throughput-sensitive -> shard at 3+
+//
+// Mpsc's retried fraction is 0.00% at every writer count measured (1, 2, 4, 8):
+// the ring never fills, because reserve() declines only on capacity exhaustion
+// and absorbs contention internally. So ALL of Mpsc's contended cost is
+// claim-path, never backpressure, and sharding is the fix rather than a faster
+// reader.
+//
+// For the sharded pair, admission delay FADES IN rather than crossing a
+// threshold -- retried% at w=2/4/8 is 0.01/1.16/2.33 (ShardedMpsc) and
+// 0.14/0.87/1.74 (MultiSpsc), roughly doubling per doubling of writers. Below
+// ~1% retried (w<=4 at these parameters) admission is noise; by w=8 it owns the
+// combined tail.
+//
+// The fetch_add A/B widens with contention as the spec predicted -- cf loses
+// 16% at w=1, 1.6x at w=2, 3.9x at w=4, ~5x at w=8 -- so the causal-chain
+// serialisation, not the claim instruction, is the cost driver.
+//
+// All figures above are medians of 11 interleaved independent runs on a quiet
+// box, and every adjacent pair quoted is separated (no IQR overlap). Two
+// caveats on precision: ShardedMpsc at w=4/K=4 is the least precise point in
+// the table (25.7 Mrec/s, IQR ~20%) and should be quoted with its interval;
+// and machine load is the dominant error term here -- an earlier campaign run
+// while other processes compiled was wrong by 3.5x and inverted a headline
+// result, so re-measure on a quiet box before trusting any change.
+//
+// WHAT IS ESTABLISHED, AND WHAT IS NOT. The medians above are separated under
+// repetition (interleaved runs, IQR 2-6%) and can be relied on: MultiSpsc is
+// ~2x ShardedMpsc at the p50 and ~1.55x on throughput at w=8/K=8.
+//
+// THE TAIL COMPARISON, DECOMPOSED. Combined write()+retry timing makes the
+// ShardedMpsc/MultiSpsc p99.99 tails indistinguishable (34.0 us [32.6, 35.5]
+// vs 32.4 us [30.8, 41.9] under repetition). Splitting each sampled push into
+// WRITE COST (the successful attempt alone) and ADMISSION DELAY (the
+// retry-on-full wait before it) shows why, and separates them again:
+//
+//   w=8/K=8, medians of 9+ interleaved runs:      ShardedMpsc    MultiSpsc
+//     write-cost   p50 / p99 / p99.99 (ns)      170/445/17160  74/382/10878
+//     admission    retried% of pushes                    2.3%         1.7%
+//     admission    delay p50 / p99 (ns)           5158/21183   5669/22531
+//
+// The admission columns are near-identical: retry wait is READER-bound (both
+// variants drain through the same sweep) and says nothing about the claim
+// paths. It is also what dominated the combined p99.9+ -- ~2% of pushes
+// retrying at 5-22 us swamps a 1-in-10^4 percentile. Decomposed, MultiSpsc's
+// OWN cost is uniformly lower (2.3x at p50, 1.6x at p99.99) and the tails are
+// separated after all. Choose on write-cost; treat admission delay as a
+// reader-capacity property, not a queue property.
+//
+// Mpsc's contended tail decomposes DIFFERENTLY: at w=8 its retried fraction is
+// ZERO -- the ring is never full, and reserve() declines only on capacity, so
+// its entire tail (write-cost p99 33 us, p99.99 135 us) is contention wait
+// INSIDE the claim path (CAS retries and kClaimed backoff). That time is
+// genuinely attributable to the queue's arbitration under contention, not to
+// the reader falling behind.
+//
+// (Maxima are omitted deliberately: on the measurement box every run tripped
+// the >8x-p99 OS-jitter check, so observed maxima were scheduler preemption,
+// not queue behaviour. They need bare metal to mean anything.)
 //
 // The API is deliberately two-phase. A single-shot write() cannot express a short
 // commit -- the caller must be able to reserve an upper bound, discover the actual
@@ -105,6 +177,14 @@
 // participant. This is a contract on callers, not something the queue can defend
 // against -- the no-timeout rule means a slow writer and a hung writer are
 // deliberately indistinguishable.
+//
+// A corollary for SINGLE-THREADED writer+reader use: recovery and busy-record
+// progress happen only inside peek(). A thread that is both the writer and the
+// reader can therefore wedge itself -- if its write path blocks on the ring
+// (e.g. behind a dead writer's record awaiting recovery, or behind capacity
+// that only draining frees), the peek() that would unblock it never runs.
+// Such a caller must interleave peek()/pop() with its writes and must not spin
+// in reserve()/write() retry loops.
 
 #include "../core/types.hh"
 
@@ -159,16 +239,16 @@ struct Config {
   //   one Ring, writers   1      2      4      8      16
   //   Mrec/s              53.7   ~19    5.0    2.3    1.6
   //
-  // Sharding recovers it, and the curve never flattens and never regresses --
-  // 16 writers spread over K shards, measured:
+  // Sharding recovers it, and the curve never flattens and never regresses.
+  // Per-halving ratios under repetition (all separated, n=8): 16->8 wps x2.73,
+  // 8->4 x2.23, 4->2 x2.06, 2->1 x1.73. So roughly 2x per halving through the
+  // middle, better than that at the contended end, and under-delivering on the
+  // last halving.
   //
-  //   K (wps)   1 (16)   2 (8)   4 (4)   8 (2)   16 (1)
-  //   Mrec/s    1.5      4.0     7.3     17.8    35.7
-  //
-  // Roughly 2x per halving of wps, all the way down. So: **wps = 1 is optimal**;
-  // wps = 2 is the reasonable compromise at half the memory; every doubling
-  // beyond that costs about half the aggregate. (Two earlier estimates here --
-  // 8-16 and then 2-4 writers per shard -- were both too conservative.)
+  // So: **wps = 1 is optimal**; wps = 2 is the reasonable compromise at half the
+  // memory; every doubling beyond that costs about half the aggregate. (Two
+  // earlier estimates here -- 8-16 and then 2-4 writers per shard -- were both
+  // too conservative.)
   //
   // Shard count itself is nearly free for the reader: sparse-traffic delivery
   // p50 measured 84 / 86 / 117 ns at K = 8 / 32 / 128, so the sweep costs ~33ns
@@ -188,7 +268,9 @@ struct Config {
   bool preallocate = true;
 };
 
-// Returned by reserve(): empty when the queue cannot accept the record.
+// Returned by reserve(): empty when the queue cannot accept the record. commit()
+// takes this exact pointer-and-length span plus an actual length no greater than
+// its size, so same-grain over-commits and accidental subspans are rejected.
 using WriteSpan = std::span<std::byte>;
 using ReadSpan = std::span<std::byte const>;
 
@@ -211,7 +293,7 @@ concept QueueLike = requires(Q q, void const* p, sz_t n, u32_t slot) {
 
   // Writer. reserve() returns an empty span on failure; status() reports why.
   { q.reserve(n) }        -> std::same_as<WriteSpan>;
-  { q.commit(n) }         -> std::same_as<void>;
+  { q.commit(WriteSpan{}, n) } -> std::same_as<void>;
   { q.abort() }           -> std::same_as<void>;
   { q.write(p, n) }       -> std::same_as<bool>;
   { q.status() }          -> std::same_as<Status>;

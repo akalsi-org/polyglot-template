@@ -99,6 +99,24 @@ inline constexpr u64_t kInvalidPos = ~u64_t{0};
   std::abort();
 }
 
+// Hot-path force-inline, degraded under TSan. TSan erases inlined frames from
+// race stacks, which forces cpp/test/tsan.supp into file-wide rules that shadow
+// real races (a payload-vs-payload overlap would hide behind them); with the
+// frames intact the suppressions can name exact functions. Zero cost to
+// production builds -- the attribute is unchanged when TSan is off.
+#if defined(__SANITIZE_THREAD__)
+#define PGT_MPSC_TSAN 1
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define PGT_MPSC_TSAN 1
+#endif
+#endif
+#if defined(PGT_MPSC_TSAN)
+#define PGT_MPSC_HOT
+#else
+#define PGT_MPSC_HOT [[gnu::always_inline]]
+#endif
+
 template <typename Policy = DefaultPolicy>
 class Ring {
  public:
@@ -154,7 +172,7 @@ class Ring {
   // corrupts). Workaround if simultaneous reservations are needed: give the
   // rings distinct Policy types, which gives them distinct instantiations and
   // therefore distinct reservation slots.
-  [[gnu::always_inline]] inline WriteSpan reserve(sz_t n) noexcept {
+  PGT_MPSC_HOT inline WriteSpan reserve(sz_t n) noexcept {
     WriterTls& t = tls_;
     assert(t.p == kInvalidPos && "reserve while a reservation is held");  // misuse (d)
     if (t.owner_epoch != epoch_) [[unlikely]] {
@@ -214,8 +232,8 @@ class Ring {
     return reserveSlow(n, need);
   }
 
-  // Publishes the record with `actual_n <= n` payload bytes.
-  void commit(sz_t actual_n) noexcept {
+  // Publishes up to `actual_n` payload bytes from exactly this reservation.
+  void commit(WriteSpan reservation, sz_t actual_n) noexcept {
     WriterTls& t = tls_;
     // Misuse (b)/(c)/(e): unconditional in release, see misuseTrap. (e) is
     // enforced through (b) by construction, with no per-commit syscall: the
@@ -228,6 +246,10 @@ class Ring {
       misuseTrap("commit without a live reservation (double commit?)");  // (b), (e)
     if (t.owner_epoch != epoch_) [[unlikely]]
       misuseTrap("commit on a queue this thread holds no reservation on");
+    if (reservation.data() != arena_ + ((t.p + kHeaderSize) & mask_) || reservation.size() != t.n)
+      misuseTrap("commit with a span other than the live reservation");
+    if (actual_n > t.n) [[unlikely]]
+      misuseTrap("committed payload exceeds the reservation");
     assert(currentTid() == tidOf(t.word) && "commit across fork or from wrong thread");
     u64_t const used = extentFor(actual_n);
     if (used > t.need) [[unlikely]]
@@ -267,8 +289,8 @@ class Ring {
   bool write(void const* data, sz_t n) noexcept {
     WriteSpan const s = reserve(n);
     if (s.data() == nullptr) return false;
-    std::memcpy(s.data(), data, n);
-    commit(n);
+    if (n != 0) std::memcpy(s.data(), data, n);
+    commit(s, n);
     return true;
   }
 
@@ -289,14 +311,42 @@ class Ring {
         case State::kFree:
           return {};  // frontier
         case State::kAborted:
+          peek_extent_ = extentOf(d);
           pop();
           continue;
         case State::kCommitted:
+          peek_extent_ = extentOf(d);
           return {arena_ + ((rd_ + kHeaderSize) & mask_), committedLen(d)};
         case State::kClaimed:
         case State::kCleared: {
+          // Liveness stays OFF the busy path. threadAlive() is an open/read/
+          // close of /proc/<tid>/stat; consulting it on every busy poll turns a
+          // preempted writer into a syscall-bound reader (measured ~450 rec/s
+          // with 36s of sys time under oversubscription). Instead the check is
+          // SPACED: only after kBusyPollsPerLiveness consecutive busy
+          // observations of the same record, streak reset on any progress.
+          // This is check-spacing, NOT a timeout -- no wall-clock constant
+          // exists, exact-liveness semantics are unchanged, and a dead writer's
+          // recovery is delayed by a bounded spin, not by time.
+          if (rd_ != busy_pos_) {
+            busy_pos_ = rd_;
+            busy_streak_ = 0;
+            busy_threshold_ = kBusyPollsPerLiveness;
+          }
+          if (++busy_streak_ < busy_threshold_) {
+            policy_.onBusy(busy_streak_);
+            return {};
+          }
+          busy_streak_ = 0;
           if (threadAlive(tidOf(d))) {
-            policy_.onBusy(0);
+            // Alive verdict: re-space GEOMETRICALLY (128, 256, ... capped). A
+            // record held across a whole scheduling quantum would otherwise
+            // cost a /proc call every ~100ns of spin; doubling keeps the
+            // first-check latency while flattening the steady-state syscall
+            // rate. Dead-writer recovery latency is unaffected -- growth
+            // happens only on alive verdicts, and any progress resets it.
+            if (busy_threshold_ < kBusyPollsPerLivenessMax) busy_threshold_ *= 2;
+            policy_.onBusy(busy_threshold_);
             return {};
           }
           // MUST re-read. Between the load of d and the liveness check the owner
@@ -332,7 +382,10 @@ class Ring {
   // Retires the record at the read cursor and licenses overwrite of its bytes.
   void pop() noexcept {
     u64_t const prev = rd_;
-    rd_ += extentOf(descRef(rd_).load(std::memory_order_relaxed));  // rd_ is reader-private
+    u64_t const extent = peek_extent_ != 0 ? peek_extent_
+                                            : extentOf(descRef(rd_).load(std::memory_order_relaxed));
+    peek_extent_ = 0;
+    rd_ += extent;  // rd_ is reader-private
     readPosRef().store(rd_, std::memory_order_release);             // license to overwrite
     if ((prev ^ rd_) >> shift_) policy_.onWrap(rd_ >> shift_);
   }
@@ -366,6 +419,7 @@ class Ring {
       }
     }
     rd_ = readPosRef().load(std::memory_order_acquire);  // resume exactly here
+    peek_extent_ = 0;
     return true;
   }
 
@@ -459,7 +513,7 @@ class Ring {
   }
 
   // Post-claim protocol, shared by both claim paths. Small enough to inline.
-  [[gnu::always_inline]] inline WriteSpan finishClaim(u64_t p, u64_t need, sz_t n, u64_t mine,
+  PGT_MPSC_HOT inline WriteSpan finishClaim(u64_t p, u64_t need, sz_t n, u64_t mine,
                                                       u32_t hops) noexcept {
     u64_t const q = p + need;
     // Stamp the successor as FREE(q). CAS from observed -- belt and braces; by
@@ -563,6 +617,18 @@ class Ring {
   u32_t shift_ = 0;
   u64_t epoch_ = 0;  // binding identity for WriterTls; 0 only while unbound
   u64_t rd_ = 0;     // reader-private cursor; a cache of read_pos
+  u64_t peek_extent_ = 0;  // extent acquired by the successful peek
+
+  // Liveness check spacing for the reader's busy path (see peek). Iterations,
+  // not time: 128 relaxed polls of an L1-resident line is well under a live
+  // writer's typical reserve-to-commit window, so a live writer normally
+  // commits before the reader ever pays for /proc.
+  static constexpr u32_t kBusyPollsPerLiveness = 128;
+  static constexpr u32_t kBusyPollsPerLivenessMax = 1u << 16;  // cap on re-spacing
+  u64_t busy_pos_ = kInvalidPos;  // record the busy streak is counting against
+  u32_t busy_streak_ = 0;         // consecutive busy polls at busy_pos_
+  u32_t busy_threshold_ = kBusyPollsPerLiveness;  // doubles per alive verdict
+
   [[no_unique_address]] Policy policy_{};
 };
 
@@ -628,8 +694,14 @@ class SpscRing {
   }
   SpscRing(Region const& region, u32_t shard_index) noexcept { bind(region, shard_index); }
 
-  SpscRing(SpscRing&&) noexcept = default;
-  SpscRing& operator=(SpscRing&&) noexcept = default;
+  SpscRing(SpscRing&& other) noexcept { moveFrom(std::move(other)); }
+  SpscRing& operator=(SpscRing&& other) noexcept {
+    if (this != &other) {
+      if (ownsWriter()) misuseTrap("moving over an attached SpscRing");
+      moveFrom(std::move(other));
+    }
+    return *this;
+  }
   SpscRing(SpscRing const&) = delete;
   SpscRing& operator=(SpscRing const&) = delete;
 
@@ -656,11 +728,8 @@ class SpscRing {
   // the ring is not touched until commit().
   [[nodiscard, gnu::always_inline]] inline WriteSpan reserve(sz_t n) noexcept {
     assert(res_pos_ == kInvalidPos && "reserve while a reservation is held");  // misuse (d)
-    // Also the fork guard for this layer: after fork() a child holds no writer
-    // slot (the invariant on Ring::registerAtfork) -- its tid mismatches the
-    // slot owner here, so it must win its own slot via attachWriter first.
-    assert(slotOwnerRef().load(std::memory_order_relaxed) == currentTid() &&
-           "reserve by a thread that does not own this ring");
+    if (!ownsWriter()) [[unlikely]]
+      misuseTrap("SpscRing::reserve by a thread that does not own this ring");
     u64_t const need = extentFor(n);
     if (need > max_need_) [[unlikely]] {
       wr_status_ = Status::kTooLarge;
@@ -671,6 +740,7 @@ class SpscRing {
       return reserveSlow(n, need);
     res_pos_ = tail;
     res_need_ = need;
+    res_n_ = n;
     wr_status_ = Status::kOk;
     return {arena_ + ((tail + kHeaderSize) & mask_), n};
   }
@@ -679,9 +749,16 @@ class SpscRing {
   // cross-process corruption -- a double commit republishes a stale
   // reservation, a grown commit publishes a fictitious boundary -- and each
   // check is a predictable never-taken branch over writer-private state.
-  [[gnu::always_inline]] inline void commit(sz_t actual_n) noexcept {
+  [[gnu::always_inline]] inline void commit(WriteSpan reservation, sz_t actual_n) noexcept {
+    if (!ownsWriter()) [[unlikely]]
+      misuseTrap("SpscRing::commit by a thread that does not own this ring");
     if (res_pos_ == kInvalidPos) [[unlikely]]
       misuseTrap("SpscRing::commit without a live reservation");  // misuse (b)
+    if (reservation.data() != arena_ + ((res_pos_ + kHeaderSize) & mask_) ||
+        reservation.size() != res_n_)
+      misuseTrap("SpscRing::commit with a span other than the live reservation");
+    if (actual_n > res_n_) [[unlikely]]
+      misuseTrap("SpscRing::committed payload exceeds the reservation");
     u64_t const used = extentFor(actual_n);
     if (used > res_need_) [[unlikely]]
       misuseTrap("SpscRing::commit extent exceeds the reservation");  // misuse (c)
@@ -701,6 +778,8 @@ class SpscRing {
   }
 
   void abort() noexcept {
+    if (!ownsWriter()) [[unlikely]]
+      misuseTrap("SpscRing::abort by a thread that does not own this ring");
     if (res_pos_ == kInvalidPos) [[unlikely]]
       misuseTrap("SpscRing::abort without a live reservation");
     policy_.onAbort(res_pos_, res_need_);
@@ -713,7 +792,7 @@ class SpscRing {
     WriteSpan const s = reserve(n);
     if (s.data() == nullptr) return false;
     if (n != 0) std::memcpy(s.data(), data, n);
-    commit(n);
+    commit(s, n);
     return true;
   }
 
@@ -735,6 +814,7 @@ class SpscRing {
     }
     u64_t const d = descRef(rd).load(std::memory_order_relaxed);
     assert(stateOf(d) == State::kCommitted && "tail advanced over a non-committed record");
+    peek_extent_ = extentOf(d);
     return {arena_ + ((rd + kHeaderSize) & mask_), committedLen(d)};
   }
 
@@ -748,7 +828,10 @@ class SpscRing {
   void pop() noexcept {
     assert(rd_ < tail_cache_ && "pop without a preceding successful peek");
     u64_t const prev = rd_;
-    rd_ += extentOf(descRef(rd_).load(std::memory_order_relaxed));  // rd_ is reader-private
+    u64_t const extent = peek_extent_ != 0 ? peek_extent_
+                                            : extentOf(descRef(rd_).load(std::memory_order_relaxed));
+    peek_extent_ = 0;
+    rd_ += extent;  // rd_ is reader-private
     readPosRef().store(rd_, std::memory_order_release);             // license to overwrite
     if ((prev ^ rd_) >> shift_) policy_.onWrap(rd_ >> shift_);
   }
@@ -774,6 +857,7 @@ class SpscRing {
   //       so once observed drained the check cannot go stale.
   [[nodiscard, gnu::noinline, gnu::cold]] bool attachWriter() noexcept {
     if (arena_ == nullptr) return false;
+    registerAtfork();
     u32_t const tid = currentTid();
     u64_t const prev = bmWordRef().fetch_or(bm_bit_, std::memory_order_acq_rel);
     if ((prev & bm_bit_) == 0) {  // won a free slot
@@ -782,7 +866,11 @@ class SpscRing {
       return true;
     }
     u32_t cur = slotOwnerRef().load(std::memory_order_acquire);
-    if (cur == tid) return true;  // idempotent re-attach
+    if (cur == tid) {
+      // Only the object that owns the private cursors may reattach. A second
+      // view over this live slot would have an independent tail/reservation.
+      return wr_tid_ == tid;
+    }
     // A freed slot passes through owner == 0 (detachWriter zeroes the owner
     // BEFORE clearing the bit), so a mid-handoff slot is never mistaken for a
     // dead one: takeover requires CAS-ing out a nonzero dead tid.
@@ -802,12 +890,16 @@ class SpscRing {
   }
 
   [[gnu::noinline, gnu::cold]] void detachWriter() noexcept {
-    assert(slotOwnerRef().load(std::memory_order_relaxed) == currentTid() &&
-           "detach by a thread that does not own this ring");
+    if (!ownsWriter()) [[unlikely]]
+      misuseTrap("SpscRing::detachWriter by a thread that does not own this ring");
     if (res_pos_ != kInvalidPos) abort();  // RAII backstop for misuse (a)
     // Zero the owner BEFORE releasing the bit; see attachWriter.
     slotOwnerRef().store(0, std::memory_order_release);
     bmWordRef().fetch_and(~bm_bit_, std::memory_order_release);
+    // Poison this view's private ownership identity. Without this, a stale view
+    // can re-attach after another same-tid view claims the slot and both then
+    // pass ownsWriter() with independent cursors.
+    wr_tid_ = 0;
     // Undrained committed records may remain, and that is fine: they are
     // complete (the tail is a publication cursor), the reader drains them
     // normally, and a successor writer appends after them -- the capacity
@@ -832,6 +924,7 @@ class SpscRing {
     }
     rd_ = readPosRef().load(std::memory_order_acquire);  // resume exactly here
     tail_cache_ = rd_;  // force the next sweep to re-acquire the tail
+    peek_extent_ = 0;
     return true;
   }
 
@@ -853,11 +946,61 @@ class SpscRing {
     slot_ = region.writerSlots() + shard_index;
   }
 
+  void moveFrom(SpscRing&& other) noexcept {
+    owned_ = std::move(other.owned_);
+    ctl_ = other.ctl_;
+    sc_ = other.sc_;
+    arena_ = other.arena_;
+    cap_ = other.cap_;
+    mask_ = other.mask_;
+    max_need_ = other.max_need_;
+    shift_ = other.shift_;
+    bm_word_ = other.bm_word_;
+    bm_bit_ = other.bm_bit_;
+    slot_ = other.slot_;
+    wr_tail_ = other.wr_tail_;
+    wr_read_cache_ = other.wr_read_cache_;
+    res_pos_ = other.res_pos_;
+    res_need_ = other.res_need_;
+    res_n_ = other.res_n_;
+    wr_tid_ = other.wr_tid_;
+    wr_status_ = other.wr_status_;
+    rd_ = other.rd_;
+    tail_cache_ = other.tail_cache_;
+    peek_extent_ = other.peek_extent_;
+    policy_ = std::move(other.policy_);
+    other.ctl_ = nullptr;
+    other.sc_ = nullptr;
+    other.arena_ = nullptr;
+    other.slot_ = nullptr;
+    other.bm_word_ = nullptr;
+    other.res_pos_ = kInvalidPos;
+    other.wr_tid_ = 0;
+  }
+
+  // Identity only, never an object address: one writer thread may own several
+  // SPSC rings, and a moved or reconstructed view must not inherit an address
+  // binding. Cleared in a fork child before any inherited private state is used.
+  inline static thread_local u32_t writer_tid_tls_ = 0;
+
+  static void atforkChild() noexcept { writer_tid_tls_ = 0; }
+  static void registerAtfork() noexcept {
+    static std::once_flag once;
+    std::call_once(once, [] { ::pthread_atfork(nullptr, nullptr, &atforkChild); });
+  }
+
+  [[nodiscard]] bool ownsWriter() const noexcept {
+    return writer_tid_tls_ != 0 && wr_tid_ == writer_tid_tls_ &&
+           slotOwnerRef().load(std::memory_order_relaxed) == wr_tid_;
+  }
+
   void bindWriter(u32_t tid) noexcept {
+    writer_tid_tls_ = tid;
     wr_tid_ = tid;
     wr_tail_ = publishRef().load(std::memory_order_acquire);
     wr_read_cache_ = readPosRef().load(std::memory_order_acquire);
     res_pos_ = kInvalidPos;
+    res_n_ = 0;
     wr_status_ = Status::kOk;
   }
 
@@ -891,6 +1034,7 @@ class SpscRing {
     if (tail + need - wr_read_cache_ <= cap_) {
       res_pos_ = tail;
       res_need_ = need;
+      res_n_ = n;
       wr_status_ = Status::kOk;
       return {arena_ + ((tail + kHeaderSize) & mask_), n};
     }
@@ -920,12 +1064,14 @@ class SpscRing {
   u64_t wr_read_cache_ = 0;  // last observed read_pos; may lag, never leads
   u64_t res_pos_ = kInvalidPos;
   u64_t res_need_ = 0;
+  sz_t res_n_ = 0;
   u32_t wr_tid_ = 0;
   Status wr_status_ = Status::kOk;
 
   // Reader-owned.
   u64_t rd_ = 0;          // reader-private cursor; a cache of read_pos
   u64_t tail_cache_ = 0;  // last acquired tail; one acquire per sweep
+  u64_t peek_extent_ = 0;  // extent acquired by the successful peek
 
   [[no_unique_address]] Policy policy_{};
 };
@@ -964,39 +1110,53 @@ class Sharded {
   Sharded& operator=(Sharded const&) = delete;
 
   [[nodiscard]] static bool create(Config const& cfg, Sharded& out) noexcept {
-    if (!Region::create(cfg, out.region_)) return false;
-    out.init();
+    Sharded fresh;
+    if (!Region::create(cfg, fresh.region_)) return false;
+    fresh.init();
+    out = std::move(fresh);
     return true;
   }
   [[nodiscard]] static bool attach(int fd, Sharded& out) noexcept {
-    if (!Region::attach(fd, out.region_)) return false;
-    out.init();
+    Sharded fresh;
+    if (!Region::attach(fd, fresh.region_)) return false;
+    fresh.init();
+    out = std::move(fresh);
     return true;
   }
 
   // ---- writer ----------------------------------------------------------------
 
+  // The attachment guard is a release-mode TRAP, not an assert (verified by
+  // mpsc_xproc_test's fork scenario, which delivers a half-filled record to
+  // the reader when this check is compiled out): an unattached thread routes
+  // to shard 0 by default, and the worst caller of that shape is a fork()
+  // child -- the atfork handler cleared its routing TLS, but a single-writer
+  // ring's reservation lives in the ring OBJECT, which the child inherited by
+  // copy. Letting the call through commits the parent's in-flight reservation
+  // from a second process: silent corruption on a ring whose correctness
+  // argument is sole ownership. The sticky-binding cross-check stays
+  // debug-only; it guards refactors of this class, not caller misuse.
   [[nodiscard, gnu::always_inline]] inline WriteSpan reserve(sz_t n) noexcept {
     WriterTls const& t = tls_;
-    assert(t.q == this && "calling thread is not attached to this queue");
+    if (t.q != this) [[unlikely]] misuseTrap("Sharded write-side call by an unattached thread");
     assert(t.shard == t.bound_shard && "sticky shard binding violated: migration is forbidden");
     return rings_[t.shard].reserve(n);
   }
-  [[gnu::always_inline]] inline void commit(sz_t actual_n) noexcept {
+  [[gnu::always_inline]] inline void commit(WriteSpan reservation, sz_t actual_n) noexcept {
     WriterTls const& t = tls_;
-    assert(t.q == this && "calling thread is not attached to this queue");
+    if (t.q != this) [[unlikely]] misuseTrap("Sharded write-side call by an unattached thread");
     assert(t.shard == t.bound_shard && "sticky shard binding violated: migration is forbidden");
-    rings_[t.shard].commit(actual_n);
+    rings_[t.shard].commit(reservation, actual_n);
   }
   void abort() noexcept {
     WriterTls const& t = tls_;
-    assert(t.q == this && "calling thread is not attached to this queue");
+    if (t.q != this) [[unlikely]] misuseTrap("Sharded write-side call by an unattached thread");
     assert(t.shard == t.bound_shard && "sticky shard binding violated: migration is forbidden");
     rings_[t.shard].abort();
   }
   bool write(void const* data, sz_t n) noexcept {
     WriterTls const& t = tls_;
-    assert(t.q == this && "calling thread is not attached to this queue");
+    if (t.q != this) [[unlikely]] misuseTrap("Sharded write-side call by an unattached thread");
     assert(t.shard == t.bound_shard && "sticky shard binding violated: migration is forbidden");
     return rings_[t.shard].write(data, n);
   }
@@ -1059,7 +1219,8 @@ class Sharded {
     // release build a re-run of placement here would BE the forbidden
     // migration.
     if (t.q == this) return true;
-    assert(t.q == nullptr && "thread is already attached to a queue");
+    if (t.q != nullptr) [[unlikely]]
+      misuseTrap("Sharded::attachWriter while attached to another queue");
     registerAtfork();
     if constexpr (kMaxWritersPerShard == 1) {
       // Single-writer rings arbitrate ownership themselves through the shared
@@ -1117,7 +1278,10 @@ class Sharded {
 
   [[gnu::noinline, gnu::cold]] void detachWriter() noexcept {
     WriterTls& t = tls_;
-    assert(t.q == this && "detach from a queue this thread is not attached to");
+    // Trap, not assert: an unattached thread would detach shard 0's writer --
+    // releasing a slot some OTHER live writer owns, which a later attach then
+    // double-claims. Corruption-class, so it stays on in release.
+    if (t.q != this) [[unlikely]] misuseTrap("Sharded::detachWriter by an unattached thread");
     assert(t.shard == t.bound_shard && "sticky shard binding violated: migration is forbidden");
     // Detach ends this writer's FIFO epoch. A later re-registration may land
     // on a different shard, and ordering ACROSS registrations is not promised:
@@ -1201,7 +1365,12 @@ class Sharded {
   }
 
   void init() noexcept {
+    rings_.clear();
+    counts_.reset();
     shard_count_ = region_.shardCount();
+    sweep_start_ = 0;
+    cur_ = 0;
+    empty_iters_ = 0;
     // The only allocations, made once at construction: ring views and the
     // placement count table.
     rings_.reserve(shard_count_);

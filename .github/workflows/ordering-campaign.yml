@@ -1,0 +1,123 @@
+# Memory-ordering mutation campaign, on real aarch64 hardware.
+#
+# WHY THIS IS A SEPARATE, MANUALLY DISPATCHED WORKFLOW.
+#
+# The mpsc queue's memory-order table has no guardian on x86-64, and not
+# because the tests are weak: weakening the commit or vouch store from release
+# to relaxed produces BYTE-IDENTICAL machine code there (x86-TSO makes every
+# store a release, and GCC does not exploit relaxed's reordering licence in
+# that translation unit -- objdump-verified). There is only one binary, so no
+# test, no stress duration and no sanitizer could ever distinguish the two.
+#
+# On aarch64 they differ genuinely: release emits stlr, relaxed emits a plain
+# str, and the CPU may reorder it. So a weakly-ordered machine is the ONLY
+# dynamic instrument that can tell whether the suite guards that table at all.
+# qemu-user is not a substitute -- it runs guest threads under the HOST's
+# memory model, so an emulated pass is exactly as blind as x86.
+#
+# It is dispatch-only rather than part of verify.yml because it is slow
+# (two mutants x 20 repetitions x a full build each) and because its result is
+# a research finding about the TEST SUITE, not a gate on a change. Run it when
+# the ordering table or the concurrency tests move.
+#
+# Reading the result:
+#   CAUGHT     the suite guards that ordering. Delete the corresponding caveat
+#              in docs/mpsc-queue.md -- but only for the mutant that was caught.
+#   NOT-CAUGHT the suite does NOT guard it even on weak hardware. The caveat
+#              stays, and the fix is more repetitions or tighter interleaving,
+#              not more architectures.
+#   INVALID    baseline failed or a sed no longer matches queue.hh. The run
+#              proves nothing; fix the script before believing any verdict.
+
+name: ordering-campaign
+
+on:
+  workflow_dispatch:
+    inputs:
+      reps:
+        description: "Repetitions per mutant (weak-memory failures are probabilistic)"
+        required: false
+        default: "20"
+
+permissions:
+  contents: read
+
+jobs:
+  aarch64:
+    name: ordering mutants (native aarch64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - name: Check out the exact revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      # The campaign is meaningless on a strongly-ordered host, and silently
+      # so -- fail loudly rather than emit a NOT-CAUGHT that means nothing.
+      - name: Assert the runner is genuinely aarch64
+        shell: bash
+        run: |
+          set -euo pipefail
+          arch="$(uname -m)"
+          test "$arch" = "aarch64" || {
+            echo "error: ordering campaign requires native aarch64, got $arch" >&2
+            exit 1
+          }
+          test "$(./repo.sh target)" = "aarch64-linux-musl"
+
+      - name: Restore toolchain cache
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            .local/downloads
+            .local/toolchain/aarch64-linux-musl
+          key: polyglot-v1-${{ runner.os }}-aarch64-linux-musl-ordering-${{ hashFiles('tools.lock.toml', 'toolchain/**') }}
+          restore-keys: |
+            polyglot-v1-${{ runner.os }}-aarch64-linux-musl-
+
+      - name: Bootstrap pinned tools
+        run: ./repo.sh bootstrap --offline || ./repo.sh bootstrap
+
+      # Confirms release/relaxed actually differ in the emitted code on this
+      # target. If they do not, the campaign cannot distinguish the mutants and
+      # a NOT-CAUGHT verdict would be an artefact rather than a finding.
+      - name: Show that stlr and str differ here
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/ord.cc <<'EOF'
+          #include <atomic>
+          void rel(std::atomic<unsigned long>& a, unsigned long v) {
+            a.store(v, std::memory_order_release);
+          }
+          void rlx(std::atomic<unsigned long>& a, unsigned long v) {
+            a.store(v, std::memory_order_relaxed);
+          }
+          EOF
+          g++ -std=c++20 -O2 -S -o - /tmp/ord.cc | grep -E '^\s+(stlr|str)\s' || true
+          g++ -std=c++20 -O2 -S -o - /tmp/ord.cc | grep -q 'stlr' || {
+            echo "error: release store did not emit stlr; campaign would be blind" >&2
+            exit 1
+          }
+
+      - name: Run the campaign
+        env:
+          ORDERING_MUTANT_REPS: ${{ inputs.reps }}
+        run: ./cpp/test/ordering_mutants.sh 2>&1 | tee /tmp/campaign.log
+
+      - name: Summarise
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Ordering mutation campaign (native aarch64)"
+            echo
+            echo '```'
+            grep -E 'CAUGHT|NOT-CAUGHT|INVALID|baseline' /tmp/campaign.log || cat /tmp/campaign.log
+            echo '```'
+            echo
+            echo "A CAUGHT verdict means the suite guards that ordering and the"
+            echo "matching caveat in docs/mpsc-queue.md can be deleted. NOT-CAUGHT"
+            echo "means it does not, even on weak hardware."
+          } >> "$GITHUB_STEP_SUMMARY"

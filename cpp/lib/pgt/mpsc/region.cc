@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include <bit>
+#include <cassert>
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
@@ -24,11 +25,18 @@ inline constexpr u32_t kVersion = 1;
 // bitmap + WriterSlot table -- shared because slot arbitration is
 // cross-process; see region.hh), padded to a whole number of pages so the
 // arenas that follow are page-aligned (a requirement for their mmap offsets).
-[[nodiscard]] sz_t controlBytes(u32_t shards, sz_t page) noexcept {
+// Unpadded sum, split out so the layout-agreement asserts below can compare
+// the accessor walk against it EXACTLY: comparing against the page-rounded
+// value would let a divergence smaller than the alignment slack pass -- the
+// same masking that makes such a bug unobservable at most shard counts.
+[[nodiscard]] sz_t controlBytesRaw(u32_t shards) noexcept {
   sz_t const bitmap_words = (static_cast<sz_t>(shards) + 63) / 64;
-  sz_t const raw = sizeof(Control) + static_cast<sz_t>(shards) * sizeof(ShardControl) +
-                   bitmap_words * sizeof(u64_t) + static_cast<sz_t>(shards) * sizeof(WriterSlot);
-  return (raw + page - 1) & ~(page - 1);
+  return sizeof(Control) + static_cast<sz_t>(shards) * sizeof(ShardControl) +
+         bitmap_words * sizeof(u64_t) + static_cast<sz_t>(shards) * sizeof(WriterSlot);
+}
+
+[[nodiscard]] sz_t controlBytes(u32_t shards, sz_t page) noexcept {
+  return (controlBytesRaw(shards) + page - 1) & ~(page - 1);
 }
 
 // One mapping routine for every backend: reserve the whole span as PROT_NONE,
@@ -200,9 +208,16 @@ bool Region::create(Config const& cfg, Region& out) noexcept {
     return false;
   }
 
+  // Reject before bit_ceil: rounding a value above the largest encodable
+  // power of two is undefined/zero rather than a recoverable invalid geometry.
+  u64_t const requested = cfg.capacity < page ? static_cast<u64_t>(page) : cfg.capacity;
+  if (requested > kMaxExtent) {
+    errno = EINVAL;
+    return false;
+  }
   // Round capacity up to a power of two that is at least a page; page sizes are
   // powers of two, so bit_ceil covers the multiple-of-page requirement too.
-  u64_t const cap = std::bit_ceil(cfg.capacity < page ? static_cast<u64_t>(page) : cfg.capacity);
+  u64_t const cap = std::bit_ceil(requested);
   // A record extent may be as large as the whole arena, so the descriptor's
   // size field must be able to encode `cap` itself.
   if (cap > kMaxExtent) {
@@ -261,6 +276,17 @@ bool Region::create(Config const& cfg, Region& out) noexcept {
   r.arena_ = base + ctrl;
   r.capacity_ = cap;
   r.shard_count_ = cfg.shards;
+  // The control layout is computed TWICE, independently: controlBytes() sums
+  // it, the accessors walk it pointer by pointer. They agree today, but
+  // nothing structural keeps them agreeing -- a field added to one and not the
+  // other diverges silently, and at an exact-fit shard count that puts the
+  // WriterSlot table inside arena 0, where registration corrupts the first
+  // records written. Demand EXACT agreement with the unpadded sum: comparing
+  // against arena(0) would let page-align slack hide any divergence smaller
+  // than the slack, at every count where slack exists -- which is most.
+  assert(reinterpret_cast<std::byte const*>(r.writerSlots() + r.shardCount()) ==
+             base + controlBytesRaw(r.shardCount()) &&
+         "control-area accessor walk disagrees with controlBytes()");
   out = std::move(r);
   return true;
 }
@@ -316,6 +342,12 @@ bool Region::attach(int fd, Region& out) noexcept {
   r.arena_ = base + ctrl;
   r.capacity_ = hdr.capacity;
   r.shard_count_ = hdr.shards;
+  // Same exact-agreement check as create(); see the comment there. attach()
+  // needs it independently -- a version skew between the creating and
+  // attaching binaries is exactly a divergence of the two computations.
+  assert(reinterpret_cast<std::byte const*>(r.writerSlots() + r.shardCount()) ==
+             base + controlBytesRaw(r.shardCount()) &&
+         "control-area accessor walk disagrees with controlBytes()");
   out = std::move(r);
   return true;
 }

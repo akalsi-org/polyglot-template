@@ -320,24 +320,28 @@ struct Reservation {           // writer-private, thread-local
     uint64_t word;             // the claim word we wrote (carries our tid)
 };
 
-std::span<std::byte> reserve(size_t n);   // claim, stamp successor, vouch
-void commit(size_t actual_n);             // actual_n <= n; publishes
-void abort();                             // publishes ABORTED, no payload
+std::span<std::byte> reserve(size_t n);              // claim, stamp successor, vouch
+void commit(std::span<std::byte> reservation, size_t n);  // exact reservation; n <= reservation.size()
+void abort();                                             // publishes ABORTED, no payload
 
 bool write(const void *data, size_t n) {  // convenience: reserve + copy + commit
     auto s = reserve(n);
-    if (s.empty()) return false;
-    memcpy(s.data(), data, n);
-    commit(n);
+    if (s.data() == nullptr) return false;
+    if (n != 0) memcpy(s.data(), data, n);
+    commit(s, n);
     return true;
 }
 ```
 
-**The span returned by `reserve` is valid only until `commit` or `abort`.** The reader
-may overwrite those bytes once it has passed the record, and `read_pos` publication is
-what licenses that — so a caller must finish writing before committing, and must not
-retain the span afterwards. Symmetrically on the read side, the span from `peek` is
-valid only until `pop`.
+**The span returned by `reserve` is valid only until `commit` or `abort`.** `commit`
+requires that exact pointer-and-length span, not merely another span of the same rounded
+descriptor extent; this rejects accidental wrong spans, subspans, and same-grain
+over-commits. It is a misuse guard rather than cryptographic provenance: a caller that
+intentionally reconstructs the same pointer and length (or a stale span after address
+reuse on wrap) is indistinguishable. The reader may overwrite those bytes once it has
+passed the record, and `read_pos` publication is what licenses that — so a caller must
+finish writing before committing, and must not retain the span afterwards. Symmetrically
+on the read side, the span from `peek` is valid only until `pop`.
 
 ### Misuse guards
 
@@ -346,10 +350,12 @@ correctness guards rather than hardening, and belong in the code from day one. A
 thread-local checks with no shared-state cost.
 
 ```c
-void commit(size_t actual_n) {
-    assert(res.p != INVALID);                          // (b) double commit
-    assert(gettid() == tid_of(res.word));              // (e) fork / wrong thread
-    assert(align64(8 + actual_n) <= res.need);         // (c) grown commit
+void commit(std::span<std::byte> reservation, size_t actual_n) {
+    trap_if(res.p == INVALID);                         // (b) double commit
+    trap_if(reservation.data() != payload(res.p) ||
+            reservation.size() != res.n);              // wrong reservation span
+    trap_if(actual_n > res.n ||
+            align64(8 + actual_n) > res.need);         // (c) grown commit
     ...
     res.p = INVALID;                                   // poison
 }
@@ -538,6 +544,27 @@ store reintroduces the same failure on any weakly-ordered target.
 
 A `CLEARED` record needs no successor stamp — its owner already did that — so recovery
 there is the ABORTED store alone.
+
+### Liveness is spaced, not timed
+
+`threadAlive()` is an `open`/`read`/`close` of `/proc/<tid>/stat` — three syscalls.
+The reader reaches it whenever it meets an in-flight record, and a writer preempted
+inside its reserve-to-commit window makes that the reader's **hot** path, not a cold
+one. Measured under oversubscription before this was fixed: the reader went
+syscall-bound at ~450 records/s with 36 s of system time in a 60 s run.
+
+So the check is **spaced**: consulted only after `kBusyPollsPerLiveness` consecutive
+busy observations of the same record, with the streak reset on any progress.
+
+This is check-spacing, **not** a timeout, and the distinction is the one this whole
+design turns on. No wall-clock constant exists anywhere. Death is still only ever
+declared on proof, never inferred from elapsed time. What is delayed is how often the
+reader *asks* — a dead writer's recovery is deferred by a bounded number of spins, not
+by a duration, and a stopped-but-alive writer is treated exactly as before.
+
+Note the interaction with policy: a pure-spin `onBusy` plus a preempted writer is a
+syscall storm even with spacing. Any deployment that is not pinned and
+under-subscribed wants a policy whose `onBusy` yields.
 
 ### Liveness check
 
@@ -838,12 +865,60 @@ passes proves nothing; this one demonstrably sees the defect classes that matter
 being killed at 12.5 GB — that configuration does not fit exhaustively on the machine
 used. Report it as bounded, never as exhaustive.
 
-**Not covered.** Spin is sequentially consistent, so **none of this validates the
-memory-ordering table**. That rests on the per-operation justifications and on compiled
-evidence (GCC 13.3 `-O2`: `atomic_thread_fence(seq_cst)` lowers to `lock or [rsp],0`
-on x86-64 and `dmb ish` on AArch64). Closing it properly wants a weak-memory tool —
-GenMC, Nidhugg, or CBMC — or herd7 for individual litmus shapes. Also outside every
-tool used: the OS-level ordering assumption documented under Liveness.
+**Mutation-tested.** Nine deliberate defects injected into a snapshot copy of the
+library were each caught by the suite: commit publishing the reservation extent rather
+than the used length, the short-commit trailer omitted, `pop` advancing by payload
+length, `recover()` skipping the successor stamp, a SIGSTOPped writer treated as dead,
+the double-commit trap disabled, `attach`'s magic/version check removed, the
+`freeWord(0)` stamp removed, and the FREE position truncated to 6 bits.
+
+The campaign itself needed a methodology fix worth recording: mutating the live tree
+while other work was landing produced a false "caught" — the baseline had changed
+underneath it. Baseline and mutant must be built from the *same* snapshot.
+
+**Three mutations were NOT caught, and this is the important result:**
+
+1. `commit`'s release store weakened to relaxed — no test fails, deterministically,
+   across the differential and a four-writer stress run.
+2. The vouch store weakened to relaxed — same.
+3. FREE-carries-position at the *protocol* level. A weakened encoding is caught as a
+   static property, but no dynamic test manufactures a claimant stopped across a lap
+   boundary holding a stale expected word.
+
+So: **the memory-ordering table is not dynamically testable on x86-64** — and the
+reason is stronger than "TSO hides it". Weakening the commit or vouch store from
+release to relaxed produces **byte-identical machine code** on x86-64, verified by
+objdump diff: x86-TSO makes every store a release, and GCC does not exploit relaxed's
+reordering licence in this translation unit. There is only one binary, so no test, no
+stress duration, and no sanitizer could ever distinguish the two. ThreadSanitizer is
+doubly blind here — it detects data races, and a weakened memory order is not a race.
+
+On aarch64 the two differ genuinely: release emits `stlr`, relaxed emits a plain
+`str`, and the CPU may reorder the latter. A weakly-ordered machine is therefore the
+only dynamic instrument that can tell whether the suite guards the ordering table at
+all. `cpp/test/ordering_mutants.sh` runs that campaign; it must run on real aarch64
+hardware, since qemu-user executes guest threads under the *host's* memory model and
+an emulated pass is exactly as blind as x86. Those orderings are validated by the model
+check, by review, and by compiled evidence (GCC 13.3 `-O2`: `atomic_thread_fence(seq_cst)`
+lowers to `lock or [rsp],0` on x86-64, `dmb ish` on AArch64) — **and by nothing else.**
+Anyone editing them should know no test will catch a mistake. Closing that properly
+wants a weak-memory tool (GenMC, Nidhugg, CBMC) or herd7 for individual litmus shapes.
+
+Also outside every tool used: the OS-level ordering assumption documented under
+Liveness.
+
+**A known, deliberate data race.** A stale walker's atomic probe can land on bytes that
+are concurrently another record's payload, written by plain `memcpy`. Formally that is
+a C++ data race — plain write against atomic read — and ThreadSanitizer reports it.
+It is protocol-benign by Lemma 1: a stale read is discarded by the content check, and a
+claim can only succeed against an exact `freeWord(p)` match. It is inherent to in-band
+descriptors in a variable-length ring.
+
+The decision is to document and suppress rather than fix. The cheap fix, if it ever
+matters, is available and worth recording: descriptors only ever sit at 64-byte
+boundaries, so only payload words at those offsets can be racily read — writing just
+those with relaxed atomic stores would close it at a cost of one store per 64 bytes of
+payload, leaving the rest a plain `memcpy`.
 
 ## Known gaps
 

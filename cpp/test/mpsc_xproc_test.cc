@@ -18,6 +18,10 @@
 //     recycled; drained ring must be; generation bumps on recycle
 //   * fork with an inherited reservation on the sharded SPSC path: the child
 //     traps instead of committing, then wins its OWN slot and writes
+//   * kShm named rendezvous: a successor reader shm_opens the name UNAIDED --
+//     no inherited fd -- and resumes; the one thing kShm buys over kMemfd
+//   * dead reader turns full into kReaderDead on Spsc / ShardedMpsc /
+//     MultiSpsc (the Mpsc flavor lives in mpsc_fault_test)
 
 #include "pgt/mpsc/queue.hh"
 #include "pgt/mpsc/region.hh"
@@ -26,11 +30,13 @@
 
 #include <fcntl.h>
 #include <signal.h>
+#include <sys/mman.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <thread>
@@ -69,7 +75,7 @@ bool childWriteTag(Q& q, u32_t tag) {
   WriteSpan const s = q.reserve(kRecLen);
   if (s.data() == nullptr) return false;
   fillTag<Q>(s, tag);
-  q.commit(kRecLen);
+  q.commit(s, kRecLen);
   return true;
 }
 
@@ -78,7 +84,7 @@ void pushTag(Q& q, u32_t tag) {
   WriteSpan const s = q.reserve(kRecLen);
   REQUIRE(s.data() != nullptr);
   fillTag<Q>(s, tag);
-  q.commit(kRecLen);
+  q.commit(s, kRecLen);
 }
 
 // Parent-side: pops the next record within the deadline and returns its tag,
@@ -254,7 +260,7 @@ TEST_CASE("xproc: stopped fresh-attach writer blocks the reader and resumes clea
     if (s.data() == nullptr) _exit(3);
     raise(SIGSTOP);  // returns after SIGCONT
     fillTag<XRing>(s, 1);
-    cq.commit(kRecLen);
+    cq.commit(s, kRecLen);
     _exit(0);
   }
   int st = 0;
@@ -541,7 +547,7 @@ TEST_CASE("xproc: forked child cannot commit an inherited reservation; re-regist
         ::dup2(null, 1);
         ::dup2(null, 2);
       }
-      cq.commit(kRecLen);  // MUST trap: routing TLS was cleared
+      cq.commit(s, kRecLen);  // MUST trap: routing TLS was cleared
       _exit(5);            // reaching here means it committed
     }
     int gst = 0;
@@ -550,7 +556,7 @@ TEST_CASE("xproc: forked child cannot commit an inherited reservation; re-regist
 
     // Parent's reservation is intact; finish it so the ring stays clean.
     fillTag<MultiSpsc>(s, 4000);
-    cq.commit(kRecLen);
+    cq.commit(s, kRecLen);
 
     // A fresh child may re-register and gets its OWN slot.
     pid_t const g2 = fork();
@@ -577,6 +583,266 @@ TEST_CASE("xproc: forked child cannot commit an inherited reservation; re-regist
   u32_t const b = popTag(q);
   CHECK(a + b == 9000);  // {4000, 5000} in either order
   CHECK(q.peek().data() == nullptr);
+}
+
+// ---------------------------------------------------------------------------
+// 7. kShm named rendezvous. Same restart shape as test 4, but both readers
+// reach the region by shm_open on the NAME, with no inherited fd in play --
+// which is the one thing the kShm backend buys over kMemfd, and the deployment
+// where reader restart earns its keep: the crashed reader's successor needs no
+// surviving donor for the descriptor.
+// ---------------------------------------------------------------------------
+TEST_CASE("xproc: shm-named reader restart; successor rendezvous by name, at-least-once") {
+  char name[64];
+  std::snprintf(name, sizeof(name), "/pgt_xproc_%d", getpid());
+  ::shm_unlink(name);  // clear a stale name from any crashed prior run
+  Config cfg = smallConfig();
+  cfg.backend = Backend::kShm;
+  cfg.name = name;
+  static Mpsc q;
+  REQUIRE(Mpsc::create(cfg, q));
+  REQUIRE(q.attachWriter());
+  for (u32_t t = 0; t < 10; ++t) pushTag(q, t);
+
+  Pipe ready, go;
+  pid_t const r1 = fork();
+  REQUIRE(r1 >= 0);
+  if (r1 == 0) {
+    alarm(30);
+    int const sfd = ::shm_open(name, O_RDWR, 0);  // rendezvous BY NAME, unaided
+    if (sfd < 0) _exit(1);
+    static Mpsc cq;
+    if (!Mpsc::attach(sfd, cq)) _exit(2);
+    if (!cq.attachReader()) _exit(3);
+    ready.csend('A');
+    if (go.crecv() != 'g') _exit(4);
+    u32_t tag = 0;
+    for (u32_t t = 0; t < 3; ++t) {
+      if (!childPopTag(cq, &tag) || tag != t) _exit(5);
+    }
+    if (!childPopTag(cq, &tag, /*pop=*/false) || tag != 3) _exit(6);  // peek, no pop
+    ready.csend('B');
+    raise(SIGKILL);
+    _exit(7);
+  }
+  REQUIRE(ready.recv() == 'A');
+  go.send('g');
+  REQUIRE(ready.recv() == 'B');
+  int st = waitFor(r1);
+  REQUIRE(WIFSIGNALED(st));
+
+  pid_t const r2 = fork();
+  REQUIRE(r2 >= 0);
+  if (r2 == 0) {
+    alarm(30);
+    int const sfd = ::shm_open(name, O_RDWR, 0);
+    if (sfd < 0) _exit(1);
+    static Mpsc cq;
+    if (!Mpsc::attach(sfd, cq)) _exit(2);
+    if (!cq.attachReader()) _exit(3);  // takeover from the proven-dead R1
+    u32_t tag = 0;
+    for (u32_t t = 3; t < 10; ++t) {  // tag 3 redelivered: at-least-once
+      if (!childPopTag(cq, &tag) || tag != t) _exit(10 + t);
+    }
+    _exit(0);
+  }
+  st = waitFor(r2);
+  REQUIRE(WIFEXITED(st));
+  CHECK(WEXITSTATUS(st) == 0);
+  // The caller owns the name's lifetime (region.cc): unlink it here.
+  REQUIRE(::shm_unlink(name) == 0);
+}
+
+// ---------------------------------------------------------------------------
+// 8. A dead reader turns permanent backpressure into a definite error, on the
+// variants mpsc_fault_test does not cover (its flavor is Mpsc, thread-exit,
+// same process). Here the reader is a separate PROCESS that attached and
+// exited, and the writer discovers its death through the full path's liveness
+// check: kReaderDead, never kFull.
+// ---------------------------------------------------------------------------
+TEST_CASE_TEMPLATE("xproc: dead reader process yields kReaderDead on the full path", Q,  //
+                   Spsc, ShardedMpsc, MultiSpsc) {
+  static Q* qs = new Q;  // fresh heap instance per instantiation; never reused
+  Q& q = *qs;
+  REQUIRE(Q::create(smallConfig(/*shards=*/2), q));
+  int const fd = q.region().fd();
+  REQUIRE(fd >= 0);
+
+  // The reader attaches from a process that then exits: its recorded tid is
+  // provably dead once reaped.
+  pid_t const r = fork();
+  REQUIRE(r >= 0);
+  if (r == 0) {
+    alarm(20);
+    static Q cq;
+    if (!Q::attach(fd, cq)) _exit(1);
+    if (!cq.attachReader()) _exit(2);
+    _exit(0);
+  }
+  int const st = waitFor(r);
+  REQUIRE(WIFEXITED(st));
+  REQUIRE(WEXITSTATUS(st) == 0);
+
+  REQUIRE(q.attachWriter());
+  std::byte buf[64] = {};
+  int writes = 0;
+  while (q.write(buf, sizeof(buf))) {
+    REQUIRE(++writes < 1000);  // one ring's worth at most; runaway means no full
+  }
+  CHECK(q.status() == Status::kReaderDead);
+  q.detachWriter();
+}
+
+// ---------------------------------------------------------------------------
+// 9. Adversarial registry geometry, cross-process (extends mpsc_test's
+// 100-shard geometry test per impl-region). With enough shards to spill the
+// bitmap into a second word, a fresh process is steered onto the LAST slot --
+// its claim fetch_or lands in the final bitmap word -- and every registry
+// write must stay inside the control area: the record committed in arena 0
+// before the claims must drain intact afterwards, and no bit beyond the valid
+// range may appear. An under-sized control area fails the bound check first.
+// ---------------------------------------------------------------------------
+TEST_CASE("xproc: last-slot claim in a multi-word bitmap never touches arena 0") {
+  // 127 shards: bitmapWords() == 2 AND, on a 4 KiB-page host, the WriterSlot
+  // table is what pushes the control area across its final page boundary --
+  // chosen so that a controlBytes() that stops reserving the slot table is
+  // NOT absorbed by page-align slack but fails the bound check below.
+  // (Verified: with the slot-table term deleted from controlBytes, this
+  // REQUIRE fires; at 100 shards the alignment slack swallowed the bug.)
+  constexpr u32_t kShards = 127;  // valid bits in word 1: 0..62
+  static MultiSpsc q;
+  REQUIRE(MultiSpsc::create(smallConfig(kShards), q));
+  REQUIRE(q.attachReader());
+  Region const& r = q.region();
+  int const fd = r.fd();
+
+  // Layout bound: the registry ends at or before arena 0. This is the check
+  // that fails FAST if controlBytes() ever stops reserving the slot table.
+  REQUIRE(reinterpret_cast<std::byte const*>(r.writerSlots() + kShards) <= r.arena(0));
+  REQUIRE(r.bitmapWords() == 2);
+
+  // A real record in arena 0 first, so registry writes have something to hit.
+  REQUIRE(q.attachWriter());  // this thread wins slot 0
+  pushTag(q, 7000);
+
+  // Steer the next attacher onto slot 99: mark slots 1..98 occupied-mid-handoff
+  // (bit set, owner 0 -- the state the recycler must skip). White-box, but only
+  // through the shared words the registry contract already publishes.
+  for (u32_t s = 1; s < kShards - 1; ++s) {
+    std::atomic_ref<u64_t>(r.writerBitmap()[s / 64]).fetch_or(1ull << (s % 64),
+                                                              std::memory_order_acq_rel);
+  }
+
+  pid_t const w = fork();
+  REQUIRE(w >= 0);
+  if (w == 0) {
+    alarm(20);
+    static MultiSpsc cq;
+    if (!MultiSpsc::attach(fd, cq)) _exit(1);
+    if (!cq.attachWriter()) _exit(2);  // only slot 99 is claimable
+    if (!childWriteTag(cq, 7099)) _exit(3);
+    _exit(0);
+  }
+  int const st = waitFor(w);
+  REQUIRE(WIFEXITED(st));
+  REQUIRE(WEXITSTATUS(st) == 0);
+
+  // The child's claim is visible here (shared registry, second mapping)...
+  u64_t const word1 = std::atomic_ref<u64_t>(r.writerBitmap()[1]).load(std::memory_order_acquire);
+  CHECK((word1 & (1ull << 62)) != 0);   // slot 126's bit, the last valid one
+  CHECK((word1 >> 63) == 0);            // nothing landed beyond the table
+  CHECK(std::atomic_ref<u32_t>(r.writerSlots()[kShards - 1].owner_tid)
+            .load(std::memory_order_acquire) != 0);
+
+  // ...and neither the claims nor the slot writes touched ring bytes: both
+  // records drain intact, ring 0's first and ring 99's only.
+  u32_t const a = popTag(q);
+  u32_t const b = popTag(q);
+  CHECK(a + b == 14099);  // {7000, 7099} in either order
+  CHECK(q.peek().data() == nullptr);
+  q.detachWriter();  // release this thread's Sharded binding for later tests
+}
+
+// ---------------------------------------------------------------------------
+// 10. Registry at the EXACT-FIT shard count (per team-lead's analysis). The
+// control layout is computed twice -- controlBytes() sums it, the region.hh
+// accessors walk it -- and a divergence between them is only OBSERVABLE from
+// outside when the control area has no page-align slack to hide it. At most
+// counts the slack is hundreds of bytes (2128 at the 100 shards the geometry
+// test uses); at the exact-fit count it is ZERO, so any accessor walking one
+// byte past the reservation lands in arena 0, where registry writes corrupt
+// the first records written. The count is DERIVED from the live page size and
+// struct sizes -- hardcoding 15 would silently stop being a boundary test on
+// a 16 KiB-page machine. Complements test 9 (which catches the converse:
+// controlBytes() under-reserving) and the create()/attach() assert in
+// region.cc (which catches both at every count, debug builds only).
+// ---------------------------------------------------------------------------
+namespace {
+
+// Shard count whose control area fills its final page exactly (zero slack).
+// Where the host page size admits none below the cap, the tightest-slack
+// count is returned and the test degrades to a near-boundary test.
+u32_t exactFitShards(sz_t page, sz_t* slack_out) {
+  u32_t best = 1;
+  sz_t best_slack = page;
+  for (u32_t s = 1; s <= 256; ++s) {
+    sz_t const bytes = sizeof(Control) + s * sizeof(ShardControl) +
+                       ((s + 63) / 64) * sizeof(u64_t) + s * sizeof(WriterSlot);
+    sz_t const slack = (page - bytes % page) % page;
+    if (slack < best_slack) {
+      best_slack = slack;
+      best = s;
+      if (slack == 0) break;
+    }
+  }
+  *slack_out = best_slack;
+  return best;
+}
+
+void runRegistryBoundary(u32_t shards, sz_t page) {
+  auto* const qp = new MultiSpsc;  // fresh heap instance; deliberately leaked
+  MultiSpsc& q = *qp;
+  REQUIRE(MultiSpsc::create(smallConfig(shards), q));
+  REQUIRE(q.attachReader());
+  Region const& r = q.region();
+
+  REQUIRE(reinterpret_cast<std::byte const*>(r.writerSlots() + shards) <= r.arena(0));
+  REQUIRE(reinterpret_cast<std::uintptr_t>(r.arena(0)) % page == 0);
+
+  // A committed record in arena 0 as the canary...
+  REQUIRE(q.attachWriter());  // slot 0
+  pushTag(q, 8000);
+
+  // ...then exercise EVERY byte the registry protocol can ever write -- all
+  // occupancy bits, every owner_tid, every generation, through the LAST slot,
+  // whose final byte is exactly what an overflow pushes into arena 0.
+  for (u32_t s = 1; s < shards; ++s) {
+    std::atomic_ref<u64_t>(r.writerBitmap()[s / 64])
+        .fetch_or(1ull << (s % 64), std::memory_order_acq_rel);
+    std::atomic_ref<u32_t>(r.writerSlots()[s].owner_tid)
+        .store(100000u + s, std::memory_order_release);
+    std::atomic_ref<u32_t>(r.writerSlots()[s].generation).fetch_add(1, std::memory_order_acq_rel);
+  }
+  std::atomic_ref<u32_t>(r.writerSlots()[0].generation).fetch_add(1, std::memory_order_acq_rel);
+
+  // The canary drains intact: no registry write reached ring bytes.
+  CHECK(popTag(q) == 8000);
+  CHECK(q.peek().data() == nullptr);
+  q.detachWriter();
+}
+
+}  // namespace
+
+TEST_CASE("xproc: registry writes at the exact-fit shard count stay out of arena 0") {
+  sz_t const page = static_cast<sz_t>(::sysconf(_SC_PAGESIZE));
+  REQUIRE(page > 0);
+  sz_t slack = 0;
+  u32_t const s = exactFitShards(page, &slack);
+  CAPTURE(page);
+  CAPTURE(s);
+  CAPTURE(slack);  // 0 on 4 KiB pages (s == 15); tightest available otherwise
+  runRegistryBoundary(s, page);      // zero slack: the only observable-overflow count
+  runRegistryBoundary(s + 1, page);  // first count past the boundary: spills to a new page
 }
 
 }  // namespace

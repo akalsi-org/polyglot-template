@@ -29,7 +29,10 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <fstream>
+#include <iterator>
 #include <random>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -65,6 +68,19 @@ bool pinToPhysicalCore(unsigned slot) {
 unsigned physicalCores() {
   unsigned const logical = std::thread::hardware_concurrency();
   return logical >= 2 ? logical / 2 : 1;  // assumes 2-way SMT; conservative
+}
+
+// Restore the full CPU mask. REQUIRED at the start of every regime run: doctest
+// re-executes the TEST_CASE body per SUBCASE, the pinned subcase pins the MAIN
+// thread, and spawned threads inherit the creator's mask -- so without this an
+// oversubscribed subcase after a pinned one runs 29 busy-spinning threads on
+// ONE logical CPU and times out. (Found because the subcase passed standalone
+// and failed in-suite.)
+void unpinAll() {
+  cpu_set_t set;
+  CPU_ZERO(&set);
+  for (unsigned i = 0; i < std::thread::hardware_concurrency(); ++i) CPU_SET(i, &set);
+  pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
 }
 
 struct Deadline {
@@ -109,17 +125,24 @@ u32_t checkRecord(ReadSpan s, std::vector<u32_t>& next_seq, std::vector<u64_t>& 
 
 // Drives Q with `writers` threads pushing `per_writer` randomized records
 // (short commits and aborts included), reader on the calling thread, and
-// checks per-writer subsequences exactly.
+// checks per-writer subsequences exactly. In the pinned regime writer w goes
+// to physical core w+1 and the reader to core 0; oversubscribed threads run
+// wherever the scheduler puts them, which is the point.
 template <typename Q>
-void perWriterDifferential(Q& q, u32_t writers, u32_t per_writer, u32_t max_payload) {
+void perWriterDifferential(Q& q, u32_t writers, u32_t per_writer, u32_t max_payload,
+                           Regime regime = Regime::kOversubscribed) {
   REQUIRE(q.attachReader());
+  unpinAll();  // shed any affinity inherited from a previous pinned subcase
+  if (regime == Regime::kPinned) REQUIRE(pinToPhysicalCore(0));
   Deadline dl;
   std::atomic<bool> failed{false};
   std::vector<std::thread> ts;
   for (u32_t w = 0; w < writers; ++w) {
     ts.emplace_back([&, w] {
+      if (regime == Regime::kPinned) pinToPhysicalCore(w + 1);
       if (!q.attachWriter()) {
         failed.store(true);
+        std::fprintf(stderr, "DIAG: attachWriter failed w=%u\n", w);
         return;
       }
       std::mt19937 rng(w * 9973u + 17u);
@@ -131,6 +154,8 @@ void perWriterDifferential(Q& q, u32_t writers, u32_t per_writer, u32_t max_payl
         if (s.data() == nullptr) {
           if (dl.expired()) {
             failed.store(true);
+            std::fprintf(stderr, "DIAG: writer %u deadline, status=%d seq=%u\n", w,
+                         (int)q.status(), seq);
             return;
           }
           cpuRelax();
@@ -141,7 +166,7 @@ void perWriterDifferential(Q& q, u32_t writers, u32_t per_writer, u32_t max_payl
           continue;
         }
         fillRecord(s.data(), w, seq, n);
-        q.commit(n);  // ...commit low: exercises the short-commit trailer
+        q.commit(s, n);  // ...commit low: exercises the short-commit trailer
         ++seq;
       }
       q.detachWriter();
@@ -159,6 +184,7 @@ void perWriterDifferential(Q& q, u32_t writers, u32_t per_writer, u32_t max_payl
     ++got;
   }
   for (auto& t : ts) t.join();
+  if (regime == Regime::kPinned) unpinAll();  // leave main unpinned for what follows
   REQUIRE_FALSE(failed.load());
   REQUIRE(got == expect);  // completeness: nothing lost, nothing duplicated
   for (u32_t w = 0; w < writers; ++w) CHECK(next_seq[w] == per_writer);
@@ -174,15 +200,61 @@ Config tinyConfig(u32_t shards) {
 // ---------------------------------------------------------------------------
 
 TEST_CASE("ShardedMpsc K=2: per-writer differential, wrapping, short commits") {
-  ShardedMpsc q;
-  REQUIRE(ShardedMpsc::create(tinyConfig(2), q));
-  perWriterDifferential(q, /*writers=*/4, /*per_writer=*/4000, /*max_payload=*/200);
+  SUBCASE("pinned, one writer per physical core") {
+    if (physicalCores() < 5) return;  // 4 writers + reader; skip, don't degrade
+    ShardedMpsc q;
+    REQUIRE(ShardedMpsc::create(tinyConfig(2), q));
+    perWriterDifferential(q, 4, 4000, 200, Regime::kPinned);
+  }
+  SUBCASE("oversubscribed, unpinned") {
+    u32_t const writers = std::thread::hardware_concurrency() + 4;
+    ShardedMpsc q;
+    REQUIRE(ShardedMpsc::create(tinyConfig(2), q));
+    perWriterDifferential(q, writers, 800, 200, Regime::kOversubscribed);
+  }
 }
 
 TEST_CASE("MultiSpsc: per-writer differential at full registration") {
-  MultiSpsc q;
-  REQUIRE(MultiSpsc::create(tinyConfig(4), q));
-  perWriterDifferential(q, /*writers=*/4, /*per_writer=*/4000, /*max_payload=*/200);
+  SUBCASE("pinned, one writer per physical core") {
+    if (physicalCores() < 5) return;
+    MultiSpsc q;
+    REQUIRE(MultiSpsc::create(tinyConfig(4), q));
+    perWriterDifferential(q, 4, 4000, 200, Regime::kPinned);
+  }
+  SUBCASE("oversubscribed, unpinned") {
+    u32_t const writers = std::thread::hardware_concurrency() + 4;
+    MultiSpsc q;
+    REQUIRE(MultiSpsc::create(tinyConfig(writers), q));  // one ring per writer
+    perWriterDifferential(q, writers, 800, 200, Regime::kOversubscribed);
+  }
+}
+
+// A contention test that recorded zero contention did not test what it claims.
+// The policy hook is the witness: onContended fires only when a claim CAS was
+// actually lost, which cannot happen unless two writers raced the same slot.
+struct ContendPolicy : DefaultPolicy {
+  std::atomic<u64_t>* contended = nullptr;
+  void onContended(u32_t) noexcept { contended->fetch_add(1, std::memory_order_relaxed); }
+};
+
+TEST_CASE("claim contention actually happens in both regimes") {
+  auto run = [](Regime regime, u32_t writers) {
+    static std::atomic<u64_t> count{0};  // static: policy is a copied handle
+    count.store(0);
+    ContendPolicy pol;
+    pol.contended = &count;
+    Ring<ContendPolicy> q(pol);
+    REQUIRE(Ring<ContendPolicy>::create(tinyConfig(1), q));
+    perWriterDifferential(q, writers, 2000, 64, regime);
+    return count.load();
+  };
+  SUBCASE("pinned") {
+    if (physicalCores() < 5) return;
+    CHECK(run(Regime::kPinned, 4) > 0);
+  }
+  SUBCASE("oversubscribed") {
+    CHECK(run(Regime::kOversubscribed, std::thread::hardware_concurrency() + 4) > 0);
+  }
 }
 
 TEST_CASE("Spsc: differential with boundary sizes 0, 1, kGrain-8, kGrain") {
@@ -226,6 +298,56 @@ TEST_CASE("REGRESSION: Sharded<Ring> K>=2 attachReader succeeds and delivers") {
   REQUIRE(ShardedMpsc::create(tinyConfig(4), q));
   REQUIRE(q.attachReader());   // K=4: requires holder-idempotent Ring::attachReader
   perWriterDifferential(q, /*writers=*/4, /*per_writer=*/500, /*max_payload=*/64);
+}
+
+// Memory-ordering conformance: pins the ordering table as SOURCE TEXT.
+//
+// On x86 an ordering weakening is provably unobservable at runtime -- release
+// and relaxed stores compile to byte-identical code (verified by objdump diff
+// of stock vs mutated queue.cc at -O2) -- so no behavioral test on an x86 dev
+// box can catch release->relaxed. This check is the only same-machine tripwire
+// that can exist: it verifies TEXT, not SEMANTICS. The semantic instrument is
+// cpp/test/ordering_mutants.sh run on weakly-ordered hardware (the
+// ubuntu-24.04-arm CI runner); the authority is the "Memory ordering" table in
+// docs/mpsc-queue.md. Several anchors below are also the sed anchors that
+// ordering_mutants.sh mutates -- rewording them breaks the campaign, which is
+// why anchor drift must fail loudly here.
+TEST_CASE("ordering table conformance -- TEXT, not semantics") {
+  // Locate queue.hh from this file's compile-time path; skip loudly if the
+  // layout moved rather than passing vacuously.
+  std::string path = __FILE__;
+  sz_t const cut = path.rfind("cpp/test/");
+  REQUIRE(cut != std::string::npos);
+  path = path.substr(0, cut) + "cpp/lib/pgt/mpsc/queue.hh";
+  std::ifstream in(path);
+  REQUIRE_MESSAGE(in.good(), "cannot open ", path,
+                  " -- ordering conformance NOT checked; fix the path derivation");
+  std::string const src((std::istreambuf_iterator<char>(in)),
+                        std::istreambuf_iterator<char>());
+  auto expect = [&](char const* anchor, char const* which) {
+    std::string const msg =
+        std::string("ordering anchor missing: ") + which + " [" + anchor +
+        "]. This test verifies TEXT, not SEMANTICS. If the change is deliberate:"
+        " update the Memory ordering table in docs/mpsc-queue.md, this anchor, and"
+        " the sed anchors in cpp/test/ordering_mutants.sh in the SAME commit. The"
+        " semantic check is ordering_mutants.sh on the arm64 CI runner; x86 cannot"
+        " observe the difference (byte-identical codegen).";
+    REQUIRE_MESSAGE(src.find(anchor) != std::string::npos, msg);
+  };
+  // The two anchors ordering_mutants.sh mutates (comment text load-bearing):
+  expect("std::memory_order_release);  // publishes the payload", "commit store release");
+  expect("std::memory_order_release);  // vouch (I2)", "vouch release");
+  // The rest of the table:
+  expect("hintRef().store(q, std::memory_order_release)", "write_hint store release");
+  expect("hintRef().load(std::memory_order_acquire)", "write_hint load acquire");
+  expect("readPosRef().store(rd_, std::memory_order_release)", "read_pos store release");
+  expect("readPosRef().load(std::memory_order_acquire)", "read_pos load acquire");
+  expect("compare_exchange_strong(expected, mine, std::memory_order_acquire",
+         "claim CAS acquire on success");
+  expect("descRef(p).load(std::memory_order_acquire)", "walk load acquire");
+  expect("descRef(rd_).load(std::memory_order_acquire)", "reader peek load acquire");
+  expect("withState(d, State::kAborted), std::memory_order_release",
+         "recover ABORTED store release");
 }
 
 TEST_CASE("registration: Spsc rejects a second writer; MultiSpsc reports kNoSlot") {
