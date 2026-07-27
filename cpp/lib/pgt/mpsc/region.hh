@@ -86,8 +86,25 @@ struct alignas(128) Control {
   // uses it to claim the role. Checked only on cold paths.
   u32_t reader_tid;
 
-  std::byte pad[128 - 32];
+  // Metadata-plane geometry, zero when the region has no planes. Recorded here
+  // rather than recomputed because an ATTACHING process is handed only a
+  // descriptor: without these it cannot know where the arenas start, let alone
+  // find the planes. Sizing every attacher off a compile-time constant would
+  // reintroduce exactly the silent-layout-divergence class the exact-equality
+  // asserts in region.cc exist to catch.
+  u32_t claim_stride;
+  u32_t result_stride;
+
+  std::byte pad[128 - 40];
 };
+
+// The control block is a WIRE FORMAT: an attaching process reads it out of the
+// mapping and must agree with the creator byte for byte. Pin the size so a
+// field added past the padding budget is a build error rather than a region two
+// binaries disagree about -- the plane strides were added inside this budget
+// precisely so old and new layouts stay identical when no planes are asked for.
+static_assert(sizeof(Control) == 128, "Control is a wire format; its size is pinned");
+static_assert(sizeof(ShardControl) == 256, "ShardControl is a wire format; its size is pinned");
 
 // One entry per writer slot in the shared registry. The registry MUST live in
 // the shared control area, not in any queue object: slot arbitration is
@@ -101,6 +118,7 @@ struct WriterSlot {
   // reused slot.
   u32_t generation;
 };
+static_assert(sizeof(WriterSlot) == 8, "WriterSlot is a wire format; its size is pinned");
 
 // Owns the fd and the mapping. Move-only; unmaps and closes on destruction.
 class Region {
@@ -140,6 +158,23 @@ class Region {
     return reinterpret_cast<WriterSlot*>(writerBitmap() + bitmapWords());
   }
 
+  // Metadata planes for shard i, or nullptr when the region has none. Both live
+  // in the control area, which is mapped ONCE -- see the Config comment on
+  // plane_claim_stride for why an atomic must never sit in a mirrored arena.
+  //
+  // Claim and Result are separate arrays rather than interleaved cells: writers
+  // acquire-walk immutable Claim words, and interleaving would make every walk
+  // step also touch the Result line its owner is about to write.
+  [[nodiscard]] std::byte* claimPlane(u32_t i) const noexcept {
+    return planes_ == nullptr ? nullptr : planes_ + static_cast<sz_t>(i) * shardPlaneBytes();
+  }
+  [[nodiscard]] std::byte* resultPlane(u32_t i) const noexcept {
+    return planes_ == nullptr ? nullptr : claimPlane(i) + claimPlaneBytes();
+  }
+  [[nodiscard]] u64_t planeCells() const noexcept { return capacity_ / 64; }
+  [[nodiscard]] u32_t claimStride() const noexcept { return claim_stride_; }
+  [[nodiscard]] u32_t resultStride() const noexcept { return result_stride_; }
+
   // Base of shard i's primary mapping. Address a position with
   // `arena(i) + (pos & mask())`; the mirror makes any span of at most
   // capacity bytes contiguous from there.
@@ -162,8 +197,24 @@ class Region {
   Control* control_ = nullptr;
   ShardControl* shards_ = nullptr;
   std::byte* arena_ = nullptr;
+  std::byte* planes_ = nullptr;
   u64_t capacity_ = 0;
   u32_t shard_count_ = 0;
+  u32_t claim_stride_ = 0;
+  u32_t result_stride_ = 0;
+
+  // Each plane block is padded to the 64-byte line so the PADDED stride
+  // actually lands one cell per line: a padded layout whose base is merely
+  // 8-aligned pads without separating, which is the worst of both.
+  [[nodiscard]] sz_t claimPlaneBytes() const noexcept {
+    return (static_cast<sz_t>(planeCells() * claim_stride_) + 63) & ~sz_t{63};
+  }
+  [[nodiscard]] sz_t resultPlaneBytes() const noexcept {
+    return (static_cast<sz_t>(planeCells() * result_stride_) + 63) & ~sz_t{63};
+  }
+  [[nodiscard]] sz_t shardPlaneBytes() const noexcept {
+    return claimPlaneBytes() + resultPlaneBytes();
+  }
 };
 
 }  // namespace pgt::mpsc

@@ -38,20 +38,8 @@ cxx_test(
   deps = ["//cpp/lib/pgt/core:pgt_core"],
 )
 
-cxx_test(
-  name = "mpsc_test",
-  srcs = ["mpsc_test.cc"],
-  deps = ["//cpp/lib/pgt/mpsc:mpsc"],
-)
-
 # Fork-based fault injection (killed/stopped writers, misuse death tests).
-# Separate from mpsc_test so that one stays runnable under TSan.
-cxx_test(
-  name = "mpsc_fault_test",
-  srcs = ["mpsc_fault_test.cc"],
-  deps = ["//cpp/lib/pgt/mpsc:mpsc"],
-)
-
+# Separate from two_plane_test so that one stays runnable under TSan.
 # CROSS-PROCESS fault injection: children attach by fd (or shm name) into
 # fresh mappings and objects (never the parent's), then are killed, stopped,
 # zombified, or forked mid-protocol. Covers writer kill/stop, zombie liveness,
@@ -59,20 +47,36 @@ cxx_test(
 # ring -- paths reachable only with real processes and real signals. Every
 # break of the recovery/liveness/registry protocol was verified to make one
 # of these tests fail before it was trusted to pass.
+# EXPERIMENTAL two-plane variant (pgt::mpsc::TwoPlaneRing): control plane
+# (Claim), publication plane (Result), and payload on three separate lines.
+# Same split as above -- the thread-only file stays TSan-runnable, fork-based
+# fault injection lives in its own target.
 cxx_test(
-  name = "mpsc_xproc_test",
-  srcs = ["mpsc_xproc_test.cc"],
+  name = "region_test",
+  srcs = ["region_test.cc"],
   deps = ["//cpp/lib/pgt/mpsc:mpsc"],
 )
 
-# Variant coverage beyond Mpsc: Spsc, ShardedMpsc (K >= 2), MultiSpsc.
+cxx_test(
+  name = "spsc_test",
+  srcs = ["spsc_test.cc"],
+  deps = ["//cpp/lib/pgt/mpsc:mpsc"],
+)
+
+cxx_test(
+  name = "two_plane_test",
+  srcs = ["two_plane_test.cc"],
+  deps = ["//cpp/lib/pgt/mpsc:mpsc"],
+)
+
+cxx_test(
+  name = "two_plane_fault_test",
+  srcs = ["two_plane_fault_test.cc"],
+  deps = ["//cpp/lib/pgt/mpsc:mpsc"],
+)
+
 # Per-writer-subsequence differential, registration semantics, and the
 # K >= 2 attachReader regression. Also the affinity regimes: pinned
 # one-writer-per-core for real cross-core coherence traffic, and
 # oversubscribed for preemption inside the reserve-to-commit window, with an
 # onContended witness asserting the run actually contended.
-cxx_test(
-  name = "mpsc_variants_test",
-  srcs = ["mpsc_variants_test.cc"],
-  deps = ["//cpp/lib/pgt/mpsc:mpsc"],
-)

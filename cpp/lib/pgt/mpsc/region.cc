@@ -18,7 +18,12 @@ namespace pgt::mpsc {
 namespace {
 
 inline constexpr u64_t kMagic = 0x7067'745f'6d70'7363ull;  // "pgt_mpsc"
-inline constexpr u32_t kVersion = 1;
+// Bumped to 2 when the claim word gained a lap-parity bit (desc.hh kLapShift).
+// A v1 region's claim words have that bit clear regardless of lap, so a v2
+// reader would mistake stale previous-lap words for current-lap claims and
+// decline to promote a successor -- wedging the ring rather than corrupting it,
+// but wedging it silently. Refusing the attach is the honest outcome.
+inline constexpr u32_t kVersion = 2;
 
 // The control area occupies file offsets [0, ctrl): one Control block, one
 // ShardControl per shard, then the shared writer-slot registry (occupancy
@@ -29,14 +34,40 @@ inline constexpr u32_t kVersion = 1;
 // the accessor walk against it EXACTLY: comparing against the page-rounded
 // value would let a divergence smaller than the alignment slack pass -- the
 // same masking that makes such a bug unobservable at most shard counts.
-[[nodiscard]] sz_t controlBytesRaw(u32_t shards) noexcept {
+[[nodiscard]] constexpr sz_t align64(sz_t n) noexcept { return (n + 63) & ~sz_t{63}; }
+
+// Offset of the metadata planes within the control area, or the whole unpadded
+// control size when there are none. Split out so both the sizing path and the
+// accessor-agreement assert derive the plane base from ONE expression.
+[[nodiscard]] sz_t planeBase(u32_t shards) noexcept {
   sz_t const bitmap_words = (static_cast<sz_t>(shards) + 63) / 64;
-  return sizeof(Control) + static_cast<sz_t>(shards) * sizeof(ShardControl) +
-         bitmap_words * sizeof(u64_t) + static_cast<sz_t>(shards) * sizeof(WriterSlot);
+  sz_t const raw = sizeof(Control) + static_cast<sz_t>(shards) * sizeof(ShardControl) +
+                   bitmap_words * sizeof(u64_t) + static_cast<sz_t>(shards) * sizeof(WriterSlot);
+  return raw;
 }
 
-[[nodiscard]] sz_t controlBytes(u32_t shards, sz_t page) noexcept {
-  return (controlBytesRaw(shards) + page - 1) & ~(page - 1);
+// Bytes of Claim + Result plane for ONE shard. Each block is rounded to the
+// 64-byte line: the padded stride exists to put one cell per line, and a block
+// that merely starts 8-aligned pads without separating.
+[[nodiscard]] sz_t shardPlaneBytes(u64_t capacity, u64_t claim_stride,
+                                   u64_t result_stride) noexcept {
+  if (claim_stride == 0) return 0;
+  u64_t const cells = capacity / kGrain;
+  return align64(static_cast<sz_t>(cells * claim_stride)) +
+         align64(static_cast<sz_t>(cells * result_stride));
+}
+
+[[nodiscard]] sz_t controlBytesRaw(u32_t shards, u64_t capacity, u64_t claim_stride,
+                                   u64_t result_stride) noexcept {
+  sz_t const base = planeBase(shards);
+  if (claim_stride == 0) return base;
+  return align64(base) +
+         static_cast<sz_t>(shards) * shardPlaneBytes(capacity, claim_stride, result_stride);
+}
+
+[[nodiscard]] sz_t controlBytes(u32_t shards, u64_t capacity, u64_t claim_stride,
+                                u64_t result_stride, sz_t page) noexcept {
+  return (controlBytesRaw(shards, capacity, claim_stride, result_stride) + page - 1) & ~(page - 1);
 }
 
 // One mapping routine for every backend: reserve the whole span as PROT_NONE,
@@ -47,14 +78,13 @@ inline constexpr u32_t kVersion = 1;
 [[nodiscard]] bool mapMirrored(int fd, sz_t ctrl, u64_t capacity, u32_t shards, std::byte*& base,
                                sz_t& reservation) noexcept {
   sz_t const span = ctrl + static_cast<sz_t>(shards) * 2 * capacity;
-  void* const hole = mmap(nullptr, span, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE,
-                          -1, 0);
+  void* const hole =
+    mmap(nullptr, span, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
   if (hole == MAP_FAILED) return false;
   auto* const b = static_cast<std::byte*>(hole);
 
   auto fix = [&](sz_t at, sz_t len, off_t off) noexcept {
-    return mmap(b + at, len, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, off) !=
-           MAP_FAILED;
+    return mmap(b + at, len, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, off) != MAP_FAILED;
   };
 
   // Control page once, then each arena TWICE back to back from the same file
@@ -136,8 +166,20 @@ fail:
   return false;
 }
 
+// An upper bound on the shard count is a CORRECTNESS requirement, not tidiness.
+// attach() derives the file size from shards * capacity and mapMirrored() spans
+// shards * 2 * capacity; with shards unbounded across a u32 and capacity up to
+// kMaxExtent (~4 GiB), both products can wrap. A header that wraps them to a
+// small value passes the file-size check by coincidence and yields a mapping far
+// smaller than the arena accessors assume.
+//
+// 65536 shards is already absurd -- 256 B of ShardControl plus a WriterSlot each
+// is ~17 MiB of control area before a single byte of ring -- and it makes every
+// product here provably non-wrapping: 2^16 shards * 2^32 capacity * 2 = 2^49.
+inline constexpr u32_t kMaxShards = 1u << 16;
+
 [[nodiscard]] bool geometryOk(u64_t capacity, u32_t shards, sz_t page) noexcept {
-  return shards != 0 && capacity != 0 && std::has_single_bit(capacity) &&
+  return shards != 0 && shards <= kMaxShards && capacity != 0 && std::has_single_bit(capacity) &&
          (capacity & (page - 1)) == 0 && capacity <= kMaxExtent;
 }
 
@@ -154,8 +196,11 @@ void Region::reset() noexcept {
   control_ = nullptr;
   shards_ = nullptr;
   arena_ = nullptr;
+  planes_ = nullptr;
   capacity_ = 0;
   shard_count_ = 0;
+  claim_stride_ = 0;
+  result_stride_ = 0;
 }
 
 Region::~Region() { reset(); }
@@ -167,16 +212,22 @@ Region::Region(Region&& other) noexcept
       control_(other.control_),
       shards_(other.shards_),
       arena_(other.arena_),
+      planes_(other.planes_),
       capacity_(other.capacity_),
-      shard_count_(other.shard_count_) {
+      shard_count_(other.shard_count_),
+      claim_stride_(other.claim_stride_),
+      result_stride_(other.result_stride_) {
   other.fd_ = -1;
   other.base_ = nullptr;
   other.reservation_ = 0;
   other.control_ = nullptr;
   other.shards_ = nullptr;
   other.arena_ = nullptr;
+  other.planes_ = nullptr;
   other.capacity_ = 0;
   other.shard_count_ = 0;
+  other.claim_stride_ = 0;
+  other.result_stride_ = 0;
 }
 
 Region& Region::operator=(Region&& other) noexcept {
@@ -188,16 +239,22 @@ Region& Region::operator=(Region&& other) noexcept {
     control_ = other.control_;
     shards_ = other.shards_;
     arena_ = other.arena_;
+    planes_ = other.planes_;
     capacity_ = other.capacity_;
     shard_count_ = other.shard_count_;
+    claim_stride_ = other.claim_stride_;
+    result_stride_ = other.result_stride_;
     other.fd_ = -1;
     other.base_ = nullptr;
     other.reservation_ = 0;
     other.control_ = nullptr;
     other.shards_ = nullptr;
     other.arena_ = nullptr;
+    other.planes_ = nullptr;
     other.capacity_ = 0;
     other.shard_count_ = 0;
+    other.claim_stride_ = 0;
+    other.result_stride_ = 0;
   }
   return *this;
 }
@@ -226,7 +283,16 @@ bool Region::create(Config const& cfg, Region& out) noexcept {
     return false;
   }
 
-  sz_t const ctrl = controlBytes(cfg.shards, page);
+  // Plane strides are a geometry input, validated like any other. A result
+  // stride without a claim stride (or vice versa) is a caller bug, not a
+  // degenerate-but-usable region.
+  if ((cfg.plane_claim_stride == 0) != (cfg.plane_result_stride == 0) ||
+      cfg.plane_claim_stride > 64 || cfg.plane_result_stride > 64) {
+    errno = EINVAL;
+    return false;
+  }
+  sz_t const ctrl =
+    controlBytes(cfg.shards, cap, cfg.plane_claim_stride, cfg.plane_result_stride, page);
   if (cap > (SIZE_MAX - ctrl) / (2 * static_cast<sz_t>(cfg.shards))) {
     errno = EINVAL;  // reservation would overflow the address arithmetic
     return false;
@@ -255,6 +321,8 @@ bool Region::create(Config const& cfg, Region& out) noexcept {
   control->capacity = cap;
   control->tgid = static_cast<u32_t>(getpid());
   control->reader_tid = 0;
+  control->claim_stride = static_cast<u32_t>(cfg.plane_claim_stride);
+  control->result_stride = static_cast<u32_t>(cfg.plane_result_stride);
   // The memset above already zeroed the rest of the control area: every
   // ShardControl cursor (write_hint = read_pos = 0), the writer occupancy
   // bitmap, and every WriterSlot {owner_tid = 0, generation = 0}.
@@ -277,6 +345,24 @@ bool Region::create(Config const& cfg, Region& out) noexcept {
   r.arena_ = base + ctrl;
   r.capacity_ = cap;
   r.shard_count_ = cfg.shards;
+  r.claim_stride_ = static_cast<u32_t>(cfg.plane_claim_stride);
+  r.result_stride_ = static_cast<u32_t>(cfg.plane_result_stride);
+  r.planes_ = cfg.plane_claim_stride == 0 ? nullptr : base + align64(planeBase(cfg.shards));
+  // A zero-filled Claim cell decodes as freeWord(0), which matches ONLY grain
+  // 0, so the frontier starts at position 0 and every other cell already reads
+  // "not free for me". The memset above guarantees that regardless of backend,
+  // which a reused kFile backing would otherwise break.
+
+  // Plane accessors are a THIRD independent walk of the same layout, so pin
+  // them to the sizing expression too -- same reasoning as the control walk
+  // below, and the same failure mode: planes overlapping arena 0 would corrupt
+  // the first records written rather than fault.
+  assert(
+    (cfg.plane_claim_stride == 0 ||
+     r.resultPlane(cfg.shards - 1) +
+         align64(static_cast<sz_t>((cap / kGrain) * cfg.plane_result_stride)) ==
+       base + controlBytesRaw(cfg.shards, cap, cfg.plane_claim_stride, cfg.plane_result_stride)) &&
+    "plane accessor walk disagrees with controlBytes()");
   // The control layout is computed TWICE, independently: controlBytes() sums
   // it, the accessors walk it pointer by pointer. They agree today, but
   // nothing structural keeps them agreeing -- a field added to one and not the
@@ -286,9 +372,20 @@ bool Region::create(Config const& cfg, Region& out) noexcept {
   // against arena(0) would let page-align slack hide any divergence smaller
   // than the slack, at every count where slack exists -- which is most.
   assert(reinterpret_cast<std::byte const*>(r.writerSlots() + r.shardCount()) ==
-             base + controlBytesRaw(r.shardCount()) &&
+           base + planeBase(r.shardCount()) &&
          "control-area accessor walk disagrees with controlBytes()");
   out = std::move(r);
+  // Re-check AFTER the move. Region has hand-written move operations because it
+  // owns an fd and a mapping, so a member added to the class and not to those
+  // operations is silently dropped -- which is exactly how the plane strides
+  // were lost the first time, arriving as a zeroed geometry that mapped the
+  // planes onto a null base. The asserts above run on the local `r` and cannot
+  // see it; this one can.
+  assert(out.capacity() == cap && out.shardCount() == cfg.shards &&
+         out.claimStride() == cfg.plane_claim_stride &&
+         out.resultStride() == cfg.plane_result_stride &&
+         (cfg.plane_claim_stride == 0) == (out.claimPlane(0) == nullptr) &&
+         "Region move operations dropped a member");
   return true;
 }
 
@@ -324,7 +421,23 @@ bool Region::attach(int fd, Region& out) noexcept {
     errno = EPROTO;
     return false;
   }
-  sz_t const ctrl = controlBytes(hdr.shards, page);
+  if ((hdr.claim_stride == 0) != (hdr.result_stride == 0) || hdr.claim_stride > 64 ||
+      hdr.result_stride > 64) {
+    errno = EPROTO;  // header claims a plane geometry that cannot be laid out
+    return false;
+  }
+  sz_t const ctrl =
+    controlBytes(hdr.shards, hdr.capacity, hdr.claim_stride, hdr.result_stride, page);
+  // The same overflow guard create() applies. Without it the size comparison
+  // below is made against a WRAPPED product, so a header can satisfy it by
+  // coincidence. geometryOk's shard bound already makes this unreachable; it is
+  // kept because the two paths must not disagree about what is representable,
+  // and because a future change to either bound should fail here rather than
+  // silently produce a short mapping.
+  if (hdr.capacity > (SIZE_MAX - ctrl) / (2 * static_cast<sz_t>(hdr.shards))) {
+    errno = EPROTO;
+    return false;
+  }
   if (static_cast<u64_t>(st.st_size) != ctrl + static_cast<u64_t>(hdr.shards) * hdr.capacity) {
     errno = EPROTO;  // header claims a geometry the file does not have
     return false;
@@ -343,11 +456,14 @@ bool Region::attach(int fd, Region& out) noexcept {
   r.arena_ = base + ctrl;
   r.capacity_ = hdr.capacity;
   r.shard_count_ = hdr.shards;
+  r.claim_stride_ = hdr.claim_stride;
+  r.result_stride_ = hdr.result_stride;
+  r.planes_ = hdr.claim_stride == 0 ? nullptr : base + align64(planeBase(hdr.shards));
   // Same exact-agreement check as create(); see the comment there. attach()
   // needs it independently -- a version skew between the creating and
   // attaching binaries is exactly a divergence of the two computations.
   assert(reinterpret_cast<std::byte const*>(r.writerSlots() + r.shardCount()) ==
-             base + controlBytesRaw(r.shardCount()) &&
+           base + planeBase(r.shardCount()) &&
          "control-area accessor walk disagrees with controlBytes()");
   out = std::move(r);
   return true;

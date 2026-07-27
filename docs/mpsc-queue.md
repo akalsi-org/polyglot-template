@@ -1,35 +1,41 @@
-# Variable-Length MPSC Byte Queue — Algorithm Specification
+# Variable-Length Byte Queue — Algorithm Specification
 
-A many-writer, single-reader queue of variable-length byte records in shared memory,
-delivering a single totally-ordered stream, tolerant of writers stopped or killed at
-any instruction, with **no timeout constant anywhere**.
+Two variants, allocation-free after construction, over a mirrored (doubly
+mapped) ring so a record crossing the physical end is still one contiguous span.
 
-Status: revision 3. Revision 1 had five critical defects found by adversarial analysis;
-r2 fixed them and was verified clean; r3 adds the two-phase API and the fixes from a
-third pass. Not implemented. A bounded model check is in progress.
+| variant | producers | ordering | arbitration | recovery |
+|---|---|---|---|---|
+| `TwoPlaneMpsc` | many | total across all writers | CAS on a Claim cell | reader-only, on proven death |
+| `Spsc` | one | per-writer FIFO | none (wait-free) | none needed |
 
-**Scope: the reader busy-polls.** Blocking, sleeping, and wakeup are out of scope —
-see [Notification](#notification-out-of-scope).
+**The in-band shared ring (`Ring`/`Mpsc`) and the `Sharded` composition over it
+(`ShardedMpsc`, `MultiSpsc`) have been removed.** `Ring` placed its 8-byte
+descriptor at the head of the record, so the descriptor shared a cache line with
+the first 56 payload bytes. The claim CAS wanted that line exclusive, the owner's
+payload writes wanted it exclusive, and the reader's commit poll pulled it
+shared — three actors, three access patterns, one line, per record. Measured on
+Zen 5 it lost ~80% of throughput across the 2→4 writer step and reached 0.04 IPC
+at eight writers, with 33 coherence misses per record.
+
+That was not fixable by tuning the claim path. A test-and-test-and-set filter
+removed 42% of the failed locked RMWs and made throughput *worse*; per-line
+ablations of the successor prefetch and the reader poll were worth ~5% each,
+against a 70–80% cliff. The residual cost was the line sharing itself.
 
 ## Properties
 
-| Property | Value |
-|---|---|
-| Writers | Many, cross-process, mortal |
-| Readers | One, busy-polling |
-| Ordering | Total order over all records |
-| Writer progress | Lock-free (claim may retry) |
-| Reader progress | Wait-free except at a stalled record |
-| Allocation | None after construction |
-| Recovery | **Reader-only**, gated on proven thread death, never a timeout |
-| Max record | Remaining ring capacity |
-| Target | Linux, x86-64 |
-| Backends | memfd, shm_open, tmpfs, file — all descriptor-based |
-| Deployment | Process-local or cross-process, same protocol |
-
-Lock-free rather than wait-free is deliberate: records may be as large as the free
-space, so admission must be able to *decline*, and only a conditional atomic can.
-See [Why not fetch_add](#why-not-fetch_add).
+* Variable-length records, in-place: `reserve(n)` returns a span the caller
+  writes directly, `commit(span, actual_n)` publishes any prefix of it.
+* Fail-fast admission. `reserve` declines atomically on capacity exhaustion
+  before any irreversible state change.
+* Exact recovery of a dead writer's reservation. `{position, extent, owner,
+  state}` is durable before any later record depends on it.
+* Reader-only recovery, gated on **proven** death via `/proc/<tid>/stat`.
+  Writers never help, stamp, or abort another writer's record. Time is never
+  evidence of death; there are no timeouts in the protocol.
+* Arbitrary short commit: reserve N, commit any n ≤ N. The reader delivers n
+  bytes and advances by the full reserved extent.
+* Per-writer FIFO; `TwoPlaneMpsc` additionally gives a total order.
 
 ## Memory layout
 
@@ -140,7 +146,10 @@ eliminate sharing between a descriptor and its own payload; see
 
 ## Descriptor
 
-Eight bytes at the head of every record slot, 64-byte aligned. `state` occupies the
+Eight bytes, holding a record's state, extent, and owner. In `TwoPlaneMpsc` this
+word is a **Claim cell** in the control plane; in `Spsc` it is the in-band record
+header. The encoding is shared because the recovery and lap-ABA arguments are the
+same in both. `state` occupies the
 low bits in every encoding so it can be decoded before anything else.
 
 ```
@@ -154,7 +163,8 @@ low bits in every encoding so it can be decoded before anything else.
     bits  3..28   size          reservation extent, 64-byte units (4 GiB)
     bits 29..34   remainder     committed length mod 64
     bits 35..56   tid           owning thread (22 bits; PID_MAX_LIMIT is 2^22)
-    bits 57..63   reserved
+    bit  57       lap parity    kLapShift; separates current-lap claim from stale prior-lap word
+    bits 58..63   reserved
 ```
 
 `pos >> 6` needs exactly 58 bits for a 64-bit position space, and bits 3..60 provide
@@ -165,7 +175,7 @@ declaration order — this word is shared between separately-compiled processes.
 express it as a C bitfield either; bit order and allocation within bitfields are
 implementation-defined. Use an explicit `uint64_t` with pack/unpack helpers.
 
-**`FREE` must be 0 deliberately.** An untouched arena word is all zeros, which then
+**`FREE` must be 0 deliberately.** An untouched plane or arena word is all zeros, which then
 decodes as `FREE(0)` — harmless, because any claimant at `p != 0` mismatches and
 restarts. Had `ABORTED` been 0, an untouched word would decode as a zero-extent
 ABORTED and a walker reaching one would advance by zero, an infinite loop caught only
@@ -293,690 +303,255 @@ defense in depth. Safety never depends on it — Lemma 1 makes a claim from garb
 territory impossible regardless — but in the dead-mid-flight-writer corner it is what
 lets a walker resynchronize.
 
-## Why writers stamp their successor
+## Two-plane protocol
 
-The claim CAS requires the slot to read `FREE(p)`, so stale data must be replaced.
-On the next lap a descriptor position lands in the middle of the previous lap's
-*payload*, not on a previous descriptor, because variable-length records give different
-boundaries every lap. Reader-side zeroing of retired descriptors is therefore useless.
+Three planes, three different lines, three different actors:
 
-The alternative — the reader memsets the whole consumed region, as Agrona's
-`ManyToOneRingBuffer` does — costs a full write pass over every byte read. Each writer
-stamping its successor costs 8 bytes at a known boundary. The price is that claims form
-a causal chain: a writer cannot claim until its predecessor has claimed *and* stamped.
-
-## Writer
-
-The API is two-phase. A single-shot `write()` cannot express a short commit — the
-caller must be able to reserve an upper bound, discover the actual length while
-filling, and commit less. Reservation state is writer-private, and a writer may hold
-at most one reservation at a time.
-
-```c
-struct Reservation {           // writer-private, thread-local
-    uint64_t p;                // claimed position; INVALID when not held
-    uint64_t need;             // reservation extent
-    uint64_t n;                // requested payload length
-    uint64_t word;             // the claim word we wrote (carries our tid)
-};
-
-std::span<std::byte> reserve(size_t n);              // claim, stamp successor, vouch
-void commit(std::span<std::byte> reservation, size_t n);  // exact reservation; n <= reservation.size()
-void abort();                                             // publishes ABORTED, no payload
-
-bool write(const void *data, size_t n) {  // convenience: reserve + copy + commit
-    auto s = reserve(n);
-    if (s.data() == nullptr) return false;
-    if (n != 0) memcpy(s.data(), data, n);
-    commit(s, n);
-    return true;
-}
+```
+   Claim[cell]  8B   arbitration + recoverable ownership   writers race here
+   Result[cell] 16B  completion + actual length            owner writes once,
+                                                           reader polls here
+   payload           data                                  owner writes,
+                                                           reader reads
 ```
 
-**The span returned by `reserve` is valid only until `commit` or `abort`.** `commit`
-requires that exact pointer-and-length span, not merely another span of the same rounded
-descriptor extent; this rejects accidental wrong spans, subspans, and same-grain
-over-commits. It is a misuse guard rather than cryptographic provenance: a caller that
-intentionally reconstructs the same pointer and length (or a stale span after address
-reuse on wrap) is indistinguishable. The reader may overwrite those bytes once it has
-passed the record, and `read_pos` publication is what licenses that — so a caller must
-finish writing before committing, and must not retain the span afterwards. Symmetrically
-on the read side, the span from `peek` is valid only until `pop`.
+`cells = capacity / 64`, so the Claim plane can never be exhausted before the
+byte ring is: every record occupies at least one 64-byte grain. The slot plane
+therefore needs no backpressure of its own — the byte capacity check remains the
+sole admission gate, and the slot index is `ordinal % cells`.
 
-### Misuse guards
+Both planes live in the Region's **singly-mapped control area**, never in a
+mirrored arena. Claim and Result cells are atomics, and the two aliases of a
+mirrored arena are different locations to the compiler, which may reorder or
+coalesce relaxed accesses that in fact touch one physical word. That is a
+miscompilation hazard, not a coherence one, and no amount of correct atomic code
+repairs it.
 
-Two of these are silent-corruption paths reachable by ordinary caller bugs, so they are
-correctness guards rather than hardening, and belong in the code from day one. All are
-thread-local checks with no shared-state cost.
+Metadata cost is 8 + 16 = **24 bytes per 64 bytes of ring, 37.5%**.
 
-```c
-void commit(std::span<std::byte> reservation, size_t actual_n) {
-    trap_if(res.p == INVALID);                         // (b) double commit
-    trap_if(reservation.data() != payload(res.p) ||
-            reservation.size() != res.n);              // wrong reservation span
-    trap_if(actual_n > res.n ||
-            align64(8 + actual_n) > res.need);         // (c) grown commit
-    ...
-    res.p = INVALID;                                   // poison
-}
+### Writer
+
+```
+  walk Claim cells from write_hint          [acquire]
+  find the cell reading exactly FREE(p)
+  CAS  FREE(p) -> CLAIMED(extent, owner)    [acquire success / relaxed failure]
+  promote successor: Claim[q] = FREE(q)     [relaxed]   exclusive by Lemma 2
+  vouch: Claim[p] = CLEARED                 [release]   publishes the promotion
+  ... caller writes payload ...
+  Result[p].len = n                         [relaxed]
+  Result[p].tag = commitTag(p)              [release]   publishes the payload
 ```
 
-| Misuse | Consequence | Guard |
-|---|---|---|
-| (a) never commits, thread lives | queue wedges — reader waits forever at CLEARED+alive | RAII reservation whose destructor aborts. **Self-healing if the thread instead exits**: the tid goes dead and the reader recovers. Only an immortal thread that never commits wedges the queue, and the no-timeout doctrine makes that indistinguishable from slow user code by design. |
-| (b) commit twice | **silent corruption** — after the ring wraps, the second store smashes a live later-lap descriptor. This is the r1 delayed-stamper defect resurrected through the API. | poison `res.p`, assert |
-| (c) `actual_n > n` | **silent corruption** — commit stores a grown size with no trailer, so `p + used` is a fictitious boundary and walkers diverge | assert against `res.need` |
-| (d) reserve twice | first reservation orphaned in CLEARED with a live owner — wedge, no corruption | assert `res.p == INVALID` |
-| (e) commit after `fork()` | child inherits the mapping *and* the thread-local reservation; both may commit | assert `gettid()` matches; `pthread_atfork` child handler clears `res` |
-| (f) writes span after commit | arbitrary corruption — those bytes may be another record's payload *or its descriptor* | contract only; not catchable |
+### Reader
 
-```c
-std::span<std::byte> reserve(size_t n) {
-    size_t need = align64(8 + n);
-    uint64_t p, d, mine;
-
-    for (;;) {
-        p = write_hint.load(acquire);           // release/acquire — see ordering
-        unsigned hops = 0;
-
-        for (;;) {                              // walk to the true frontier
-            if (++hops > N / 64) goto restart;  // bounded: stale walk
-            d = desc[p].load(acquire);
-            if (state_of(d) == FREE) {
-                if (free_pos(d) != p) goto restart;   // recycled slot, stale walk
-                break;                                // frontier
-            }
-            if (state_of(d) == CLAIMED) {       // owner alive, or reader will recover
-                policy.on_busy(hops);
-                goto restart;
-            }
-            p += extent_of(d);                  // vouched by I2
-        }
-
-        if (p < read_pos_cached) goto restart;  // stale walk, NOT full
-        if (p + need + 64 - read_pos_cached > N) {
-            read_pos_cached = read_pos.load(acquire);
-            if (p < read_pos_cached) goto restart;
-            if (p + need + 64 - read_pos_cached > N) {
-                policy.on_full(0);
-                // full is normal backpressure; a DEAD reader means it will never
-                // drain, so report that distinctly rather than looping forever
-                if (!thread_alive(reader_tid)) return {};   // + set errno/flag
-                return {};                      // genuinely full, fail fast
-            }
-        }
-
-        // claim and identify in ONE atomic. Expected value carries p, so a stale
-        // claimant from an earlier lap fails deterministically. See Lemma 1: a
-        // successful CAS proves p is the frontier, however the walk computed it.
-        uint64_t expected = free_word(p);
-        mine = pack(need >> 6, 0, CLAIMED, my_tid);
-        if (desc[p].compare_exchange_strong(expected, mine, acquire, relaxed)) break;
-        policy.on_contended(0);
-    restart:;
-    }
-
-    uint64_t q = p + need;
-
-    // stamp the successor as FREE(q). CAS from observed — belt and braces; by
-    // Lemma 2 no concurrent mutator of this slot can exist.
-    uint64_t g = desc[q].load(relaxed);
-    desc[q].compare_exchange_strong(g, free_word(q), relaxed, relaxed);
-
-    desc[p].store(with_state(mine, CLEARED), release);   // vouch (I2)
-    write_hint.store(q, release);                        // release — see ordering
-
-    res = { p, need, mine };                             // writer-private
-    return { base + ((p + 8) & mask), n };
-}
-
-void commit(size_t actual_n) {
-    size_t used = align64(8 + actual_n);
-    // Trailer FIRST, then shrink size (I1 as refinement). Both are published by
-    // the commit release below, so no observer sees a shrunk size without a trailer.
-    if (used < res.need)
-        desc[res.p + used].store(
-            pack((res.need - used) >> 6, 0, ABORTED, my_tid), relaxed);
-    desc[res.p].store(pack(used >> 6, actual_n & 63, COMMITTED, my_tid), release);
-}
-
-void abort(void) {
-    desc[res.p].store(with_state(res.word, ABORTED), release);
-}
+```
+  load Claim[rd_]                           [acquire]
+  FREE     -> frontier, nothing to read
+  ABORTED  -> skip its extent
+  CLAIMED/CLEARED -> load Result[rd_].tag   [acquire]
+        tag == commitTag(rd_) -> deliver payload[rd_ .. rd_+len]
+        otherwise             -> spaced liveness check (see Recovery)
 ```
 
-`abort()` is safe with no trailer: the whole reservation stays one ABORTED record of
-its original extent, and the successor at `p + need` was already stamped during
-`reserve`. Death during abort converges from both sides — the store either landed
-(ABORTED, reader pops) or did not (CLEARED with a dead owner, reader recovers to the
-identical word).
+The reader touches the payload line **only after** acquiring the tag. In `Ring`
+it polled that line throughout the owner's window.
 
-**The reserve-to-commit window is a queue-wide head-of-line pin.** The reader cannot
-pass `p`, so consumption halts and admission continues only until the ring fills behind
-`read_pos`. User-code duration between `reserve` and `commit` therefore bounds queue
-availability for *every* participant. This is a contract on callers, not something the
-queue can defend against — the no-timeout doctrine means a slow writer and a hung
-writer are deliberately indistinguishable.
+### Walking past an in-flight record is legal
 
-Writers do **not** help. On reaching a `CLAIMED` descriptor a writer backs off and
-retries, whether the owner is alive or dead. Recovery belongs to the reader alone.
+In `Ring`, a walker meeting `CLAIMED` had to restart: the successor slot might
+still hold arbitrary payload bytes, which can decode as anything. Here the
+successor is a Claim cell, and the only values it can ever hold are well-formed
+claim words — this lap's or an earlier lap's. A walker advancing on a stale word
+wanders, but cannot make a bad claim, because only the true frontier cell reads
+exactly `freeWord(p)` for the `p` the walker holds. Wandering is bounded by the
+hop cap and ends in a restart.
 
-### Why recovery is reader-only
+This is why a live writer holding a reservation across arbitrary user code no
+longer stalls every other writer — only the reader. It is also where the fairness
+difference comes from: in `Ring` a writer behind an in-flight record stayed
+behind, giving min/max records-per-writer of 0.32 at two writers; two-plane
+measures 0.96 on the same pinning.
 
-Revision 1 let any writer help, and it was unsound in a way no per-word CAS discipline
-fixes. A helper's license is "the owner is dead" — a permanent fact — while its
-authority over the successor slot expires the moment anyone else completes recovery. A
-helper stopped before loading the successor slot resumes, loads a *live* claim placed
-there by a later writer, and stamps over it. `CAS`-from-observed does not help: it
-guards against a stale expected value, not against a fresh load in the wrong era.
+**A walker may not CLAIM the position immediately following a record it observed
+`kClaimed`.** It may walk past it; it may not take its successor.
 
-Reader-only recovery has exactly one actor. A stalled reader freezes `read_pos`, and by
-I3 nothing it might touch can be recycled — so even the reader's own delayed stamp is
-safe.
+That single rule is what lets reader recovery promote the successor
+unconditionally. Recovery fires on a record still `kClaimed` with a dead owner —
+and such a record has been `kClaimed` since its claim CAS, so no walker can ever
+have observed it otherwise, so nobody can have claimed its successor. There is
+nothing at `q` to destroy and, crucially, nothing to CLASSIFY. It restores the
+invariant the in-band ring got by blocking the walk entirely, without blocking
+the walk.
 
-The cost: a dead writer stalls all writers until the reader drains to that record. With
-a deep backlog that is the whole backlog. Acceptable because recovery is cold and
-head-of-line blocking is already inherent to the total-order requirement — but it is a
-real latency consequence, not a free simplification.
+It is nearly free because `kClaimed` is only the promote-then-vouch window inside
+`finishClaim` — two stores, closed before `reserve()` returns. The long,
+caller-controlled window is `kCleared`. The one case that blocks for real is a
+DEAD owner, which is exactly when blocking is correct; the stall is then bounded
+by recovery rather than permanent.
 
-## Reader
+The fast path needs no check of its own: the write hint is published AFTER the
+vouch, so reaching a position from the hint already implies its predecessor was
+vouched.
 
-```c
-span peek(void) {
-    uint64_t d = desc[rd].load(acquire);        // pairs with commit's release
-    switch (state_of(d)) {
-    case FREE:      return {};                  // frontier
-    case ABORTED:   pop(); return peek();
-    case COMMITTED: return { base + ((rd + 8) & mask), committed_len(d) };
-    case CLAIMED:
-    case CLEARED:
-        if (thread_alive(tid_of(d))) { policy.on_busy(0); return {}; }
-        // MUST re-read. Between the load of d and the liveness check the owner
-        // can have finished the protocol AND died, so d is a stale snapshot.
-        // A dead owner's word is frozen — no writer helps, and no one can claim
-        // a slot that does not read FREE — so this re-read is final.
-        d = desc[rd].load(acquire);
-        if (state_of(d) == CLAIMED || state_of(d) == CLEARED)
-            recover(rd, d);
-        return peek();                          // re-dispatch on the fresh value
-    }
-}
+State transitions are monotonic (`FREE → kClaimed → kCleared → kAborted`), so a
+claim licensed by observing a non-`kClaimed` predecessor stays licensed.
 
-void recover(uint64_t p, uint64_t d) {
-    if (state_of(d) == CLAIMED) {               // owner never stamped its successor
-        uint64_t q = p + extent_of(d);          // exact boundary, from I1
-        uint64_t g = desc[q].load(relaxed);
-        bool ok = desc[q].compare_exchange_strong(g, free_word(q), relaxed, relaxed);
-        assert(ok);                             // Lemma 2: no concurrent mutator
-    }
-    // release: a walker's acquire-load of ABORTED must observe the stamp above
-    desc[p].store(with_state(d, ABORTED), release);
-}
+WHAT THIS REPLACED, recorded so it is not reintroduced. Recovery originally
+promoted unconditionally with the false comment "nobody else can have written
+cell(q)". Three attempts to make recovery CLASSIFY the successor instead all
+failed: a **lap-parity bit** (cells interior to a large record are skipped for
+whole laps, so a stale word can be two or more laps old — and no counter width
+fixes it, since a stable record layout skips the same cells forever); a
+**reader-stamped retirement marker** (sound, but the stamp lands on the writers'
+active cache line — 22.7 misses/record at four writers — and it broke the walk,
+which advances THROUGH retired cells using their extents); and
+**chain-following** from `q` (a stale chain with uniform extents aliases the live
+one exactly and terminates on the real frontier). The common error was inferring
+a word's lap from a word that does not encode its position. Removing the need to
+classify was the answer.
 
-void pop(void) {
-    rd += extent_of(desc[rd].load(relaxed));    // rd is reader-private
-    read_pos.store(rd, release);                // license to overwrite
-}
+### Recovery
+
+```
+  Result tag absent -> spaced by OBSERVATION COUNT, never by time
+        threadAlive(owner)  alive -> keep waiting, widen the spacing
+                            dead  -> RE-READ Result first
+                                       committed -> deliver it, never recover
+                                       in flight -> if CLAIMED:
+                                                    conditionally promote successor q
+                                                      (if !promoted && !live_claim via bit 57 lap parity)
+                                                    Claim[p] = ABORTED [release]
 ```
 
-`rd` is the reader's private cursor; `read_pos` is its shared publication. Publish per
-batch rather than per record — it cuts the reader's RFO rate and the writers'
-`read_pos_cached` refresh traffic.
-
-**`recover` must never act on a descriptor value read before the liveness check.** The
-owner can complete the whole protocol and die in that gap, so a snapshot taken while it
-was in flight may describe a record that is now COMMITTED — and stamping ABORTED over it
-destroys a delivered-but-unread record, while stamping its computed successor can land
-`FREE(q)` on a live claim placed there by a later writer. Re-read after the liveness
-check and dispatch on the fresh value. This is safe because a dead owner's word is
-frozen: no writer helps, and no one can claim a slot that does not read FREE.
-
-Lemma 2's premise is "the owner is uncommitted" — it must be evaluated at the moment of
-the action, not at the moment of the snapshot. Revision 3 evaluated it at the snapshot
-and was wrong; a bounded model check found it in 337 states after three inspection
-passes had missed it.
-
-**`recover` must stamp the successor before stamping ABORTED, and the ABORTED store
-must be release.** Stamping ABORTED alone makes I2 lie: ABORTED promises the successor
-is trustworthy while it still holds stale payload, and the next walker advances into
-garbage, misparses a length, and may claim or deliver an arbitrary range. A non-release
-store reintroduces the same failure on any weakly-ordered target.
-
-A `CLEARED` record needs no successor stamp — its owner already did that — so recovery
-there is the ABORTED store alone.
-
-### Liveness is spaced, not timed
-
-`threadAlive()` is an `open`/`read`/`close` of `/proc/<tid>/stat` — three syscalls.
-The reader reaches it whenever it meets an in-flight record, and a writer preempted
-inside its reserve-to-commit window makes that the reader's **hot** path, not a cold
-one. Measured under oversubscription before this was fixed: the reader went
-syscall-bound at ~450 records/s with 36 s of system time in a 60 s run.
-
-So the check is **spaced**: consulted only after `kBusyPollsPerLiveness` consecutive
-busy observations of the same record, with the streak reset on any progress.
-
-This is check-spacing, **not** a timeout, and the distinction is the one this whole
-design turns on. No wall-clock constant exists anywhere. Death is still only ever
-declared on proof, never inferred from elapsed time. What is delayed is how often the
-reader *asks* — a dead writer's recovery is deferred by a bounded number of spins, not
-by a duration, and a stopped-but-alive writer is treated exactly as before.
-
-Note the interaction with policy: a pure-spin `onBusy` plus a preempted writer is a
-syscall storm even with spacing. Any deployment that is not pinned and
-under-subscribed wants a policy whose `onBusy` yields.
-
-### Liveness check
-
-```c
-bool thread_alive(uint32_t tid);   // /proc/<tid>/stat, state field
-```
-
-**Zombies must count as dead.** `tgkill(tgid, tid, 0)` succeeds for a zombie group
-leader and `/proc/<tid>` exists for one, so a writer whose process died mid-claim but
-was never reaped reads as alive forever — the reader backs off forever and the queue
-hangs with no thread stopped. Parse the state field and treat `Z` and `X` as dead.
-Exited *threads* inside a live process are auto-reaped, so the pure-thread case is
-safe either way.
-
-`tgkill` remains a valid fast path for the process-local configuration, where the
-zombie case cannot arise.
-
-**An OS-level ordering assumption, stated because it is invisible to every formal
-tool used here.** Recovery is sound only if a dead owner's final stores are visible
-to the recovering reader before the liveness check reports death. Under the C++
-model that edge does not exist: `thread_alive()` is a syscall, not a synchronizing
-operation, so nothing in the language orders the owner's release stores against the
-reader's observation of `Z`/`X` in `/proc`. The guarantee comes from the kernel —
-its exit path drains the dying task's stores before the task becomes reapable. That
-holds on Linux, but it is an assumption about the operating system, not a derivation
-from the memory model, and no amount of model checking here can validate it. A port
-to another OS must re-establish it.
-
-### Reader death and restart
-
-**Death is defined behavior.** No reader means no progress, so the ring fills and
-writers take backpressure — capacity checks fail, `reserve` returns empty, callers
-handle it. Nothing corrupts. A reader dying inside `recover()` between the successor
-stamp and the ABORTED store leaves an inert state; one dying inside `pop` loses only an
-unpublished private cursor.
-
-**Restart needs no new state, because the reader keeps none.** `rd` is a cache of
-`read_pos`, which lives in the control page; the descriptor chain is ground truth; and
-`recover()` is idempotent, so a half-finished recovery is simply re-run — the stamp CAS
-observes `FREE(q)` and rewrites the identical value, then ABORTED lands.
-
-```c
-bool attach_reader(void) {
-    uint32_t cur = reader_tid.load(acquire);
-    if (cur != NONE && thread_alive(cur)) return false;   // a live reader exists
-    if (!reader_tid.compare_exchange_strong(cur, gettid(), acq_rel, relaxed))
-        return false;                                     // lost the race
-    rd = read_pos.load(acquire);                          // resume exactly here
-    return true;
-}
-```
-
-Two properties make this sufficient. **Exactly one reader** is enforced by the CAS —
-concurrent claimants race and one wins. **Takeover requires proven death**, the same
-`/proc/<tid>` check used everywhere else, so a merely-stopped reader is never displaced;
-and since a dead thread never resumes, no generation counter is needed to fence it.
-
-**This matters for IPC, not for process-local.** Process-local, a dead reader thread
-inside a live process can be replaced by another thread of that process — useful, but
-the common failure is the whole process dying, which takes the writers and the memfd
-with it and leaves nothing to restart into. Cross-process is where restart earns its
-keep: the writers are separate processes that keep running and keep buffering, the
-reader process crashes, and a fresh reader attaches and resumes without losing what
-accumulated in between.
-
-Obtaining the fd is a deployment question, not a queue one: while any writer lives the
-memfd lives, so a successor gets it by `SCM_RIGHTS` re-donation, `/proc/<pid>/fd/<n>`,
-or a named backend. If every peer died there is nothing to preserve anyway.
-
-This is the one place a **named backend** pays for its lost seals: `shm_open` gives a
-successor a path it can open unaided, with no dependence on a surviving writer or a
-supervisor holding the fd. Weigh that against `F_SEAL_SHRINK`, which only memfd offers.
-
-**Delivery becomes at-least-once across a restart.** A reader that died between `peek`
-and `pop` has already handed the record to the application, and the successor resumes at
-`read_pos` and redelivers it. Applications needing exactly-once must be idempotent, or
-pop before processing and accept at-most-once instead.
-
-### Reader backoff
-
-Under a total order the reader cannot skip, so on reaching an in-flight record it polls
-that exact descriptor — which shares a line with the payload its owner is writing. Each
-poll downgrades the line M→S and each payload store re-upgrades it. **Exponential
-backoff is not optional**; without it one slow writer costs the queue far more than its
-own latency.
-
-### Traversal cost
-
-Walking by inline `size` is not a pointer chase: the address sequence is monotone
-sequential, so the hardware stream prefetcher covers the dependency chain. Measured on
-Zen 5, cross-core with lines Modified in the writer's cache: dependent walk
-5.02 ns/record vs 5.24 for precomputed offsets. A shuffled chase is 13.8 ns/rec warm
-and 153 ns/rec from DRAM. Software-prefetch and two-pass header/payload variants both
-measured *worse*; do not build them.
+The re-read after the liveness verdict is mandatory: between the load and the
+`/proc` check the owner can have committed *and* died, so both the Claim word and
+the Result tag are stale snapshots. A committed record must be delivered, never
+recovered. When recovering an in-flight `CLAIMED` record, `recover()` checks whether
+successor `q = p + extent` requires promotion. Using bit 57 (`kLapShift`) lap parity,
+it distinguishes a stale prior-lap word from a live current-lap claim (`live_claim`).
+If `q` is neither already promoted (`freeWord(q)`) nor owned by a live current-lap claim,
+`recover()` conditionally promotes `q` to `freeWord(q)` via CAS before writing `Claim[p] = ABORTED`.
 
 ## Memory ordering
 
-Ordering strength and coherence traffic are independent. A relaxed RMW still acquires
-its line exclusively. On x86-64 most of this table costs nothing at runtime; it is
-written against the C++ model so the code is correct rather than accidentally correct.
+| operation | order |
+|---|---|
+| claim CAS `FREE(p) -> CLAIMED` | acquire success, relaxed failure |
+| successor promotion `Claim[q] = FREE(q)` | relaxed (exclusive, publishes no payload) |
+| vouch `Claim[p] = CLEARED` | release (publishes the promotion) |
+| Claim walk / reader load | acquire |
+| `Result.len` | relaxed (published by the tag) |
+| `Result.tag` | release / acquire |
+| recovery `ABORTED` | release |
+| `write_hint` | release / acquire |
+| `read_pos` | reader release / writer acquire |
 
-| Op | Order | Why not weaker |
-|---|---|---|
-| claim `CAS(desc[p], FREE(p)→CLAIMED)` | **acquire** / relaxed fail | Stops the payload memcpy hoisting above the claim. |
-| stamp `CAS(desc[q], g→FREE(q))` | **relaxed** | Publishes no data; the successor only needs to observe it. |
-| vouch `desc[p] = CLEARED` | **release** | Publishes the stamp above. |
-| trailer `desc[p+used] = ABORTED` | **relaxed** | Published by the commit release that follows. No path reaches `p+used` except through an acquire of the commit word. |
-| commit `desc[p] = COMMITTED` | **release** | Publishes the payload. Irreducible. |
-| walk load `desc[p]` | **acquire** | Reading CLEARED, you rely on seeing the successor stamp. |
-| `write_hint` store / load | **release** / **acquire** | See below. |
-| `read_pos` store (reader) | **release** | Licenses overwrite of bytes it may still be reading. |
-| `read_pos` load (writer) | **acquire** | Pairs with the above. |
-| recover stamp `CAS(desc[q], …)` | **relaxed** | Published by the ABORTED release that follows. |
-| recover `desc[p] = ABORTED` | **release** | Publishes the stamp above. |
+## Cross-process attach
 
-**`write_hint` needs release/acquire, not relaxed.** Revision 1 claimed the hint "can
-only regress, never overshoot" — false in the model it claimed to target. A release
-store does not stop a *later* relaxed store from becoming visible first, so on a weakly
-ordered target another writer can observe the new hint while the vouch and the
-successor stamp are both still invisible, then dereference stale bytes as a descriptor.
-Free on x86-64.
+Both planes are sized into the same memfd as the arena, covered by the same
+`ftruncate`, `fallocate`, and seals. `Control` records the plane strides so an
+attaching process can reconstruct the layout from the descriptor alone.
+`TwoPlaneRing::attach(fd)` refuses a region whose cell layout differs from the
+binary's — a compact binary attaching to a padded region would index the Claim
+plane with the wrong stride and read a neighbouring record's ownership word.
 
-Hint *regression* is genuinely bounded, by I3: a writer stalled before its hint store
-has an uncommitted record, so the reader is pinned and the ring cannot wrap, so a late
-stale store always lands within the live window.
+`attach()` duplicates the descriptor rather than consuming it, so a rejected
+attach leaves the caller's fd intact and probing for the right layout is safe.
 
-**Never continue a walk from the claim CAS's failure value.** It is read relaxed; a
-`CLEARED` word observed without acquire does not guarantee visibility of the successor
-stamp. Restart the walk, which re-reads with acquire.
+## Measurement
 
-Exclusive line acquisitions per record: claim CAS (1), successor stamp (1, different
-line), `write_hint` store (1, the most contended line in the design), plus payload. The
-vouch and commit stores hit a line held M from the claim, so they are free unless the
-reader polled it in between.
+Zen 5 (Ryzen AI 9 HX 370), 56-byte payloads, 1 MiB capacity, pinned, 25
+interleaved independent processes per point, medians:
 
-## Policies
+| writers | 1 | 2 | 4 | 8 | 16 |
+|---|---:|---:|---:|---:|---:|
+| `TwoPlaneMpsc` Mrec/s | 41.9 | 39.9 | 36.8 | 15.5 | 9.7 |
+| misses / record | 1.3 | 1.4 | 1.7 | 3.2 | 5.3 |
+| IPC | 1.30 | 1.35 | 1.35 | 1.28 | 1.33 |
+| fairness (min/max) | 1.00 | 0.96 | 0.82 | 0.50 | 0.79 |
 
-Compile-time template parameters with empty defaults, never virtual — an unused hook
-must vanish entirely.
+It does not scale *up* — one total order still means one successful claim per
+record — but it degrades gracefully instead of collapsing.
 
-```cpp
-struct DefaultPolicy {
-    // wait policies — called with the iteration count, so a backoff ladder
-    // needs no state of its own
-    void on_empty(unsigned iter)     noexcept {}  // reader: nothing to read
-    void on_busy(unsigned iter)      noexcept {}  // reader/writer: record in flight
-    void on_full(unsigned iter)      noexcept {}  // writer: no capacity
-    void on_contended(unsigned iter) noexcept {}  // writer: lost the claim CAS
+`TwoPlaneMpscPadded` (one cell per 64-byte line, 200% metadata) is **slower**
+above two writers: spreading the working set across more lines costs more than
+the false sharing it removes. Compact is the default; padded is retained as a
+measurement control.
 
-    // event hooks — fire and forget, must not block
-    void on_reclaim(uint64_t pos, uint32_t tid, uint64_t bytes) noexcept {}
-    void on_abort(uint64_t pos, uint64_t bytes)                 noexcept {}
-    void on_wrap(uint64_t lap)                                  noexcept {}
+### Method
 
-    // instrumentation
-    void on_claim(uint64_t pos, uint32_t size, unsigned hops)   noexcept {}
-    void on_commit(uint64_t pos, uint32_t size)                 noexcept {}
-};
-```
-
-**`on_empty` and `on_busy` must stay separate.** *Empty* means no data exists — the
-frontier is reached and the wait may be arbitrarily long. *Busy* means a record is
-in flight and will arrive when its writer commits.
-
-Under the two-phase API the in-flight window is **caller-controlled**, not bounded by
-the queue: a writer may hold a reservation across arbitrary user code, so `on_busy` can
-legitimately last milliseconds. It therefore wants a full backoff ladder that may end
-in sleeping, not a pure spin. Its default cannot be truly empty either — it carries the
-mandatory reader backoff and should at minimum issue a `pause`.
-
-`on_reclaim` fires exactly when a writer was found dead and its record recovered. That
-is otherwise invisible, and a queue quietly recovering from dying writers is something
-to alert on.
-
-## Instrumentation
-
-The policy type is the instrumentation seam — an instrumented build is a different
-policy, not a different queue. `hops` is the cheapest actionable metric: it measures how
-stale `write_hint` is, and therefore how to tune its update frequency.
-
-| Tier | Mechanism | Hot-path cost | Perturbs? |
-|---|---|---|---|
-| 0 production | empty hooks | zero | no |
-| 1 counters | thread-local increments | ~1 cycle | no |
-| 2 timing | `rdtsc`, sampled 1-in-N | ~20-30 cycles/sample | **yes** |
-| 3 tracing | per-record to a side buffer | high | yes |
-| 4 hardware | `perf` / PEBS / `perf c2c` | zero | no |
-
-**Never a shared counter.** A contended atomic increment costs 50-100 ns — more than
-the claim CAS it measures — and manufactures the coherence traffic the design avoids.
-Software counters must be thread-local and aggregated at teardown.
-
-Stamping a timestamp between claim and commit **lengthens the in-flight window**, which
-is what determines how often the reader hits a busy record and how long the successor
-stalls. Tier-2 numbers are an upper bound on latency and a lower bound on throughput.
-
-`perf c2c` is the right tool for the known coherence hazards: it reports HITM per cache
-line *and per offset within the line*, so it shows whether a descriptor is ping-ponging
-against its own payload and how hot `write_hint` really is.
-
-### What to measure
-
-1. **Does clear-forward's causal chain beat `fetch_add`?** Build both claim paths behind
-   the policy and A/B at fixed record size. `fetch_add` caps near 10-20 M claims/s from
-   coherence alone.
-2. **How stale is `write_hint`?** Tier-1 hop histogram.
-3. **Does the reader's in-flight poll hurt?** `perf c2c`, with and without backoff.
-4. **Real full-rate** against padding waste at the actual record-size distribution.
-
-## Notification (out of scope)
-
-The reader busy-polls. If a blocking mode is added, notification should be an injected
-policy object — the Aeron `IdleStrategy` / Disruptor `WaitStrategy` pattern — so the
-busy-poll deployment keeps a `write` path that ends at the commit store.
-
-One hazard to record now. A writer that publishes and then checks whether the reader is
-asleep, against a reader that marks itself asleep and then checks whether the queue is
-empty, is the store-buffering litmus shape: both sides can read stale values, the reader
-sleeps, and the record is never delivered. It requires a **standalone
-`atomic_thread_fence(seq_cst)`** on both sides. It cannot be satisfied by a nearby
-locked RMW — a seq_cst RMW on one location orders nothing about a relaxed load of
-another, and on AArch64 that formulation emits no barrier at all.
-
-Gate the wake behind a `compare_exchange` so exactly one writer issues the syscall.
-Wake latency is dominated by CPU idle-state exit (~1-3 µs from C1, ~50-200 µs from C6),
-not the syscall (~100-300 ns), so capping C-state depth via `/dev/cpu_dma_latency`
-matters more than anything in the queue.
-
-## Why not fetch_add
-
-**Admission.** `fetch_add` cannot decline. Once it lands the region is irrevocably part
-of the byte sequence — `fetch_sub` is unsound because later claims are already
-positioned after yours. Over-claim can be made safe by pre-paying headroom of
-`(W-1) × max_record`, but `max_record` here is the remaining capacity, so the headroom
-required is the whole ring.
-
-**Identity.** `fetch_add` returns a position; stamping the descriptor is a separate
-store. Between them the position exists with nothing identifying its owner — and under
-a total order the reader cannot skip it. That is the failure that forces a timeout.
-
-CAS-on-descriptor makes claim and identity one atomic, so an unattributed hole cannot
-exist. Wait-freedom is the price.
-
-Wait-free is not the same as non-serializing: every `lock xadd` on a shared cursor is
-serialized by coherence at ~50-100 ns per migration, capping a shared cursor near
-10-20 M claims/s regardless of instruction. The chain here is *causally* serialized,
-which is stronger — benchmark it against that ceiling.
-
-## Invariants to check
-
-**Safety**
-
-- S1 No two live claims cover overlapping byte ranges.
-- S2 A stamp never overwrites a live claim.
-- S3 The reader never observes a partially written payload.
-- S4 Every boundary any actor computes is a real record boundary.
-- S5 Recovery never acts on behalf of a live thread.
-- S6 Every boundary derivable from any observed `size` is real (I1).
-- S7 `write_hint` never exceeds the true frontier.
-- S8 A record is delivered at most once, in claim order.
-
-**Liveness**
-
-- L1 If all writers are alive, some writer eventually claims.
-- L2 If a writer dies mid-protocol, the reader eventually recovers it and the queue
-     accepts writes again — **conditional on reader liveness**, which reader-only
-     recovery makes explicit.
-- L3 A committed record is eventually delivered, unless the reader dies.
-
-**Crash model.** Any writer may stop between any two steps, permanently (killed) or for
-an unbounded finite time (stopped). Only the permanent case may be recovered from. A
-killed thread has no pending stores; a stopped thread resumes with stale registers and
-executes its next instruction late.
+* The replicate is a **process**, not an in-process loop: launch captures
+  scheduler, thermal, allocator, and ASLR variation instead of averaging it away.
+* Configurations are interleaved in shuffled order within each round.
+* Coherence counters come from `perf_event_open` on each writer thread, enabled
+  around the timed window only. Measured non-perturbing (throughput with and
+  without counters is indistinguishable). `perf c2c` is unavailable on this host:
+  it needs AMD IBS precise memory sampling and no `ibs_op` PMU is exposed under
+  WSL2, so attribution is per-thread plus ablation, never per-address.
+* Valgrind cannot substitute for the PMU here — it serialises threads, so
+  cross-core ownership transfer never occurs and cachegrind models no coherence
+  protocol at all.
+* **Always read the fairness ratio next to a throughput number.** A private-hint
+  experiment once looked 6x faster at four writers purely because it starved every
+  writer but one, and total throughput reported that as a win.
+* Machine load is the dominant error term: a campaign run while other processes
+  compiled was wrong by 3.5x and inverted a headline result.
 
 ## Verification status
 
-**Exhaustive (strong claim).** Spin, 2 writers + 1 reader, 4 slots, records of 1-2
-slots, commit / abort / short-commit all nondeterministic, death possible at every step
-boundary, ring wrapping twice. **207,093,640 states, 468M transitions, zero errors**,
-no invalid end states. S1-S5, S7, S8 all hold.
-
-The coverage listing is worth more than the pass: the only unreached code is the two
-`assert(false)` arms — the writer's successor-stamp CAS failure and `recover`'s CAS
-failure. **Spin proved those CASes never fail**, which is Lemma 2 established as
-unreachability rather than by argument.
-
-Liveness, exhaustive at 2 writers x 1 op under weak fairness: no fair non-progress
-cycle, and every fair execution terminates with the queue drained. This subsumes L2 —
-fairness forces recovery, so dead writers are always recovered.
-
-Fault injection validates the model has teeth. Three r1 defects re-introduced one at a
-time were each detected: `FREE` as plain zero (lap ABA, depth 101), `recover` stamping
-without stamping the successor (I2 violation, depth 143), and writers helping (a
-fresh-observed CAS landing FREE on a live claim, depth 271). A model that only ever
-passes proves nothing; this one demonstrably sees the defect classes that matter.
-
-**Bounded (weaker claim).** 3 writers x 2 ops ran 199M states with no errors before
-being killed at 12.5 GB — that configuration does not fit exhaustively on the machine
-used. Report it as bounded, never as exhaustive.
-
-**Mutation-tested.** Nine deliberate defects injected into a snapshot copy of the
-library were each caught by the suite: commit publishing the reservation extent rather
-than the used length, the short-commit trailer omitted, `pop` advancing by payload
-length, `recover()` skipping the successor stamp, a SIGSTOPped writer treated as dead,
-the double-commit trap disabled, `attach`'s magic/version check removed, the
-`freeWord(0)` stamp removed, and the FREE position truncated to 6 bits.
-
-The campaign itself needed a methodology fix worth recording: mutating the live tree
-while other work was landing produced a false "caught" — the baseline had changed
-underneath it. Baseline and mutant must be built from the *same* snapshot.
-
-**Three mutations were NOT caught, and this is the important result:**
-
-1. `commit`'s release store weakened to relaxed — no test fails, deterministically,
-   across the differential and a four-writer stress run.
-2. The vouch store weakened to relaxed — same.
-3. FREE-carries-position at the *protocol* level. A weakened encoding is caught as a
-   static property, but no dynamic test manufactures a claimant stopped across a lap
-   boundary holding a stale expected word.
-
-So: **the memory-ordering table is not dynamically testable on x86-64** — and the
-reason is stronger than "TSO hides it". Weakening the commit or vouch store from
-release to relaxed produces **byte-identical machine code** on x86-64, verified by
-objdump diff: x86-TSO makes every store a release, and GCC does not exploit relaxed's
-reordering licence in this translation unit. There is only one binary, so no test, no
-stress duration, and no sanitizer could ever distinguish the two. ThreadSanitizer is
-doubly blind here — it detects data races, and a weakened memory order is not a race.
-
-On aarch64 the two differ genuinely: release emits `stlr`, relaxed emits a plain
-`str`, and the CPU may reorder the latter. A weakly-ordered machine is therefore the
-only dynamic instrument that can tell whether the suite guards the ordering table at
-all. `cpp/test/ordering_mutants.sh` runs that campaign; it must run on real aarch64
-hardware, since qemu-user executes guest threads under the *host's* memory model and
-an emulated pass is exactly as blind as x86. Those orderings are validated by the model
-check, by review, and by compiled evidence (GCC 13.3 `-O2`: `atomic_thread_fence(seq_cst)`
-lowers to `lock or [rsp],0` on x86-64, `dmb ish` on AArch64) — **and by nothing else.**
-Anyone editing them should know no test will catch a mistake. Closing that properly
-wants a weak-memory tool (GenMC, Nidhugg, CBMC) or herd7 for individual litmus shapes.
-
-Also outside every tool used: the OS-level ordering assumption documented under
-Liveness.
-
-**A known, deliberate data race.** A stale walker's atomic probe can land on bytes that
-are concurrently another record's payload, written by plain `memcpy`. Formally that is
-a C++ data race — plain write against atomic read — and ThreadSanitizer reports it.
-It is protocol-benign by Lemma 1: a stale read is discarded by the content check, and a
-claim can only succeed against an exact `freeWord(p)` match. It is inherent to in-band
-descriptors in a variable-length ring.
-
-The decision is to document and suppress rather than fix. The cheap fix, if it ever
-matters, is available and worth recording: descriptors only ever sit at 64-byte
-boundaries, so only payload words at those offsets can be racily read — writing just
-those with relaxed atomic stores would close it at a cost of one store per 64 bytes of
-payload, leaving the rest a plain `memcpy`.
+* `two_plane_test.cc` — differential against a mutex-guarded reference with short
+  commits, multi-writer integrity and per-writer FIFO, zero-length records, full
+  boundary, abort, in-flight non-blocking, reader restart, live-reader
+  displacement. Both cell layouts instantiated everywhere.
+* `two_plane_fault_test.cc` — fork-based: killed mid-reservation, recovery
+  promotes the successor cell, committed-then-dead delivered rather than
+  reclaimed, repeated kills across wraps, stopped writer never reclaimed,
+  stopped writer blocks the reader but not other writers, cross-process attach by
+  fd, layout-mismatch refusal.
+* `region_test.cc`, `spsc_test.cc` — mapping, control-area layout including the
+  shared writer registry, backends, descriptor encoding; SPSC short commit,
+  boundary sizes, and single-writer enforcement.
+* `ordering_mutants.sh` — release→relaxed mutants of the vouch and the Result-tag
+  publication. **x86-64 is TSO, so these mutants are byte-identical there**; only
+  the aarch64 CI leg can adjudicate them, and qemu-user is blind (host TSO).
+* Break-first discipline: a test is not trusted until it has been shown to fail
+  against a deliberately broken implementation, built from a single snapshot copy
+  so a concurrent edit cannot shift the baseline.
+* **ThreadSanitizer: clean**, 17 cases / 3,055,434 assertions, 3/3 repeat runs,
+  with NO suppression file. The suppressions that `Ring` required covered one
+  class -- a stale walker's atomic probe landing on bytes concurrently serving as
+  another record's payload, which is inherent to an in-band descriptor. This
+  design has no in-band descriptor, so that class is structurally absent and the
+  suppression file has been deleted rather than carried forward: its rule was a
+  broad substring match on `reserve`, which would have silently hidden a genuine
+  race in the surviving hot path.
+  Two caveats on that result. It requires the system toolchain -- the pinned musl
+  GCC has no libtsan -- so it validates a different compiler's codegen than
+  production. And it covers the in-process suites only; fork-based fault
+  injection does not mix with TSan, so the writer-death paths are NOT covered by
+  it.
+* Empirical stress, all clean: 64 writers on 24 cores, 256-byte capacity forcing
+  constant wraps, adversarial size mixes, zero-length-heavy, slow and pausing
+  readers, ASan+UBSan, and two-CPU `taskset` contention.
 
 ## Known gaps
 
-- **tid reuse** is assumed not to occur.
-- **Reclaim is FIFO-only.** Contiguous variable-length records can only be freed by
-  advancing `read_pos` in order. Blocks any future multi-reader or out-of-order
-  consumption.
-- **tid reuse** is assumed not to occur. The `/proc/<tid>` check is tid-only, so any
-  process recycling that tid blocks recovery — a false-*alive*, which is the safe
-  direction, but it hangs rather than corrupting.
-- **All peers must share a PID namespace** for the `/proc` liveness check.
-- **`FALLOC_FL_PUNCH_HOLE` is not blocked** by the applied seals — only `F_SEAL_WRITE`
-  blocks it and that cannot be used here. A peer punching holes causes silent zeroing
-  rather than `SIGBUS`. Out of scope under the cooperative trust model, but it should be
-  stated rather than implied to be sealed.
-
-## Revision history
-
-**r5** — bounded model check (Spin, 2 writers, 4 slots, ring wrapping twice, death
-possible at every step boundary) found a defect three inspection passes had missed:
-`recover()` acted on the descriptor value snapshotted by `peek()` before the liveness
-check, so an owner that completed and died in that gap had its COMMITTED record stamped
-ABORTED, or had a later writer's live claim at its computed successor stamped FREE. Fixed
-by re-reading after the liveness check and dispatching on the fresh value. Lemma 2
-annotated: its premise must be evaluated at the moment of the action, not at an earlier
-snapshot. All three deliberately re-introduced r1 defects were detected by the same
-model, so the clean runs carry weight.
-
-**r4** — reader death reclassified from unhandled gap to defined behavior (no reader
-means no progress means backpressure, which is correct), and reader **restart** shown to
-need no new state: the reader keeps none that isn't in the control page, and `recover()`
-is idempotent, so a successor reads `read_pos` and resumes. Added `reader_tid` as both
-the takeover word and the way a back-pressured writer distinguishes a dead reader from a
-slow one. Restart is scoped to the IPC deployment, where writers outlive the reader.
-
-**r3b** — third analysis pass: the reserve/commit split introduced no protocol defect,
-but Lemma 3 as first written was too strong (its happens-before chain has a genuine gap
-for a writer that dies mid-flight; that corner is closed by the crash-model axiom
-instead, and restart-on-mismatch is load-bearing for progress rather than defense in
-depth). Double commit and grown commit identified as silent-corruption paths and given
-mandatory asserts. I3 restated for arbitrary-duration windows; Lemmas 1 and 2 rescoped;
-trailer ordering corrected to relaxed in the table to match the code; `on_busy`
-doctrine corrected now that the in-flight window is caller-controlled.
-
-**r3** — verification pass on r2 found no critical defect; these are the two
-underspecifications it did find, plus hardening. Two-phase `reserve`/`commit`/`abort`
-API, without which `actual_n` had no source and the short-commit trailer was again dead
-code; state encodings pinned numerically with `FREE = 0` chosen deliberately; the three
-lemmas stated explicitly as the model-check targets; span-lifetime contract stated;
-`recover`'s stamp CAS asserted.
-
-**r2** — fixes from adversarial analysis of r1: FREE carries its position (closes
-claim-CAS lap ABA from a resumed stopped writer); recovery restricted to the reader
-(closes delayed-helper stamp races that no per-word CAS discipline could fix);
-`recover()` specified, stamping successor before a release ABORTED (closes an I2
-violation that let walkers advance into garbage); `write_hint` release/acquire (r1's
-"can only regress" claim was false); descriptor re-laid out with a 6-bit remainder and
-22-bit tid so record lengths are representable at all, and short commit made reachable
-by writing the trailer before shrinking `size`; I1 restated as boundary-refinement; I3
-stated; zombie-aware liveness; bounded walk with stale-walk restart replacing an
-insufficient snapshot guard.
+* **There is no model-checked safety argument for the two-plane protocol.** The
+  Spin model was written against the removed in-band ring and is retained, marked
+  as such, at `docs/verification/removed-inband-ring.pml`. Its invariants and
+  negative controls are reusable; its walker rules are not, because two-plane
+  legalises walking past an in-flight record. Until it is rewritten, this design
+  rests on tests alone.
+* **Resolved defect: `recover()` successor overwrite hazard.** The race where an owner killed between successor promotion and vouching could leave `p == kClaimed` with `q` promoted—allowing a second writer to claim `q` and then having `recover()` overwrite that live claim—has been resolved. Bit 57 (`kLapShift` in `desc.hh`) now tracks lap parity in non-FREE descriptor words, and `TwoPlaneRing::recover()` (`two_plane.hh`) performs a conditional promotion checking `!promoted && !live_claim` before updating successor `q` to `freeWord(q)` via CAS.
+* `threadAlive()` (`liveness.hh`) safely defaults to returning `true` (ALIVE) on resource errors (such as `EMFILE`, `ENFILE`, `EACCES`, or `EINTR` retries), adhering to the false-ALIVE safety doctrine. `existenceProbeSaysGone()` (`sched_getscheduler`, no fd required) returning `ESRCH` and `ENOENT` (from `/proc/<tid>/stat`) are the only conditions that prove a thread is DEAD.
+* Writer-death paths are covered by fork-based tests but NOT by TSan or by the
+  in-process stress suite, which is why writer-death recovery paths require standalone
+  fork-based testing.
+* `Sharded` composition is not wired up; `TwoPlaneRing` is a standalone
+  single-shard ring.
+* The mutant that overlays the planes on the payload arena is caught by hanging
+  rather than by a clean assertion — a weaker signal than the others.
+* Fairness figures are confounded by this being a heterogeneous CPU (4x Zen 5 +
+  8x Zen 5c), so writers land on cores with different peak throughput. The
+  comparisons are controlled (same pinning); the absolute values should not be
+  over-read.

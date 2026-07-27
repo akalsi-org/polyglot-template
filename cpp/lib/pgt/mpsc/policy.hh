@@ -42,11 +42,15 @@ inline void cpuRelax() noexcept {
 // line with the payload its owner is writing and an unrelaxed spin makes that
 // line ping-pong.
 //
-// A policy is a HANDLE, not the state -- the allocator idiom. Queues copy their
-// policy (Sharded copies one into each ring), so a stateful policy must hold a
-// pointer to its shared counters and copy cheaply; a policy with bare mutable
-// members gets silently duplicated per copy and its state fragments per shard.
-struct DefaultPolicy {
+// A policy is a HANDLE, not the state -- the allocator idiom. A queue copies its
+// policy, so a stateful policy must hold a pointer to its shared counters and
+// copy cheaply; a policy with bare mutable members gets silently duplicated per
+// copy and its state fragments.
+//
+// BaselinePolicy defines every hook as a no-op; DefaultPolicy adds the promoted
+// pause ladder. Policies are duck-typed, so one that implements only a subset
+// still works -- the queue tests each hook with `requires` before calling it.
+struct BaselinePolicy {
   // Wait policies.
   void onEmpty(u32_t /*iter*/) noexcept {}
   void onBusy(u32_t /*iter*/) noexcept { cpuRelax(); }
@@ -64,9 +68,52 @@ struct DefaultPolicy {
 
   // Instrumentation. `hops` is the walk length -- the cheapest actionable metric
   // in the design, since it measures directly how stale the write hint is.
+  // The two failure hooks make the experiment diagnostics attributable without
+  // adding a shared counter to the claim path.  Instrumented policies must keep
+  // their state writer-local (normally TLS) and aggregate after writers stop.
   void onClaim(u64_t /*pos*/, u64_t /*extent*/, u32_t /*hops*/) noexcept {}
+  // prior_failures includes a preceding optimistic fast-path CAS failure when
+  // the next failure happens in reserveSlow().
+  void onClaimFailure(bool /*fast_path*/, u32_t /*prior_failures*/) noexcept {}
   void onCommit(u64_t /*pos*/, u64_t /*extent*/) noexcept {}
 };
+
+// The promoted production policy: post-success successor prefetch plus the
+// explicit 1/2/4/8 CAS-failure pause ladder in Ring. The inherited contention
+// hook must stay empty or it would add a ninth pause to that ladder.
+struct DefaultPolicy : BaselinePolicy {
+  // The explicit 1/2/4/8 CAS-failure pause ladder, owned by the queue rather
+  // than by this hook. onContended must stay empty or it would add a ninth
+  // pause to that documented sequence.
+  static constexpr bool kCasFailureBackoff = true;
+  void onContended(u32_t /*iter*/) noexcept {}
+};
+
+// Duck-typed selector for the pause ladder. Policies opt out by declaring
+// kCasFailureBackoff = false; anything that does not declare it keeps the
+// ladder, which is the promoted behaviour.
+template <typename Policy>
+inline constexpr bool kUsesCasFailureBackoff = [] {
+  if constexpr (requires { Policy::kCasFailureBackoff; }) {
+    return static_cast<bool>(Policy::kCasFailureBackoff);
+  } else {
+    return true;
+  }
+}();
+
+// `prior_failures` counts every preceding failed claim attempt, including an
+// optimistic fast-path failure before the slow walk begins. Keeping this
+// mapping separate makes the 1/2/4/8 sequence mechanically testable.
+[[nodiscard]] constexpr u32_t casFailureBackoffPauses(u32_t prior_failures) noexcept {
+  return 1u << (prior_failures < 3 ? prior_failures : 3);
+}
+
+template <typename Policy>
+inline void noteClaimFailure(Policy& policy, bool fast_path, u32_t prior_failures) noexcept {
+  if constexpr (requires { policy.onClaimFailure(fast_path, prior_failures); }) {
+    policy.onClaimFailure(fast_path, prior_failures);
+  }
+}
 
 // Exponential backoff ending in a yield. A reasonable default when the reader is
 // not pinned to a dedicated core.
