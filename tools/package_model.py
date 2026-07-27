@@ -45,6 +45,13 @@ def require(condition: bool, message: str) -> None:
 
 def packages(model: dict) -> dict[str, dict]:
   require(model.get("schema_version") == 1, "package schema_version must be 1")
+  baselines = model.get("native_isa_baselines")
+  require(isinstance(baselines, dict), "native_isa_baselines must be a target-to-baseline map")
+  require(
+    set(baselines) == {"x86_64-linux-musl", "aarch64-linux-musl"}
+    and all(isinstance(value, str) and value for value in baselines.values()),
+    "native_isa_baselines must declare nonempty x86_64-linux-musl and aarch64-linux-musl baselines",
+  )
   result: dict[str, dict] = {}
   for item in model.get("packages", []):
     name = item.get("name", "")
@@ -129,7 +136,14 @@ def resolve(model: dict, tools_lock: dict, package_name: str, target: str, *, al
     loader_resolved = bool(DIGEST.fullmatch(loader_fields["loader_sha256"])) and not path.is_absolute() and ".." not in path.parts and loader_fields["loader_path"] not in {"", "UNRESOLVED"}
     require(loader_resolved or allow_unresolved_loader, f"{package_name}: musl loader closure is unresolved")
     runtime_ref.update(loader_fields)
-  closure = {"schema_version": 1, "package": package_name, "version": app["version"], "target": target, "runtime": runtime_ref}
+  closure = {
+    "schema_version": 1,
+    "package": package_name,
+    "version": app["version"],
+    "target": target,
+    "native_isa_baseline": model["native_isa_baselines"][target],
+    "runtime": runtime_ref,
+  }
   encoded = json.dumps(closure, sort_keys=True, separators=(",", ":")).encode()
   closure["closure_sha256"] = hashlib.sha256(encoded).hexdigest()
   return closure, runtime_ref or {}

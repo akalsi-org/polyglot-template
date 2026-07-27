@@ -137,6 +137,7 @@ def assemble(args: argparse.Namespace) -> int:
     "package": args.package,
     "version": entry["version"],
     "target": target,
+    "native_isa_baseline": closure["native_isa_baseline"],
     "profile": args.profile,
     "executables": list(entry["executables"]),
     "closure_sha256": closure["closure_sha256"],
@@ -182,6 +183,10 @@ def smoke(args: argparse.Namespace) -> int:
     closure, runtime_ref = resolve_closure(args, args.package, target)
     packaged_closure = read_json(scratch / "closure.json")
     require(packaged_closure == closure, "packaged closure does not match exact runtime resolution")
+    require(
+      metadata.get("native_isa_baseline") == closure["native_isa_baseline"],
+      "package metadata native ISA baseline mismatch",
+    )
     require(metadata.get("closure_sha256") == closure["closure_sha256"], "package metadata closure digest mismatch")
     if runtime_ref:
       require(read_json(scratch / "runtime-ref.json") == runtime_ref, "runtime reference mismatch")

@@ -9,6 +9,12 @@ the same value when declaring package targets.
 
 PACKAGE_CATALOG = {
   "schema_version": 1,
+  # Deployment admission metadata. The target triple alone does not say which
+  # CPU may execute the native code inside a package.
+  "native_isa_baselines": {
+    "x86_64-linux-musl": "x86-64-v3; mtune=generic; writable-prefetch enabled",
+    "aarch64-linux-musl": "Armv8.2-A",
+  },
   "packages": [
     {
       "name": "polyglot-demo",

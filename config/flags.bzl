@@ -36,6 +36,17 @@ OPT_COMPILE_FLAGS = [
   "-Werror",
 ]
 
+# Deployment ISA baseline, not a host-tuning option. All native C/C++ targets,
+# including Python extensions, use this through profile_compile_flags(). x86-64
+# artifacts require v3 CPUs and request PREFETCHW; Arm artifacts require v8.2-A.
+# The target platform is host-native by construction (config/defs.bzl rejects
+# cross-arch requests), so a binary never silently carries the other ISA.
+NATIVE_ISA_FLAGS = select({
+  "//config:x86_64-linux-musl": ["-march=x86-64-v3", "-mtune=generic", "-mprfchw"],
+  "//config:aarch64-linux-musl": ["-march=armv8.2-a"],
+  "DEFAULT": [],
+})
+
 # Same for both profiles today except for COVERAGE_FLAG (dbg-only); cpp.toml
 # declares it per-profile so this stays a function of profile too, in case
 # that changes further.
@@ -45,7 +56,7 @@ def profile_compile_flags():
   return select({
     "//config:opt": OPT_COMPILE_FLAGS,
     "DEFAULT": DBG_COMPILE_FLAGS,
-  })
+  }) + NATIVE_ISA_FLAGS
 
 def profile_link_flags():
   return select({

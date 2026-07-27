@@ -23,6 +23,7 @@ python3 "$tool" --catalog "$catalog" --tools-lock "$resolved_tools" resolve \
 cmp "$tmp/first" "$tmp/second"
 cmp "$tmp/out/closure.json" "$tmp/out2/closure.json"
 grep -q '"runtime_package": "runtime-python"' "$tmp/out/runtime-ref.json"
+grep -q '"native_isa_baseline": "x86-64-v3; mtune=generic; writable-prefetch enabled"' "$tmp/out/closure.json"
 
 sed '0,/loader_sha256.*a6a1ec/s//loader_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"/' \
   "$catalog" >"$tmp/mismatched-loader.bzl"
