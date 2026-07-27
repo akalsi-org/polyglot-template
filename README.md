@@ -4,7 +4,7 @@ This repository is the executable vertical slice associated with the decision pa
 
 ## Quick Start
 
-The supported development hosts are Linux x86-64 and Linux ARM64. Builds are CPU-native only: an x86-64 host produces `x86_64-linux-musl`, and an ARM64 host produces `aarch64-linux-musl`. Bootstrap before invoking build, test, or language commands; it is the repository operation that installs the pinned toolchain and seeds the locked dependency cache.
+The supported development hosts are Linux x86-64 and Linux ARM64. Builds are CPU-native only: an x86-64 host produces `x86_64-linux-musl` requiring the x86-64-v3 ISA baseline, and an ARM64 host produces `aarch64-linux-musl` requiring Armv8.2-A. These are deployment compatibility requirements, not host auto-detection; do not run an artifact on an older CPU. Bootstrap before invoking build, test, or language commands; it is the repository operation that installs the pinned toolchain and seeds the locked dependency cache.
 
 ```bash
 ./repo.sh bootstrap --dry-run

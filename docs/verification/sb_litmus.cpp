@@ -57,99 +57,110 @@ alignas(64) static uint64_t r_cons;  // consumer's view of tail
 
 template <int SIDE>  // 0 = producer(tail then state), 1 = consumer(state then tail)
 static inline void run_side(Mode m) {
-    if constexpr (SIDE == 0) {
-        switch (m) {
-            case NAIVE:
-                tail.store(1, std::memory_order_release);
-                r_prod = state.load(std::memory_order_relaxed);
-                break;
-            case BROKEN:  // the doc's trick: seq_cst RMW publish, relaxed load
-                tail.exchange(1, std::memory_order_seq_cst);
-                r_prod = state.load(std::memory_order_relaxed);
-                break;
-            case FIXED:
-                tail.store(1, std::memory_order_release);
-                std::atomic_thread_fence(std::memory_order_seq_cst);
-                r_prod = state.load(std::memory_order_relaxed);
-                break;
-            case SEQCST:
-                tail.store(1, std::memory_order_seq_cst);
-                r_prod = state.load(std::memory_order_seq_cst);
-                break;
-        }
-    } else {
-        switch (m) {
-            case NAIVE:
-                state.store(1, std::memory_order_release);
-                r_cons = tail.load(std::memory_order_relaxed);
-                break;
-            case BROKEN:  // symmetric: RMW the flag, relaxed scan
-                state.exchange(1, std::memory_order_seq_cst);
-                r_cons = tail.load(std::memory_order_relaxed);
-                break;
-            case FIXED:
-                state.store(1, std::memory_order_relaxed);
-                std::atomic_thread_fence(std::memory_order_seq_cst);
-                r_cons = tail.load(std::memory_order_relaxed);
-                break;
-            case SEQCST:
-                state.store(1, std::memory_order_seq_cst);
-                r_cons = tail.load(std::memory_order_seq_cst);
-                break;
-        }
+  if constexpr (SIDE == 0) {
+    switch (m) {
+      case NAIVE:
+        tail.store(1, std::memory_order_release);
+        r_prod = state.load(std::memory_order_relaxed);
+        break;
+      case BROKEN:  // the doc's trick: seq_cst RMW publish, relaxed load
+        tail.exchange(1, std::memory_order_seq_cst);
+        r_prod = state.load(std::memory_order_relaxed);
+        break;
+      case FIXED:
+        tail.store(1, std::memory_order_release);
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        r_prod = state.load(std::memory_order_relaxed);
+        break;
+      case SEQCST:
+        tail.store(1, std::memory_order_seq_cst);
+        r_prod = state.load(std::memory_order_seq_cst);
+        break;
     }
+  } else {
+    switch (m) {
+      case NAIVE:
+        state.store(1, std::memory_order_release);
+        r_cons = tail.load(std::memory_order_relaxed);
+        break;
+      case BROKEN:  // symmetric: RMW the flag, relaxed scan
+        state.exchange(1, std::memory_order_seq_cst);
+        r_cons = tail.load(std::memory_order_relaxed);
+        break;
+      case FIXED:
+        state.store(1, std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        r_cons = tail.load(std::memory_order_relaxed);
+        break;
+      case SEQCST:
+        state.store(1, std::memory_order_seq_cst);
+        r_cons = tail.load(std::memory_order_seq_cst);
+        break;
+    }
+  }
 }
 
 template <int SIDE>
 static void worker(Mode m, uint64_t iters) {
-    auto& mine = SIDE == 0 ? ready0 : ready1;
-    for (uint64_t i = 1; i <= iters; ++i) {
-        mine.store((int)i, std::memory_order_release);           // arrived
-        while (round_no.load(std::memory_order_acquire) < i) {}  // wait for go
-        run_side<SIDE>(m);
-        mine.store(-(int)i, std::memory_order_release);          // done
-        while (round_no.load(std::memory_order_acquire) == i) {} // wait reset
-    }
+  auto& mine = SIDE == 0 ? ready0 : ready1;
+  for (uint64_t i = 1; i <= iters; ++i) {
+    mine.store((int)i, std::memory_order_release);  // arrived
+    while (round_no.load(std::memory_order_acquire) < i) {
+    }  // wait for go
+    run_side<SIDE>(m);
+    mine.store(-(int)i, std::memory_order_release);  // done
+    while (round_no.load(std::memory_order_acquire) == i) {
+    }  // wait reset
+  }
 }
 
 int main(int argc, char** argv) {
-    Mode m = FIXED;
-    uint64_t iters = 20'000'000;
-    if (argc > 1) {
-        if (!strcmp(argv[1], "naive")) m = NAIVE;
-        else if (!strcmp(argv[1], "broken")) m = BROKEN;
-        else if (!strcmp(argv[1], "fixed")) m = FIXED;
-        else if (!strcmp(argv[1], "seqcst")) m = SEQCST;
-        else { fprintf(stderr, "usage: %s naive|broken|fixed|seqcst [iters]\n", argv[0]); return 2; }
+  Mode m = FIXED;
+  uint64_t iters = 20'000'000;
+  if (argc > 1) {
+    if (!strcmp(argv[1], "naive"))
+      m = NAIVE;
+    else if (!strcmp(argv[1], "broken"))
+      m = BROKEN;
+    else if (!strcmp(argv[1], "fixed"))
+      m = FIXED;
+    else if (!strcmp(argv[1], "seqcst"))
+      m = SEQCST;
+    else {
+      fprintf(stderr, "usage: %s naive|broken|fixed|seqcst [iters]\n", argv[0]);
+      return 2;
     }
-    if (argc > 2) iters = strtoull(argv[2], nullptr, 10);
+  }
+  if (argc > 2) iters = strtoull(argv[2], nullptr, 10);
 
-    std::thread t0(worker<0>, m, iters);
-    std::thread t1(worker<1>, m, iters);
+  std::thread t0(worker<0>, m, iters);
+  std::thread t1(worker<1>, m, iters);
 
-    uint64_t violations = 0, first = 0;
-    for (uint64_t i = 1; i <= iters; ++i) {
-        while (ready0.load(std::memory_order_acquire) != (int)i ||
-               ready1.load(std::memory_order_acquire) != (int)i) {}
-        tail.store(0, std::memory_order_relaxed);   // reset shared state
-        state.store(0, std::memory_order_relaxed);
-        round_no.store(i, std::memory_order_seq_cst);  // go
-        while (ready0.load(std::memory_order_acquire) != -(int)i ||
-               ready1.load(std::memory_order_acquire) != -(int)i) {}
-        if (r_prod == 0 /*AWAKE*/ && r_cons == 0 /*empty*/) {
-            ++violations;
-            if (!first) first = i;
-        }
-        round_no.store(0, std::memory_order_seq_cst);  // reset for next round
+  uint64_t violations = 0, first = 0;
+  for (uint64_t i = 1; i <= iters; ++i) {
+    while (ready0.load(std::memory_order_acquire) != (int)i ||
+           ready1.load(std::memory_order_acquire) != (int)i) {
     }
-    t0.join();
-    t1.join();
+    tail.store(0, std::memory_order_relaxed);  // reset shared state
+    state.store(0, std::memory_order_relaxed);
+    round_no.store(i, std::memory_order_seq_cst);  // go
+    while (ready0.load(std::memory_order_acquire) != -(int)i ||
+           ready1.load(std::memory_order_acquire) != -(int)i) {
+    }
+    if (r_prod == 0 /*AWAKE*/ && r_cons == 0 /*empty*/) {
+      ++violations;
+      if (!first) first = i;
+    }
+    round_no.store(0, std::memory_order_seq_cst);  // reset for next round
+  }
+  t0.join();
+  t1.join();
 
-    const char* names[] = {"naive", "broken", "fixed", "seqcst"};
-    printf("mode=%-6s iters=%llu violations=%llu%s\n", names[m],
-           (unsigned long long)iters, (unsigned long long)violations,
-           violations ? " (first at iter shown below)" : "");
-    if (violations) printf("  first violation at iteration %llu -> LOST WAKEUP possible\n",
-                           (unsigned long long)first);
-    return violations ? 1 : 0;
+  const char* names[] = {"naive", "broken", "fixed", "seqcst"};
+  printf("mode=%-6s iters=%llu violations=%llu%s\n", names[m], (unsigned long long)iters,
+         (unsigned long long)violations, violations ? " (first at iter shown below)" : "");
+  if (violations)
+    printf("  first violation at iteration %llu -> LOST WAKEUP possible\n",
+           (unsigned long long)first);
+  return violations ? 1 : 0;
 }

@@ -17,6 +17,9 @@ cxx_library(
     "policy.hh",
     "queue.hh",
     "region.hh",
+    # EXPERIMENTAL split control/data-plane variant. A separate type; no
+    # existing variant depends on it.
+    "two_plane.hh",
   ],
   deps = ["//cpp/lib/pgt/core:pgt_core"],
   visibility = ["//cpp/..."],

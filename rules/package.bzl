@@ -713,6 +713,7 @@ _METADATA_PY = [
   "    'package': package_name,",
   "    'version': entry['version'],",
   "    'target': target,",
+  "    'native_isa_baseline': closure['native_isa_baseline'],",
   "    'profile': profile,",
   "    'executables': list(entry['executables']),",
   "    'closure_sha256': closure['closure_sha256'],",

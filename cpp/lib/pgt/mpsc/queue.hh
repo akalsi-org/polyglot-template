@@ -1,67 +1,19 @@
 #pragma once
 
-// The queue variants. All three share the QueueLike contract in api.hh and are
-// interchangeable at the call site; sharding is a composition over a ring type,
-// not a third parallel implementation:
+// The single-producer ring.
 //
-//   Ring       one shared arena, many writers, one reader, total order (below).
-//   SpscRing   one writer per ring, no claim arbitration (impl-spsc).
-//   Sharded    K rings in one Region, writers assigned to shards (impl-spsc).
+//   SpscRing   one writer per ring, no claim arbitration.
+//
+// The multi-producer variants that used to live here -- the shared-ring `Ring`
+// and the `Sharded` composition over it -- were removed. Multi-producer work is
+// served by TwoPlaneRing (two_plane.hh), which splits arbitration, publication,
+// and payload onto separate cache lines; measured on Zen 5 it holds ~1.3 IPC
+// and ~3 coherence misses per record at eight writers where the in-band shared
+// ring fell to 0.04 IPC and ~33 misses.
 //
 // ============================================================================
-// SECTION: Ring -- shared-ring MPSC (owner: impl-queue)
+// SECTION: SpscRing -- single-producer ring (owner: impl-spsc)
 // ============================================================================
-//
-// One ring, many writers, one reader, total order.
-//
-// Claim-by-CAS-on-descriptor, writer-stamps-successor, reader-only recovery.
-// The protocol is specified in the algorithm document (revision 5, model-checked);
-// the invariants that carry the safety argument are restated here because every
-// one of them was violated by an earlier draft:
-//
-//   * A slot is claimable iff it reads EXACTLY freeWord(p) for the position p the
-//     claimant believes it is at -- never "iff zero". Two unwrapped positions
-//     differing by a multiple of the capacity are the same physical word, and the
-//     position in the FREE encoding is what makes a writer stopped across a lap
-//     boundary fail its claim deterministically instead of claiming an aliased
-//     slot from a different lap.
-//
-//   * State vouches for the SUCCESSOR (I2). kClaimed means the successor slot is
-//     not yet stamped and may hold stale payload; a walker must never advance
-//     past it. kCleared and above mean the successor is stamped. Every
-//     transition into kAborted -- including recovery -- stamps the successor
-//     first, or kAborted lies and the next walker advances into garbage.
-//
-//   * `size` is the RESERVATION EXTENT and boundaries only refine (I1). commit
-//     may shrink it; a short commit writes its trailer BEFORE shrinking, so an
-//     observer of either size value computes a real boundary.
-//
-//   * Recovery is READER-ONLY. A writer reaching kClaimed backs off and retries
-//     regardless of owner liveness; helping is unsound in a way no per-word CAS
-//     discipline fixes (a stalled helper's authority over the successor slot
-//     expires the moment anyone else completes recovery).
-//
-//   * recover() re-reads the descriptor AFTER the liveness check. The value
-//     peek() loaded before checking liveness is a stale snapshot -- the owner can
-//     complete the whole protocol and die in that gap, and acting on the snapshot
-//     either stamps kAborted over a kCommitted record or stamps FREE over a later
-//     writer's live claim. This is the defect the model check found after three
-//     inspection passes missed it.
-//
-//   * A walk never continues from the claim CAS's failure value (read relaxed --
-//     a kCleared word observed without acquire does not guarantee visibility of
-//     the successor stamp). It restarts, which re-reads with acquire.
-//
-// All descriptor atomics go through the canonical (primary) alias of the arena:
-// `arena + (pos & mask)` is always below capacity, so no atomic ever touches the
-// mirror. Payload spans may extend into the mirror -- that is what it is for.
-//
-// PERFORMANCE SHAPE. reserve() is a small force-inlined fast path (hint accurate,
-// slot free, capacity OK -> claim and return) over a noinline/cold walk path: the
-// push path is called from application code with its own icache footprint, and a
-// fat inline path evicts it. The successor descriptor line is prefetched at claim
-// time -- q = p + need is known before the CAS, and that cold miss dominates the
-// causal chain between consecutive claims.
 
 #include "../core/types.hh"
 #include "../mpsc/api.hh"
@@ -683,7 +635,7 @@ class Ring {
 template <typename Policy = DefaultPolicy>
 class SpscRing {
  public:
-  // One writer per ring. Sharded reads this to pick its registration path.
+  // One writer per ring.
   static constexpr u32_t kMaxWriters = 1;
 
   SpscRing() = default;
@@ -730,8 +682,14 @@ class SpscRing {
     assert(res_pos_ == kInvalidPos && "reserve while a reservation is held");  // misuse (d)
     if (!ownsWriter()) [[unlikely]]
       misuseTrap("SpscRing::reserve by a thread that does not own this ring");
-    u64_t const need = extentFor(n);
-    if (need > max_need_) [[unlikely]] {
+    // Representability first, THEN capacity. Rounding an unrepresentable length
+    // overflows and yields a small-looking extent -- measured, extentFor(
+    // SIZE_MAX - 8) == 0 -- which sails through a `need > max_need_` test
+    // precisely because zero is small. A zero extent also breaks the contract
+    // that an extent is never zero, and a reader advancing by zero does not
+    // terminate.
+    u64_t need = 0;
+    if (!extentForChecked(n, need) || need > max_need_) [[unlikely]] {
       wr_status_ = Status::kTooLarge;
       return {};
     }
@@ -759,6 +717,8 @@ class SpscRing {
       misuseTrap("SpscRing::commit with a span other than the live reservation");
     if (actual_n > res_n_) [[unlikely]]
       misuseTrap("SpscRing::committed payload exceeds the reservation");
+    // Safe without a checked form: actual_n <= res_n_ was just enforced, and
+    // res_n_ passed extentForChecked() at reserve().
     u64_t const used = extentFor(actual_n);
     if (used > res_need_) [[unlikely]]
       misuseTrap("SpscRing::commit extent exceeds the reservation");  // misuse (c)
@@ -828,11 +788,11 @@ class SpscRing {
   void pop() noexcept {
     assert(rd_ < tail_cache_ && "pop without a preceding successful peek");
     u64_t const prev = rd_;
-    u64_t const extent = peek_extent_ != 0 ? peek_extent_
-                                            : extentOf(descRef(rd_).load(std::memory_order_relaxed));
+    u64_t const extent =
+      peek_extent_ != 0 ? peek_extent_ : extentOf(descRef(rd_).load(std::memory_order_relaxed));
     peek_extent_ = 0;
-    rd_ += extent;  // rd_ is reader-private
-    readPosRef().store(rd_, std::memory_order_release);             // license to overwrite
+    rd_ += extent;                                       // rd_ is reader-private
+    readPosRef().store(rd_, std::memory_order_release);  // license to overwrite
     if ((prev ^ rd_) >> shift_) policy_.onWrap(rd_ >> shift_);
   }
 
@@ -908,7 +868,7 @@ class SpscRing {
     // reservation is outstanding and every store has been issued.
   }
 
-  // Idempotent for the current holder: Sharded attaches ring by ring, so only
+  // Idempotent for the current holder: only
   // the first call performs the queue-wide claim; the rest re-sync cursors.
   [[nodiscard, gnu::noinline, gnu::cold]] bool attachReader() noexcept {
     if (arena_ == nullptr) return false;
@@ -964,6 +924,7 @@ class SpscRing {
     res_need_ = other.res_need_;
     res_n_ = other.res_n_;
     wr_tid_ = other.wr_tid_;
+    wr_gen_ = other.wr_gen_;
     wr_status_ = other.wr_status_;
     rd_ = other.rd_;
     tail_cache_ = other.tail_cache_;
@@ -976,6 +937,7 @@ class SpscRing {
     other.bm_word_ = nullptr;
     other.res_pos_ = kInvalidPos;
     other.wr_tid_ = 0;
+    other.wr_gen_ = 0;
   }
 
   // Identity only, never an object address: one writer thread may own several
@@ -989,14 +951,24 @@ class SpscRing {
     std::call_once(once, [] { ::pthread_atfork(nullptr, nullptr, &atforkChild); });
   }
 
+  // Ownership is {tid, slot owner, slot GENERATION}. The generation is what
+  // makes takeover fencing real: it was previously bumped on takeover and read
+  // by nobody, so the comment there promised a fence that did not exist.
+  //
+  // The second load is free -- WriterSlot is 8 bytes and owner and generation
+  // share the line the owner check already pulled in.
   [[nodiscard]] bool ownsWriter() const noexcept {
     return writer_tid_tls_ != 0 && wr_tid_ == writer_tid_tls_ &&
-           slotOwnerRef().load(std::memory_order_relaxed) == wr_tid_;
+           slotOwnerRef().load(std::memory_order_relaxed) == wr_tid_ &&
+           slotGenRef().load(std::memory_order_relaxed) == wr_gen_;
   }
 
   void bindWriter(u32_t tid) noexcept {
     writer_tid_tls_ = tid;
     wr_tid_ = tid;
+    // Capture AFTER any takeover bump, so this view is bound to the incarnation
+    // it actually won rather than the one it displaced.
+    wr_gen_ = slotGenRef().load(std::memory_order_acquire);
     wr_tail_ = publishRef().load(std::memory_order_acquire);
     wr_read_cache_ = readPosRef().load(std::memory_order_acquire);
     res_pos_ = kInvalidPos;
@@ -1066,11 +1038,12 @@ class SpscRing {
   u64_t res_need_ = 0;
   sz_t res_n_ = 0;
   u32_t wr_tid_ = 0;
+  u32_t wr_gen_ = 0;  // slot incarnation this view bound against
   Status wr_status_ = Status::kOk;
 
   // Reader-owned.
-  u64_t rd_ = 0;          // reader-private cursor; a cache of read_pos
-  u64_t tail_cache_ = 0;  // last acquired tail; one acquire per sweep
+  u64_t rd_ = 0;           // reader-private cursor; a cache of read_pos
+  u64_t tail_cache_ = 0;   // last acquired tail; one acquire per sweep
   u64_t peek_extent_ = 0;  // extent acquired by the successful peek
 
   [[no_unique_address]] Policy policy_{};

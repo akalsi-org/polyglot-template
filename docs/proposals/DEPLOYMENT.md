@@ -28,6 +28,7 @@ Deploy any selected subset of independently versioned repository packages as one
 12. Cloudflare tokens remain only on the certificate controller. Edge hosts receive certificate material, never DNS credentials.
 13. Persist every HAProxy map/certificate change to disk and apply the equivalent runtime transaction. Runtime-only state is invalid.
 14. Use Cloudflare R2 for immutable release artifacts, large public objects, and backups where its storage semantics fit; keep active application state on local storage or an explicit database system.
+15. Admit native packages only to CPUs meeting the catalog's `native_isa_baselines`: x86 packages require x86-64-v3 and Arm packages require Armv8.2-A. The target triple alone is not sufficient placement evidence.
 
 ## Explicitly Deferred Or Rejected
 

@@ -64,6 +64,9 @@ def package_evidence(args: argparse.Namespace) -> int:
   closure_digest = closure.get("closure_sha256")
   if metadata.get("closure_sha256") != closure_digest or not isinstance(closure_digest, str):
     fail("archive package metadata closure digest does not match closure.json")
+  baseline = closure.get("native_isa_baseline")
+  if not isinstance(baseline, str) or not baseline or metadata.get("native_isa_baseline") != baseline:
+    fail("archive package metadata native ISA baseline does not match closure.json")
 
   archive_digest = digest(archive)
   catalog_digest = digest(args.catalog)
@@ -71,7 +74,12 @@ def package_evidence(args: argparse.Namespace) -> int:
   subject = {"name": archive.name, "sha256": archive_digest}
   sbom = {
     "schema": "polyglot.sbom/v1",
-    "package": {"name": args.package, "version": version, "target": args.target},
+    "package": {
+      "name": args.package,
+      "version": version,
+      "target": args.target,
+      "native_isa_baseline": baseline,
+    },
     "components": [
       {"name": "package-closure", "sha256": closure_digest, "type": "runtime-closure"},
       {"name": "packages/catalog.bzl", "sha256": catalog_digest, "type": "source"},
@@ -82,7 +90,12 @@ def package_evidence(args: argparse.Namespace) -> int:
   provenance = {
     "schema": "polyglot.provenance/v1",
     "build_definition": {
-      "external_parameters": {"package": args.package, "profile": args.profile, "target": args.target},
+      "external_parameters": {
+        "package": args.package,
+        "profile": args.profile,
+        "target": args.target,
+        "native_isa_baseline": baseline,
+      },
       "resolved_dependencies": [
         {"name": "packages/catalog.bzl", "sha256": catalog_digest},
         {"name": "tools.lock.toml", "sha256": lock_digest},
@@ -117,8 +130,14 @@ def verify_asset(path: Path) -> tuple[str, dict[str, Any], dict[str, Any]]:
     if subject != {"name": path.name, "sha256": subject_digest}:
       fail(f"{path.name}: {label} subject does not bind this archive")
   package = sbom.get("package")
-  if not isinstance(package, dict) or not all(isinstance(package.get(key), str) and package[key] for key in ("name", "version", "target")):
+  if not isinstance(package, dict) or not all(
+    isinstance(package.get(key), str) and package[key]
+    for key in ("name", "version", "target", "native_isa_baseline")
+  ):
     fail(f"{path.name}: invalid SBOM package identity")
+  parameters = provenance.get("build_definition", {}).get("external_parameters", {})
+  if parameters.get("native_isa_baseline") != package["native_isa_baseline"]:
+    fail(f"{path.name}: provenance native ISA baseline does not match SBOM")
   return subject_digest, sbom, provenance
 
 

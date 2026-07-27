@@ -92,8 +92,7 @@ inline constexpr u64_t kMaxExtent = kSizeMask * kGrain;
 // The word that marks position `pos` as claimable. Only this exact value permits
 // a claim at `pos`; see property (1) above.
 [[nodiscard]] inline constexpr u64_t freeWord(u64_t pos) noexcept {
-  return (((pos >> 6) & kFreePosMask) << kFreePosShift) |
-         static_cast<u64_t>(State::kFree);
+  return (((pos >> 6) & kFreePosMask) << kFreePosShift) | static_cast<u64_t>(State::kFree);
 }
 
 // Position encoded in a free word. Only meaningful when stateOf(w) == kFree.
@@ -107,8 +106,8 @@ inline constexpr u64_t kMaxExtent = kSizeMask * kGrain;
   return w == freeWord(pos);
 }
 
-[[nodiscard]] inline constexpr u64_t packRecord(u64_t extent_bytes, u32_t remainder,
-                                                State state, u32_t tid) noexcept {
+[[nodiscard]] inline constexpr u64_t packRecord(u64_t extent_bytes, u32_t remainder, State state,
+                                                u32_t tid) noexcept {
   return (static_cast<u64_t>(state) & kStateMask) |
          (((extent_bytes / kGrain) & kSizeMask) << kSizeShift) |
          ((static_cast<u64_t>(remainder) & kRemMask) << kRemShift) |
@@ -141,12 +140,39 @@ inline constexpr u64_t kMaxExtent = kSizeMask * kGrain;
   return hi - delta;
 }
 
+// Largest payload whose extent is representable. THE CALLER MUST CHECK THIS
+// BEFORE CALLING extentFor -- the rounding below overflows silently, and the
+// overflow destroys the very information needed to reject the request.
+//
+// Measured, before this bound existed: extentFor(SIZE_MAX - 8) == 0. A ZERO
+// extent is not merely a wrong number; desc.hh's own contract says an extent is
+// never zero, and a walker advancing by zero does not terminate. The in-band
+// admission check `need > max_need_` passes a zero extent happily, because zero
+// is small.
+inline constexpr sz_t kMaxPayload = static_cast<sz_t>(kMaxExtent) - kHeaderSize;
+
+// Precondition: payload <= kMaxPayload. Use extentForChecked() at any boundary
+// where the length is caller-supplied.
 [[nodiscard]] inline constexpr sz_t extentFor(sz_t payload) noexcept {
   sz_t const need = kHeaderSize + payload;
   return (need + (kGrain - 1)) & ~(kGrain - 1);
 }
 
+// The admission-safe form: false means the request cannot be represented at all
+// and must be rejected before any state changes. Written as a comparison
+// against a precomputed bound rather than as an addition, so it cannot itself
+// overflow.
+[[nodiscard]] inline constexpr bool extentForChecked(sz_t payload, u64_t& out) noexcept {
+  if (payload > kMaxPayload) return false;
+  out = extentFor(payload);
+  return true;
+}
+
 static_assert(kFreePosBits == 58, "free position must cover a 64-bit space at 64B grain");
+// The bound must be tight AND overflow-free: one below it must round to a real
+// extent, and the bound itself must not wrap.
+static_assert(extentFor(kMaxPayload) == kMaxExtent, "kMaxPayload must round to kMaxExtent");
+static_assert(extentFor(kMaxPayload) != 0, "the bound must not be the overflow value");
 static_assert(kTidShift + kTidBits <= 64);
 static_assert(static_cast<u64_t>(State::kFree) == 0, "untouched memory must decode as free");
 

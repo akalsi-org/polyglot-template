@@ -1,4 +1,18 @@
 /*
+ * MODELS A REMOVED IMPLEMENTATION.
+ *
+ * This is the Promela model of the in-band shared ring (`Ring`/`Mpsc`), which
+ * was deleted in favour of TwoPlaneRing. It is retained because the invariants
+ * and the negative controls are reusable, NOT because it verifies anything that
+ * currently ships.
+ *
+ * It is not a model of the two-plane protocol: there the successor slot is a
+ * Claim cell rather than in-band payload, which is precisely what makes walking
+ * past an in-flight record legal, so the walker rules modelled here do not
+ * apply. Do not cite this file as evidence about the shipping queue.
+ */
+
+/*
  * Spin model of the variable-length MPSC byte queue (mpsc-algorithm.md, r3).
  *
  * Abstraction: 64-byte units -> "slots". Ring has R slots. Positions are

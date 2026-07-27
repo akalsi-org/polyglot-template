@@ -6,23 +6,12 @@
 
 namespace pgt::mpsc {
 
-// SECTION: Ring (owner: impl-queue)
-template class Ring<DefaultPolicy>;
-template class Ring<BackoffPolicy>;
-
-static_assert(QueueLike<Ring<DefaultPolicy>>);
-static_assert(QueueLike<Ring<BackoffPolicy>>);
-static_assert(QueueLike<Mpsc>);
-
-// SECTION: SpscRing / Sharded instantiations (owner: impl-spsc)
+// SECTION: SpscRing instantiations (owner: impl-spsc)
 template class SpscRing<DefaultPolicy>;
 template class SpscRing<BackoffPolicy>;
-template class Sharded<Ring<DefaultPolicy>>;
-template class Sharded<SpscRing<DefaultPolicy>>;
 
 static_assert(QueueLike<SpscRing<DefaultPolicy>>);
 static_assert(QueueLike<SpscRing<BackoffPolicy>>);
-static_assert(QueueLike<ShardedMpsc>);
-static_assert(QueueLike<MultiSpsc>);
+static_assert(QueueLike<Spsc>);
 
 }  // namespace pgt::mpsc

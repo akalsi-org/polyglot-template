@@ -23,6 +23,21 @@ archive=$(python3 "$tool" "${common[@]}" package --package gateway --target x86_
 cp "$archive" "$tmp/first-package.tar.gz"
 python3 "$evidence_tool" package --archive "$archive" --catalog "$root/packages/catalog.bzl" \
   --tools-lock "$tmp/resolved-tools.lock.toml" --package gateway --target x86_64-linux-musl --profile opt
+python3 - "$archive" "$archive.sbom.json" "$archive.provenance.json" <<'PY'
+import json
+import sys
+import tarfile
+
+archive, sbom_path, provenance_path = sys.argv[1:]
+with tarfile.open(archive, "r:gz") as tar:
+    metadata = json.load(tar.extractfile("package.json"))
+    closure = json.load(tar.extractfile("closure.json"))
+expected = "x86-64-v3; mtune=generic; writable-prefetch enabled"
+assert metadata["native_isa_baseline"] == expected
+assert closure["native_isa_baseline"] == expected
+assert json.load(open(sbom_path))["package"]["native_isa_baseline"] == expected
+assert json.load(open(provenance_path))["build_definition"]["external_parameters"]["native_isa_baseline"] == expected
+PY
 python3 "$evidence_tool" release-manifest --tag packages/gateway/v1.4.0 \
   --output "$tmp/release-manifest.json" "$archive"
 grep -Fq '"schema": "polyglot.release-manifest/v1"' "$tmp/release-manifest.json"
