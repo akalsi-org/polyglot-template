@@ -41,6 +41,7 @@
 
 #include "pgt/core/types.hh"
 #include "pgt/mpsc/api.hh"
+#include "pgt/mpsc/desc.hh"
 
 #include <cstddef>
 
@@ -94,8 +95,9 @@ struct alignas(128) Control {
   // asserts in region.cc exist to catch.
   u32_t claim_stride;
   u32_t result_stride;
+  u32_t plane_grain;
 
-  std::byte pad[128 - 40];
+  std::byte pad[128 - 44];
 };
 
 // The control block is a WIRE FORMAT: an attaching process reads it out of the
@@ -158,20 +160,23 @@ class Region {
     return reinterpret_cast<WriterSlot*>(writerBitmap() + bitmapWords());
   }
 
-  // Metadata planes for shard i, or nullptr when the region has none. Both live
+  // Metadata planes for shard i, or nullptr when the region has none. They live
   // in the control area, which is mapped ONCE -- see the Config comment on
   // plane_claim_stride for why an atomic must never sit in a mirrored arena.
   //
-  // Claim and Result are separate arrays rather than interleaved cells: writers
-  // acquire-walk immutable Claim words, and interleaving would make every walk
-  // step also touch the Result line its owner is about to write.
+  // Claim and Result are separate arrays rather than interleaved cells. Either
+  // stride may be zero for a single-plane queue; MPSC uses both, while SPSC uses
+  // one compact per-position slot plane.
   [[nodiscard]] std::byte* claimPlane(u32_t i) const noexcept {
     return planes_ == nullptr ? nullptr : planes_ + static_cast<sz_t>(i) * shardPlaneBytes();
   }
   [[nodiscard]] std::byte* resultPlane(u32_t i) const noexcept {
     return planes_ == nullptr ? nullptr : claimPlane(i) + claimPlaneBytes();
   }
-  [[nodiscard]] u64_t planeCells() const noexcept { return capacity_ / 64; }
+  [[nodiscard]] u64_t planeGrain() const noexcept { return plane_grain_; }
+  [[nodiscard]] u64_t planeCells() const noexcept {
+    return plane_grain_ == 0 ? 0 : capacity_ / plane_grain_;
+  }
   [[nodiscard]] u32_t claimStride() const noexcept { return claim_stride_; }
   [[nodiscard]] u32_t resultStride() const noexcept { return result_stride_; }
 
@@ -199,18 +204,19 @@ class Region {
   std::byte* arena_ = nullptr;
   std::byte* planes_ = nullptr;
   u64_t capacity_ = 0;
+  u64_t plane_grain_ = 0;
   u32_t shard_count_ = 0;
   u32_t claim_stride_ = 0;
   u32_t result_stride_ = 0;
 
-  // Each plane block is padded to the 64-byte line so the PADDED stride
+  // Each plane block is padded to the cache line so the PADDED stride
   // actually lands one cell per line: a padded layout whose base is merely
   // 8-aligned pads without separating, which is the worst of both.
   [[nodiscard]] sz_t claimPlaneBytes() const noexcept {
-    return (static_cast<sz_t>(planeCells() * claim_stride_) + 63) & ~sz_t{63};
+    return (static_cast<sz_t>(planeCells() * claim_stride_) + kCacheLine - 1) & ~(kCacheLine - 1);
   }
   [[nodiscard]] sz_t resultPlaneBytes() const noexcept {
-    return (static_cast<sz_t>(planeCells() * result_stride_) + 63) & ~sz_t{63};
+    return (static_cast<sz_t>(planeCells() * result_stride_) + kCacheLine - 1) & ~(kCacheLine - 1);
   }
   [[nodiscard]] sz_t shardPlaneBytes() const noexcept {
     return claimPlaneBytes() + resultPlaneBytes();

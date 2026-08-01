@@ -25,7 +25,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-VARIANTS = ("mpsc", "mpsc-padded", "spsc")
+VARIANTS = ("mpsc", "mpsc-padded", "mpsc-padded-256", "spsc")
 WRITERS = (1, 2, 4, 8)
 
 
@@ -34,6 +34,7 @@ def parse_args() -> argparse.Namespace:
   parser.add_argument("benchmark", type=Path, help="bench_queue binary built with -DNDEBUG")
   parser.add_argument("--seconds", type=float, default=2.0, help="timed seconds per process")
   parser.add_argument("--runs", type=int, default=11, help="interleaved process runs per configuration")
+  parser.add_argument("--payload", type=int, default=56, help="payload bytes per record")
   parser.add_argument("--seed", type=int, default=20260726, help="shuffle seed recorded in every result")
   parser.add_argument(
     "--variants", nargs="+", choices=VARIANTS, default=list(VARIANTS),
@@ -76,7 +77,8 @@ def require_number(result: dict[str, Any], field: str) -> None:
     raise RuntimeError(f"benchmark result has invalid {field}: {result!r}")
 
 
-def validate_result(result: object, mode: str, variant: str, writers: int) -> dict[str, Any]:
+def validate_result(result: object, mode: str, variant: str, writers: int,
+                    payload: int) -> dict[str, Any]:
   if not isinstance(result, dict):
     raise RuntimeError(f"benchmark result is not an object: {result!r}")
   expected_mode = "throughput" if mode == "throughput" else "counters"
@@ -84,8 +86,10 @@ def validate_result(result: object, mode: str, variant: str, writers: int) -> di
     raise RuntimeError(f"benchmark returned wrong selector: {result!r}")
   if result.get("writers") != writers:
     raise RuntimeError(f"benchmark returned wrong writer count: {result!r}")
-  fields = ("seconds", "records", "mrec_s") if expected_mode == "throughput" else (
-    "seconds", "records", "mrec_s", "misses", "misses_per_record",
+  if result.get("payload_bytes") != payload:
+    raise RuntimeError(f"benchmark returned wrong payload size: {result!r}")
+  fields = ("seconds", "records", "mrec_s", "payload_bytes", "extent_bytes", "payload_gb_s", "reserved_gb_s") if expected_mode == "throughput" else (
+    "seconds", "records", "mrec_s", "payload_bytes", "extent_bytes", "payload_gb_s", "reserved_gb_s", "misses", "misses_per_record",
     "cycles_per_record", "insns_per_record", "ipc", "fairness_min_max",
   )
   for field in fields:
@@ -232,9 +236,10 @@ def binary_sha256(binary: Path) -> str:
 
 
 def invoke(binary: Path, mode: str, variant: str, writers: int, seconds: float,
+           payload: int,
            telemetry: Telemetry, context: dict[str, Any], benchmark_cpu_text: str | None,
            telemetry_cpus: list[int]) -> dict[str, Any]:
-  command = [str(binary), mode, variant, str(writers), str(seconds)]
+  command = [str(binary), mode, variant, str(writers), str(seconds), str(payload)]
   if benchmark_cpu_text is not None:
     command = ["taskset", "-c", benchmark_cpu_text, *command]
   process = subprocess.Popen(
@@ -262,7 +267,7 @@ def invoke(binary: Path, mode: str, variant: str, writers: int, seconds: float,
     result = json.loads(lines[0])
   except json.JSONDecodeError as exc:
     raise RuntimeError(f"invalid benchmark JSON: {lines[0]!r}") from exc
-  return validate_result(result, mode, variant, writers)
+  return validate_result(result, mode, variant, writers, payload)
 
 
 def emit(result: dict[str, Any], seed: int, repetition: int, ordinal: int,
@@ -294,8 +299,8 @@ def main() -> int:
   benchmark = args.benchmark.resolve()
   if not benchmark.is_file():
     raise SystemExit(f"benchmark is not a file: {benchmark}")
-  if args.seconds <= 0 or args.runs <= 0:
-    raise SystemExit("--seconds and --runs must be positive")
+  if args.seconds <= 0 or args.runs <= 0 or args.payload < 0 or args.payload > 65536:
+    raise SystemExit("--seconds and --runs must be positive; --payload must be in [0, 65536]")
   if len(set(args.variants)) != len(args.variants):
     raise SystemExit("--variants must not repeat a selector")
   if len(set(args.writers)) != len(args.writers) or any(w <= 0 for w in args.writers):
@@ -338,6 +343,7 @@ def main() -> int:
     "telemetry_cpus": telemetry_cpus,
     "cpu_topology": cpu_topology(original_allowed_cpus),
     "requested_seconds": args.seconds,
+    "payload_bytes": args.payload,
     "runs": args.runs,
     "seed": args.seed,
     "variants": args.variants,
@@ -363,13 +369,14 @@ def main() -> int:
         "phase": "throughput",
         "variant": variant,
         "writers": writers,
+        "payload_bytes": args.payload,
         "repetition": repetition + 1,
         "ordinal": ordinal,
         "benchmark_cpus": benchmark_cpus,
         "telemetry_cpus": telemetry_cpus,
       }
       result = invoke(
-        benchmark, "throughput", variant, writers, args.seconds, telemetry, context,
+        benchmark, "throughput", variant, writers, args.seconds, args.payload, telemetry, context,
         args.benchmark_cpus, telemetry_cpus,
       )
       emit(result, args.seed, repetition + 1, ordinal, metadata)
@@ -388,13 +395,14 @@ def main() -> int:
         "phase": "counters",
         "variant": variant,
         "writers": writers,
+        "payload_bytes": args.payload,
         "repetition": 1,
         "ordinal": ordinal,
         "benchmark_cpus": benchmark_cpus,
         "telemetry_cpus": telemetry_cpus,
       }
       result = invoke(
-        benchmark, "counters", variant, writers, args.seconds, telemetry, context,
+        benchmark, "counters", variant, writers, args.seconds, args.payload, telemetry, context,
         args.benchmark_cpus, telemetry_cpus,
       )
       emit(result, args.seed, 1, ordinal, metadata)

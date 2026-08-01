@@ -1,4 +1,4 @@
-// Region and descriptor-encoding tests.
+// Region and MPSC descriptor-encoding tests.
 //
 // These sit below every queue variant: the mirrored mapping, the control-area
 // layout (including the shared writer registry), the backend behaviours, and
@@ -114,6 +114,109 @@ TEST_CASE("Region: control area sizes the writer registry past one page") {
   s.writerSlots()[kShards - 1].owner_tid = 0;
 }
 
+TEST_CASE("Region: metadata planes can use a larger cell grain") {
+  Config cfg;
+  cfg.capacity = 4096;
+  cfg.shards = 2;
+  cfg.plane_claim_stride = 64;
+  cfg.plane_result_stride = 64;
+  cfg.plane_grain = 256;
+  Region r;
+  REQUIRE(Region::create(cfg, r));
+
+  CHECK(r.capacity() == 4096);
+  CHECK(r.control()->version == 3);
+  CHECK(r.planeGrain() == 256);
+  CHECK(r.planeCells() == 16);
+  CHECK(r.control()->plane_grain == 256);
+  REQUIRE(r.claimPlane(0) != nullptr);
+  CHECK(r.resultPlane(0) - r.claimPlane(0) == 1024);
+  CHECK(r.claimPlane(1) - r.claimPlane(0) == 2048);
+  CHECK(r.resultPlane(1) - r.claimPlane(1) == 1024);
+  CHECK(r.resultPlane(1) + 1024 <= r.arena(0));
+
+  int const fd = dup(r.fd());
+  Region s;
+  REQUIRE(Region::attach(fd, s));
+  CHECK(s.planeGrain() == 256);
+  CHECK(s.planeCells() == 16);
+  CHECK(s.resultPlane(0) - s.claimPlane(0) == 1024);
+}
+
+TEST_CASE("Region: plane grain preserves no-plane and 64-byte plane defaults") {
+  {
+    Config cfg;
+    cfg.capacity = 4096;
+    Region r;
+    REQUIRE(Region::create(cfg, r));
+    CHECK(r.planeGrain() == 0);
+    CHECK(r.planeCells() == 0);
+    CHECK(r.control()->plane_grain == 0);
+    CHECK(r.claimPlane(0) == nullptr);
+  }
+  {
+    Config cfg;
+    cfg.capacity = 4096;
+    cfg.plane_claim_stride = 8;
+    Region r;
+    REQUIRE(Region::create(cfg, r));
+    CHECK(r.planeGrain() == kGrain);
+    CHECK(r.planeCells() == 64);
+    CHECK(r.control()->plane_grain == kGrain);
+    CHECK(r.resultPlane(0) - r.claimPlane(0) == 512);
+    CHECK(r.resultPlane(0) <= r.arena(0));
+  }
+  {
+    Config cfg;
+    cfg.capacity = 4096;
+    cfg.plane_result_stride = 8;
+    Region r;
+    REQUIRE(Region::create(cfg, r));
+    CHECK(r.planeGrain() == kGrain);
+    CHECK(r.planeCells() == 64);
+    CHECK(r.resultPlane(0) == r.claimPlane(0));
+    CHECK(r.resultPlane(0) + 512 <= r.arena(0));
+  }
+}
+
+TEST_CASE("Region: v3 attach requires explicit plane grain") {
+  Config cfg;
+  cfg.capacity = 4096;
+  cfg.plane_claim_stride = 8;
+  cfg.plane_result_stride = 16;
+  Region r;
+  REQUIRE(Region::create(cfg, r));
+  REQUIRE(r.control()->version == 3);
+  r.control()->plane_grain = 0;
+
+  int const fd = dup(r.fd());
+  Region s;
+  errno = 0;
+  CHECK(!Region::attach(fd, s));
+  CHECK(errno == EPROTO);
+  close(fd);
+}
+
+TEST_CASE("Region: rejects invalid metadata plane grains") {
+  Config cfg;
+  cfg.capacity = 4096;
+  Region r;
+
+  cfg.plane_grain = 256;
+  errno = 0;
+  CHECK(!Region::create(cfg, r));
+  CHECK(errno == EINVAL);
+
+  cfg.plane_claim_stride = 8;
+  cfg.plane_result_stride = 16;
+  for (u64_t bad : {u64_t{32}, u64_t{96}, u64_t{8192}}) {
+    cfg.plane_grain = bad;
+    errno = 0;
+    CHECK(!Region::create(cfg, r));
+    CHECK(errno == EINVAL);
+  }
+}
+
 TEST_CASE("Region: attach verifies magic, version, and file size") {
   Config cfg;
   cfg.capacity = 4096;
@@ -215,15 +318,12 @@ TEST_CASE("Region: moved-from and default objects are inert") {
   static_cast<void>(d);
 }
 
-TEST_CASE("desc encoding round-trips the boundary payload sizes") {
-  for (sz_t n : {sz_t{0}, sz_t{1}, kGrain - 8, kGrain - 7, kGrain, 2 * kGrain - 8, sz_t{300}}) {
-    sz_t const extent = extentFor(n);
-    u64_t const w =
-      packRecord(extent, static_cast<u32_t>(n & (kGrain - 1)), State::kCommitted, 12345);
+TEST_CASE("desc encoding round-trips record ownership fields") {
+  for (sz_t extent : {kGrain, 2 * kGrain, 5 * kGrain}) {
+    u64_t const w = packRecord(extent, 0, State::kClaimed, 12345);
     CHECK(extentOf(w) == extent);
-    CHECK(committedLen(w) == n);
     CHECK(tidOf(w) == 12345);
-    CHECK(stateOf(w) == State::kCommitted);
+    CHECK(stateOf(w) == State::kClaimed);
   }
   CHECK(freeWord(0) == 0);
   CHECK(freePos(freeWord(4096)) == 4096);

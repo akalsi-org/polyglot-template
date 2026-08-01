@@ -1,8 +1,8 @@
 #pragma once
 
-// The single-producer ring. Multi-producer work is served by MpscRing
-// (mpsc_ring.hh), which splits arbitration, publication, and payload onto
-// separate cache lines.
+// The single-producer ring. Its per-position slot-length plane keeps metadata
+// out of the mirrored payload arena. Multi-producer work is served by MpscRing
+// (mpsc_ring.hh), which additionally separates arbitration from publication.
 
 #include "pgt/core/types.hh"
 #include "pgt/mpsc/api.hh"
@@ -51,8 +51,8 @@ namespace pgt::mpsc {
 //                       bytes beyond it are unreachable, stale or not.
 //
 //   recovery, read-path liveness
-//                       an unfinished reservation has touched nothing shared
-//                       (header store and tail advance both happen at commit),
+//                       an unfinished reservation has published nothing
+//                       (slot store and tail advance both happen at commit),
 //                       so a dead writer's ring simply idles: its committed
 //                       records drain normally and nothing is behind an
 //                       incomplete one. The r5 stale-snapshot defect class
@@ -64,7 +64,7 @@ namespace pgt::mpsc {
 //                       private free space. abort() is purely writer-local.
 //
 // The reader pays ONE acquire load of the tail per sweep -- skipped while the
-// cached tail still covers unread records -- and reads headers below it
+// cached tail still covers unread records -- and reads slot lengths below it
 // relaxed. Per-ring FIFO only; ordering across writers is a property of the
 // variant (api.hh), and this is the variant that trades it for wait-freedom.
 //
@@ -78,6 +78,20 @@ class SpscRing {
  public:
   // One writer per ring.
   static constexpr u32_t kMaxWriters = 1;
+  static constexpr u64_t kSlotStride = sizeof(u64_t);
+  static constexpr u64_t kSlotGrain = kGrain;
+  static constexpr sz_t kMaxPayload = static_cast<sz_t>(kMaxExtent);
+
+  [[nodiscard]] static constexpr sz_t extentForPayload(sz_t payload) noexcept {
+    sz_t const extent = (payload + (kSlotGrain - 1)) & ~(kSlotGrain - 1);
+    return extent == 0 ? kSlotGrain : extent;
+  }
+
+  [[nodiscard]] static constexpr bool extentForPayloadChecked(sz_t payload, u64_t& out) noexcept {
+    if (payload > kMaxPayload) return false;
+    out = extentForPayload(payload);
+    return out <= kMaxExtent;
+  }
 
   SpscRing() = default;
 
@@ -104,6 +118,9 @@ class SpscRing {
   [[nodiscard]] static bool create(Config const& cfg, SpscRing& out) noexcept {
     Config c = cfg;
     c.shards = 1;
+    c.plane_claim_stride = kSlotStride;
+    c.plane_result_stride = 0;
+    c.plane_grain = kSlotGrain;
     if (!Region::create(c, out.owned_)) return false;
     out.bind(out.owned_, 0);
     return true;
@@ -118,7 +135,8 @@ class SpscRing {
       errno = saved;
       return false;
     }
-    if (r.shardCount() != 1) {
+    if (r.shardCount() != 1 || r.claimStride() != kSlotStride || r.resultStride() != 0 ||
+        r.planeGrain() != kSlotGrain) {
       errno = EPROTO;
       return false;  // r closes dup_fd; the caller's fd remains untouched
     }
@@ -137,13 +155,10 @@ class SpscRing {
     if (!ownsWriter()) [[unlikely]]
       detail::misuseTrap("SpscRing::reserve by a thread that does not own this ring");
     // Representability first, THEN capacity. Rounding an unrepresentable length
-    // overflows and yields a small-looking extent -- measured, extentFor(
-    // SIZE_MAX - 8) == 0 -- which sails through a `need > max_need_` test
-    // precisely because zero is small. A zero extent also breaks the contract
-    // that an extent is never zero, and a reader advancing by zero does not
-    // terminate.
+    // can overflow to a small-looking extent, and zero would make a reader stop
+    // advancing.
     u64_t need = 0;
-    if (!extentForChecked(n, need) || need > max_need_) [[unlikely]] {
+    if (!extentForPayloadChecked(n, need) || need > max_need_) [[unlikely]] {
       wr_status_ = Status::kTooLarge;
       return {};
     }
@@ -154,7 +169,7 @@ class SpscRing {
     res_need_ = need;
     res_n_ = n;
     wr_status_ = Status::kOk;
-    return {arena_ + ((tail + kHeaderSize) & mask_), n};
+    return {arena_ + (tail & mask_), n};
   }
 
   // Misuse traps, ON in release (the queue doctrine): each failure mode is silent
@@ -166,22 +181,19 @@ class SpscRing {
       detail::misuseTrap("SpscRing::commit by a thread that does not own this ring");
     if (res_pos_ == detail::kInvalidPos) [[unlikely]]
       detail::misuseTrap("SpscRing::commit without a live reservation");  // misuse (b)
-    if (reservation.data() != arena_ + ((res_pos_ + kHeaderSize) & mask_) ||
-        reservation.size() != res_n_)
+    if (reservation.data() != arena_ + (res_pos_ & mask_) || reservation.size() != res_n_)
       detail::misuseTrap("SpscRing::commit with a span other than the live reservation");
     if (actual_n > res_n_) [[unlikely]]
       detail::misuseTrap("SpscRing::committed payload exceeds the reservation");
     // Safe without a checked form: actual_n <= res_n_ was just enforced, and
-    // res_n_ passed extentForChecked() at reserve().
-    u64_t const used = extentFor(actual_n);
+    // res_n_ passed extentForPayloadChecked() at reserve().
+    u64_t const used = extentForPayload(actual_n);
     if (used > res_need_) [[unlikely]]
       detail::misuseTrap("SpscRing::commit extent exceeds the reservation");  // misuse (c)
     u64_t const p = res_pos_;
-    // Relaxed: the reader cannot reach this header until the tail release
-    // below publishes it together with the payload.
-    descRef(p).store(
-      packRecord(used, static_cast<u32_t>(actual_n & (kGrain - 1)), State::kCommitted, wr_tid_),
-      std::memory_order_relaxed);
+    // Relaxed: the reader cannot reach this slot until the tail release below
+    // publishes it together with the headerless payload.
+    slotLenRef(p).store(actual_n, std::memory_order_relaxed);
     wr_tail_ = p + used;
     publishRef().store(wr_tail_, std::memory_order_release);  // publication
     res_pos_ = detail::kInvalidPos;                           // poison
@@ -220,20 +232,20 @@ class SpscRing {
   [[nodiscard]] ReadSpan peek() noexcept {
     u64_t const rd = rd_;
     if (rd >= tail_cache_) {
-      // The ONE acquire of the sweep: its pairing release covers every header
+      // The ONE acquire of the sweep: its pairing release covers every slot
       // and payload store at or below the tail, so records under the cached
       // tail are read relaxed until the cache is exhausted.
       tail_cache_ = publishRef().load(std::memory_order_acquire);
       if (rd >= tail_cache_) return {};  // drained
     }
-    u64_t const d = descRef(rd).load(std::memory_order_relaxed);
-    assert(stateOf(d) == State::kCommitted && "tail advanced over a non-committed record");
-    peek_extent_ = extentOf(d);
-    return {arena_ + ((rd + kHeaderSize) & mask_), committedLen(d)};
+    u64_t const n = slotLenRef(rd).load(std::memory_order_relaxed);
+    assert(n <= kMaxPayload && "published SPSC slot length is not representable");
+    peek_extent_ = extentForPayload(static_cast<sz_t>(n));
+    return {arena_ + (rd & mask_), static_cast<sz_t>(n)};
   }
 
   // Cheap sweep probe, reader thread only. Relaxed on purpose: peek() redoes
-  // the load with acquire before any header is trusted.
+  // the tail load with acquire before any slot length is trusted.
   [[nodiscard]] bool maybeReadable() const noexcept {
     return rd_ < tail_cache_ ||
            rd_ < std::atomic_ref<u64_t>(sc_->publishPos()).load(std::memory_order_relaxed);
@@ -242,8 +254,8 @@ class SpscRing {
   void pop() noexcept {
     assert(rd_ < tail_cache_ && "pop without a preceding successful peek");
     u64_t const prev = rd_;
-    u64_t const extent =
-      peek_extent_ != 0 ? peek_extent_ : extentOf(descRef(rd_).load(std::memory_order_relaxed));
+    assert(peek_extent_ != 0 && "pop without a preceding successful peek");
+    u64_t const extent = peek_extent_;
     peek_extent_ = 0;
     rd_ += extent;                                       // rd_ is reader-private
     readPosRef().store(rd_, std::memory_order_release);  // license to overwrite
@@ -368,9 +380,15 @@ class SpscRing {
 
  private:
   void bind(Region const& region, u32_t shard_index) noexcept {
+    if (!region.valid() || shard_index >= region.shardCount() ||
+        region.claimStride() != kSlotStride || region.resultStride() != 0 ||
+        region.planeGrain() != kSlotGrain || region.claimPlane(shard_index) == nullptr) {
+      detail::misuseTrap("binding SpscRing to incompatible Region geometry");
+    }
     ctl_ = region.control();
     sc_ = region.shard(shard_index);
     arena_ = region.arena(shard_index);
+    slot_plane_ = region.claimPlane(shard_index);
     cap_ = region.capacity();
     mask_ = region.mask();
     shift_ = static_cast<u32_t>(std::countr_zero(cap_));
@@ -386,6 +404,7 @@ class SpscRing {
     ctl_ = other.ctl_;
     sc_ = other.sc_;
     arena_ = other.arena_;
+    slot_plane_ = other.slot_plane_;
     cap_ = other.cap_;
     mask_ = other.mask_;
     max_need_ = other.max_need_;
@@ -409,6 +428,7 @@ class SpscRing {
     other.ctl_ = nullptr;
     other.sc_ = nullptr;
     other.arena_ = nullptr;
+    other.slot_plane_ = nullptr;
     other.slot_ = nullptr;
     other.bm_word_ = nullptr;
     other.res_pos_ = detail::kInvalidPos;
@@ -453,8 +473,9 @@ class SpscRing {
     wr_status_ = Status::kOk;
   }
 
-  [[nodiscard]] std::atomic_ref<u64_t> descRef(u64_t pos) const noexcept {
-    return std::atomic_ref<u64_t>(*reinterpret_cast<u64_t*>(arena_ + (pos & mask_)));
+  [[nodiscard]] std::atomic_ref<u64_t> slotLenRef(u64_t pos) const noexcept {
+    u64_t const cell = (pos / kSlotGrain) & ((cap_ / kSlotGrain) - 1);
+    return std::atomic_ref<u64_t>(*reinterpret_cast<u64_t*>(slot_plane_ + cell * kSlotStride));
   }
   [[nodiscard]] std::atomic_ref<u64_t> publishRef() const noexcept {
     return std::atomic_ref<u64_t>(sc_->publishPos());
@@ -485,7 +506,7 @@ class SpscRing {
       res_need_ = need;
       res_n_ = n;
       wr_status_ = Status::kOk;
-      return {arena_ + ((tail + kHeaderSize) & mask_), n};
+      return {arena_ + (tail & mask_), n};
     }
     policy_.onFull(0);
     // Full is normal backpressure; a DEAD reader will never drain, which is a
@@ -500,6 +521,7 @@ class SpscRing {
   Control* ctl_ = nullptr;
   ShardControl* sc_ = nullptr;
   std::byte* arena_ = nullptr;
+  std::byte* slot_plane_ = nullptr;
   u64_t cap_ = 0;
   u64_t mask_ = 0;
   u64_t max_need_ = 0;  // min(capacity, kMaxExtent): largest admissible extent

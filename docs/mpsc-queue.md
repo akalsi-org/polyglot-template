@@ -126,31 +126,29 @@ a PID namespace.
 
 ## Alignment
 
-Record extents are `align64(8 + n)`; record starts, and therefore descriptors, are
-64-byte aligned.
+Default record extents are `max(64, align64(n))`; record starts and metadata
+slots are 64-byte aligned. Payload begins at the record position with no in-band
+prefix in either surviving queue.
 
 | payload | extent | waste |
 |---|---|---|
 | 32 B | 64 B | 50% |
 | 56 B | 64 B | **12.5%** |
-| 64 B | 128 B | 50% |
+| 64 B | 64 B | 0% |
 | 120 B | 128 B | **6%** |
-| 1 KiB | 1088 B | 6% |
+| 1 KiB | 1024 B | 0% |
 
-Payloads of `64k − 8` pack perfectly. Padding is dead ring capacity, not merely
+Payloads of `64k` pack perfectly. Padding is dead ring capacity, not merely
 per-record overhead — it shortens the wrap interval and raises the full-rate.
 
-The alignment eliminates false sharing between *adjacent* records. It does not
-eliminate sharing between a descriptor and its own payload; see
-[Reader backoff](#reader-backoff).
+The alignment eliminates false sharing between adjacent payload records.
+Metadata is always outside the mirrored arena.
 
 ## Descriptor
 
-Eight bytes, holding a record's state, extent, and owner. In `MpscRing<>` this
-word is a **Claim cell** in the control plane; in `SpscRing<>` it is the in-band record
-header. The encoding is shared because the recovery and lap-ABA arguments are the
-same in both. `state` occupies the
-low bits in every encoding so it can be decoded before anything else.
+For `MpscRing<>`, eight bytes hold a record's state, extent, and owner in a
+**Claim cell** in the control plane. `state` occupies the low bits so it can be
+decoded before anything else.
 
 ```
   bits 0..2     state    FREE=0 | CLAIMED=1 | CLEARED=2 | COMMITTED=3 | ABORTED=4
@@ -173,6 +171,10 @@ exactly 58. No truncation, so `FREE(p) != FREE(p + kN)` unconditionally.
 declaration order — this word is shared between separately-compiled processes. Do not
 express it as a C bitfield either; bit order and allocation within bitfields are
 implementation-defined. Use an explicit `uint64_t` with pack/unpack helpers.
+
+`SpscRing<>` needs no ownership descriptor. Its single 8-byte slot cell stores
+only the committed payload length. The writer stores that length and then
+release-publishes the tail; the reader acquires the tail before reading the slot.
 
 **`FREE` must be 0 deliberately.** An untouched plane or arena word is all zeros, which then
 decodes as `FREE(0)` — harmless, because any claimant at `p != 0` mismatches and
@@ -482,11 +484,23 @@ above two writers: spreading the working set across more lines costs more than
 the false sharing it removes. Compact is the default; padded is retained as a
 measurement control.
 
+`mpsc-padded-256` is an additional benchmark selector for
+`MpscRing<DefaultPolicy, true, 256>`. It keeps the padded Claim/Result planes
+but rounds each payload reservation to at least 256 bytes, trading fewer live
+arena elements for larger per-record extents. It is an experiment to test
+whether a smaller live element population changes the padded layout's behavior;
+no result should be inferred until it has been run through the same interleaved
+campaign as the table above.
+
 ### Method
 
 * The replicate is a **process**, not an in-process loop: launch captures
   scheduler, thermal, allocator, and ASLR variation instead of averaging it away.
 * Configurations are interleaved in shuffled order within each round.
+* Benchmark JSON records `payload_bytes`, `extent_bytes`, `payload_gb_s`, and
+  `reserved_gb_s`, so selectors with different reservation grains expose both
+  useful traffic and arena consumption rather than hiding padding in one GB/s
+  number. Campaigns select the workload with `--payload`.
 * Coherence counters come from `perf_event_open` on each writer thread, enabled
   around the timed window only. Measured non-perturbing (throughput with and
   without counters is indistinguishable). `perf c2c` is unavailable on this host:
@@ -513,7 +527,7 @@ measurement control.
   stopped writer blocks the reader but not other writers, cross-process attach by
   fd, layout-mismatch refusal.
 * `region_test.cc`, `spsc_test.cc` — mapping, control-area layout including the
-  shared writer registry, backends, descriptor encoding; SPSC short commit,
+  shared writer registry, backends, descriptor encoding; SPSC slot publication, short commit,
   boundary sizes, and single-writer enforcement.
 * `ordering_mutants.sh` — release→relaxed mutants of the vouch and the Result-tag
   publication. **x86-64 is TSO, so these mutants are byte-identical there**; only

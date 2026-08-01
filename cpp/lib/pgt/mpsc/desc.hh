@@ -2,8 +2,8 @@
 
 // Record descriptor encoding, shared by every queue variant.
 //
-// Eight bytes per record, 64-byte-grain indexed. SpscRing stores the descriptor
-// at the head of the in-band record; MpscRing stores it in the Claim plane.
+// Eight bytes per record, 64-byte-grain indexed. MpscRing stores it in the Claim
+// plane; SpscRing only needs a length slot and does not use this descriptor.
 // `state` occupies the low bits in EVERY encoding so it can be decoded before
 // anything else.
 //
@@ -47,12 +47,14 @@
 
 namespace pgt::mpsc {
 
-// Record alignment. Records start on this boundary, so adjacent records never
-// share a cache line. 64 matches the x86-64 coherence granule; raise to 128 if
-// Apple M-series (whose line size IS 128) becomes a target.
-inline constexpr sz_t kGrain = 64;
-inline constexpr sz_t kHeaderSize = 8;
+// Cache-line contract for the supported Linux x86-64 and AArch64 targets.
+// Apple M-series is not a target and does not influence this wire geometry.
+inline constexpr sz_t kCacheLine = 64;
+static_assert(kCacheLine == 64, "x86-64 and AArch64 queue wire geometry is pinned to 64 bytes");
 
+// Record alignment. Records start on this boundary, so adjacent records never
+// share a cache line on either supported architecture.
+inline constexpr sz_t kGrain = kCacheLine;
 // Smallest possible record extent. Guarantees any gap is either zero or large
 // enough to hold a descriptor, so a short commit's trailer always fits.
 inline constexpr sz_t kMinExtent = kGrain;
@@ -130,51 +132,7 @@ inline constexpr u64_t kMaxExtent = kSizeMask * kGrain;
   return static_cast<u32_t>((w >> kTidShift) & kTidMask);
 }
 
-// Committed payload length. Only meaningful when stateOf(w) == kCommitted.
-//
-// For a given extent, extentFor() admits payloads in a window of exactly 64
-// consecutive integers -- (extent - 72, extent - 8] -- so `remainder` (the
-// payload length mod 64) identifies which one uniquely.
-[[nodiscard]] inline constexpr u64_t committedLen(u64_t w) noexcept {
-  u64_t const rem = (w >> kRemShift) & kRemMask;
-  u64_t const hi = extentOf(w) - kHeaderSize;  // largest payload for this extent
-  u64_t const delta = (hi - rem) & (kGrain - 1);
-  return hi - delta;
-}
-
-// Largest payload whose extent is representable. THE CALLER MUST CHECK THIS
-// BEFORE CALLING extentFor -- the rounding below overflows silently, and the
-// overflow destroys the very information needed to reject the request.
-//
-// Measured, before this bound existed: extentFor(SIZE_MAX - 8) == 0. A ZERO
-// extent is not merely a wrong number; desc.hh's own contract says an extent is
-// never zero, and a walker advancing by zero does not terminate. The in-band
-// admission check `need > max_need_` passes a zero extent happily, because zero
-// is small.
-inline constexpr sz_t kMaxPayload = static_cast<sz_t>(kMaxExtent) - kHeaderSize;
-
-// Precondition: payload <= kMaxPayload. Use extentForChecked() at any boundary
-// where the length is caller-supplied.
-[[nodiscard]] inline constexpr sz_t extentFor(sz_t payload) noexcept {
-  sz_t const need = kHeaderSize + payload;
-  return (need + (kGrain - 1)) & ~(kGrain - 1);
-}
-
-// The admission-safe form: false means the request cannot be represented at all
-// and must be rejected before any state changes. Written as a comparison
-// against a precomputed bound rather than as an addition, so it cannot itself
-// overflow.
-[[nodiscard]] inline constexpr bool extentForChecked(sz_t payload, u64_t& out) noexcept {
-  if (payload > kMaxPayload) return false;
-  out = extentFor(payload);
-  return true;
-}
-
 static_assert(kFreePosBits == 58, "free position must cover a 64-bit space at 64B grain");
-// The bound must be tight AND overflow-free: one below it must round to a real
-// extent, and the bound itself must not wrap.
-static_assert(extentFor(kMaxPayload) == kMaxExtent, "kMaxPayload must round to kMaxExtent");
-static_assert(extentFor(kMaxPayload) != 0, "the bound must not be the overflow value");
 static_assert(kTidShift + kTidBits <= 64);
 static_assert(static_cast<u64_t>(State::kFree) == 0, "untouched memory must decode as free");
 

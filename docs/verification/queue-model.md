@@ -20,11 +20,11 @@ Run it with:
 - MPSC search depth: 11 protocol transitions.
 - Positions do not model `uint64_t` wraparound.
 - Release/acquire visibility is represented by explicit transition ordering
-  constraints such as descriptor-before-tail and payload-before-tag.
+  constraints such as slot-before-tail and payload-before-tag.
 
 ## SPSC Coverage
 
-The SPSC model covers private reservation, payload fill, descriptor store,
+The SPSC model covers private reservation, payload fill, length-slot store,
 tail publication, reader peek/pop, voluntary detach, death, stopped owners,
 dead-writer takeover only after drain, slot generation fencing, and capacity
 overwrite protection.
@@ -32,11 +32,11 @@ overwrite protection.
 The model is anchored to these implementation facts:
 
 - `SpscRing::reserve()` reserves privately after a capacity check.
-- `SpscRing::commit()` stores the descriptor before the release-store
+- `SpscRing::commit()` stores the payload length slot before the release-store
   publication tail.
 - `SpscRing::abort()` keeps abort writer-local.
 - `SpscRing::peek()` and `SpscRing::pop()` acquire the tail, consume committed
-  descriptors, and release `read_pos`.
+  length slots, and release `read_pos`.
 - `SpscRing::attachWriter()` gates dead-writer takeover on proven death plus a
   drained ring.
 - `SpscRing::ownsWriter()` requires tid, slot owner, and slot generation.

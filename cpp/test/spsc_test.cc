@@ -12,6 +12,7 @@
 
 #include "pgt/core/platform.hh"
 #include "pgt/mpsc/desc.hh"
+#include "pgt/mpsc/mpsc_ring.hh"
 #include "pgt/mpsc/spsc_ring.hh"
 #include "pgt/mpsc/region.hh"
 
@@ -126,6 +127,12 @@ TEST_CASE("SpscRing: direct short commit and zero-length write") {
   REQUIRE(SpscRing<>::create(smallConfig(), q));
   REQUIRE(q.attachWriter());
   REQUIRE(q.attachReader());
+  CHECK(q.region().claimStride() == sizeof(u64_t));
+  CHECK(q.region().resultStride() == 0);
+  CHECK(q.region().planeGrain() == kGrain);
+  CHECK(SpscRing<>::extentForPayload(0) == kGrain);
+  CHECK(SpscRing<>::extentForPayload(kGrain) == kGrain);
+  CHECK(SpscRing<>::extentForPayload(kGrain + 1) == 2 * kGrain);
 
   WriteSpan const s = q.reserve(31);
   REQUIRE(s.data() != nullptr);
@@ -207,14 +214,14 @@ TEST_CASE("SpscRing same-thread second reader view is refused") {
   challenger.detachReader();
 }
 
-TEST_CASE("SpscRing: differential with boundary sizes 0, 1, kGrain-8, kGrain") {
+TEST_CASE("SpscRing: differential with headerless boundary sizes") {
   SpscRing<> q;
   REQUIRE(SpscRing<>::create(tinyConfig(1), q));
   std::thread wt([&] {
     REQUIRE(q.attachWriter());
     Deadline dl;
     std::mt19937 rng(42);
-    sz_t const sizes[] = {0, 1, kGrain - 8, kGrain, 3, 100, kGrain - 8};
+    sz_t const sizes[] = {0, 1, kGrain - 1, kGrain, kGrain + 1, 100, 2 * kGrain};
     for (u32_t seq = 0; seq < 20000; ++seq) {
       sz_t const n = sizes[seq % (sizeof(sizes) / sizeof(sizes[0]))];
       std::byte buf[128];
@@ -227,7 +234,7 @@ TEST_CASE("SpscRing: differential with boundary sizes 0, 1, kGrain-8, kGrain") {
   });
   REQUIRE(q.attachReader());
   Deadline dl;
-  sz_t const sizes[] = {0, 1, kGrain - 8, kGrain, 3, 100, kGrain - 8};
+  sz_t const sizes[] = {0, 1, kGrain - 1, kGrain, kGrain + 1, 100, 2 * kGrain};
   for (u32_t seq = 0; seq < 20000 && !dl.expired();) {
     ReadSpan const s = q.peek();
     if (s.data() == nullptr) continue;
@@ -238,6 +245,38 @@ TEST_CASE("SpscRing: differential with boundary sizes 0, 1, kGrain-8, kGrain") {
     ++seq;
   }
   wt.join();
+}
+
+TEST_CASE("SpscRing: headerless slots expose the full arena capacity") {
+  SpscRing<> q;
+  REQUIRE(SpscRing<>::create(smallConfig(), q));
+  REQUIRE(q.attachWriter());
+  REQUIRE(q.attachReader());
+
+  std::byte payload[kGrain]{};
+  for (u32_t i = 0; i < 64; ++i) {
+    std::memcpy(payload, &i, sizeof(i));
+    REQUIRE(q.write(payload, sizeof(payload)));
+  }
+  CHECK_FALSE(q.write(payload, sizeof(payload)));
+  CHECK(q.status() == Status::kFull);
+
+  for (u32_t i = 0; i < 64; ++i) {
+    ReadSpan const record = q.peek();
+    REQUIRE(record.size() == sizeof(payload));
+    u32_t value = 0;
+    std::memcpy(&value, record.data(), sizeof(value));
+    CHECK(value == i);
+    q.pop();
+  }
+  CHECK(q.peek().data() == nullptr);
+
+  std::vector<std::byte> whole(q.region().capacity(), std::byte{0x5a});
+  REQUIRE(q.write(whole.data(), whole.size()));
+  ReadSpan const record = q.peek();
+  REQUIRE(record.size() == whole.size());
+  CHECK(std::memcmp(record.data(), whole.data(), whole.size()) == 0);
+  q.pop();
 }
 
 // The exact bug that escaped every compile-time check last week: reader_tid is
@@ -408,24 +447,45 @@ TEST_CASE("SpscRing: rejected multi-shard attach preserves the caller fd") {
   CHECK(probe.shardCount() == 2);
 }
 
+TEST_CASE("SpscRing: attaching an MPSC slot geometry is refused") {
+  MpscRing<> mpsc;
+  REQUIRE(MpscRing<>::create(smallConfig(), mpsc));
+  SpscRing<> wrong;
+  CHECK_FALSE(SpscRing<>::attach(mpsc.region().fd(), wrong));
+
+  SpscRing<> spsc;
+  REQUIRE(SpscRing<>::create(smallConfig(), spsc));
+  MpscRing<> wrong2;
+  CHECK_FALSE(MpscRing<>::attach(spsc.region().fd(), wrong2));
+}
+
+TEST_CASE("SpscRing: direct binding to incompatible slot geometry traps") {
+  MpscRing<> mpsc;
+  REQUIRE(MpscRing<>::create(smallConfig(), mpsc));
+
+  int const st = runExpectingAbort([&] {
+    SpscRing<> wrong(mpsc.region(), 0);
+    static_cast<void>(wrong);
+  });
+  CHECK(WIFSIGNALED(st));
+  CHECK(WTERMSIG(st) == SIGABRT);
+}
+
 // ---------------------------------------------------------------------------
 // A dead reader turns permanent backpressure into a definite error.
 // ---------------------------------------------------------------------------
 
-// REGRESSION (found by audit, 2026-07-26): the same unchecked extent overflow
-// as two-plane, but with a worse landing. extentFor adds an 8-byte header
-// BEFORE rounding, so extentFor(SIZE_MAX - 8) == 0 exactly -- a ZERO extent.
-// The admission test is `need > max_need_`, which zero passes trivially because
-// zero is small. A zero extent also violates the encoding contract that an
-// extent is never zero, and a reader advancing by zero does not terminate.
+// Caller-controlled lengths must be rejected before headerless extent rounding
+// can overflow to a small value. A zero extent would make the reader stop
+// advancing.
 TEST_CASE("SpscRing<> declines unrepresentable lengths and never yields a zero extent") {
   SpscRing<> q;
   REQUIRE(SpscRing<>::create(smallConfig(), q));
   REQUIRE(q.attachWriter());
   REQUIRE(q.attachReader());
 
-  for (sz_t n : {SIZE_MAX, SIZE_MAX - 7, SIZE_MAX - 8, SIZE_MAX - 9, SIZE_MAX - 63, SIZE_MAX - 70,
-                 kMaxPayload + 1}) {
+  for (sz_t n :
+       {SIZE_MAX, SIZE_MAX - 1, SIZE_MAX - 63, SIZE_MAX - 64, SpscRing<>::kMaxPayload + 1}) {
     CAPTURE(n);
     WriteSpan const s = q.reserve(n);
     CHECK(s.data() == nullptr);
@@ -434,7 +494,7 @@ TEST_CASE("SpscRing<> declines unrepresentable lengths and never yields a zero e
   }
 
   std::byte probe[64]{};
-  CHECK_FALSE(q.write(probe, SIZE_MAX - 8));
+  CHECK_FALSE(q.write(probe, SIZE_MAX));
 
   // Still usable, and still delivering exact lengths.
   REQUIRE(q.write(probe, 24));

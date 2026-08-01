@@ -45,6 +45,7 @@ using namespace pgt::mpsc;
 
 using MpscCompact = MpscRing<>;
 using MpscPadded = MpscRing<DefaultPolicy, true>;
+using MpscPadded256 = MpscRing<DefaultPolicy, true, 256>;
 
 class ReferenceQueue {
  public:
@@ -104,6 +105,10 @@ TEST_CASE("MpscRing layout arithmetic") {
   CHECK(tpExtentFor(64) == kGrain);  // in-band queue needs 128 here
   CHECK(tpExtentFor(65) == 2 * kGrain);
   CHECK(tpExtentFor(128) == 2 * kGrain);
+  CHECK(tpExtentFor<256>(0) == 256);
+  CHECK(tpExtentFor<256>(255) == 256);
+  CHECK(tpExtentFor<256>(256) == 256);
+  CHECK(tpExtentFor<256>(257) == 512);
 
   // The commit tag is self-certifying in the same sense freeWord() is: it
   // carries the unwrapped position, so no lap can alias another.
@@ -116,7 +121,12 @@ TEST_CASE("MpscRing layout arithmetic") {
 
   // Metadata: 8 bytes of Claim + 16 bytes of Result per 64-byte payload grain.
   CHECK(MpscCompact::metadataRatio() == doctest::Approx(0.375));
+  CHECK(MpscPadded::kClaimStride == kCacheLine);
+  CHECK(MpscPadded::kResultStride == kCacheLine);
+  CHECK(MpscPadded256::kClaimStride == kCacheLine);
+  CHECK(MpscPadded256::kResultStride == kCacheLine);
   CHECK(MpscPadded::metadataRatio() == doctest::Approx(2.0));
+  CHECK(MpscPadded256::metadataRatio() == doctest::Approx(0.5));
 }
 
 // ---------------------------------------------------------------------------
@@ -124,13 +134,14 @@ TEST_CASE("MpscRing layout arithmetic") {
 // with arbitrary short commits and boundary sizes, wrapping many times.
 // ---------------------------------------------------------------------------
 TEST_CASE_TEMPLATE("MpscRing differential vs reference with short commits", Q, MpscCompact,
-                   MpscPadded) {
+                   MpscPadded, MpscPadded256) {
   Q q;
   REQUIRE(Q::create(smallConfig(), q));
   REQUIRE(q.attachReader());
   ReferenceQueue ref;
 
-  sz_t const special[] = {0, 1, kGrain - 1, kGrain, kGrain + 1, 2 * kGrain, 300};
+  sz_t const special[] = {
+    0, 1, Q::kCellGrain - 1, Q::kCellGrain, Q::kCellGrain + 1, 2 * Q::kCellGrain, 300};
   std::mt19937 rng(0xC0FFEE);
   u64_t byte_seed = 1;
 
@@ -178,7 +189,7 @@ TEST_CASE_TEMPLATE("MpscRing differential vs reference with short commits", Q, M
 // order (that is a variant property, checked separately below).
 // ---------------------------------------------------------------------------
 TEST_CASE_TEMPLATE("MpscRing multi-writer integrity and per-writer FIFO", Q, MpscCompact,
-                   MpscPadded) {
+                   MpscPadded, MpscPadded256) {
   constexpr u32_t kWriters = 4;
   constexpr u32_t kPerWriter = 4000;
 
@@ -235,13 +246,15 @@ TEST_CASE_TEMPLATE("MpscRing multi-writer integrity and per-writer FIFO", Q, Mps
 // ---------------------------------------------------------------------------
 // Zero-length records survive a wrap and stay distinguishable from "empty".
 // ---------------------------------------------------------------------------
-TEST_CASE_TEMPLATE("MpscRing zero-length records", Q, MpscCompact, MpscPadded) {
+TEST_CASE_TEMPLATE("MpscRing zero-length records", Q, MpscCompact, MpscPadded, MpscPadded256) {
   Q q;
   REQUIRE(Q::create(smallConfig(), q));
   REQUIRE(q.attachReader());
+  int const available = static_cast<int>(q.region().capacity() / Q::kCellGrain - 1);
+  int const batch = available < 20 ? available : 20;
   for (int round = 0; round < 500; ++round) {
-    for (int k = 0; k < 20; ++k) REQUIRE(q.write(nullptr, 0));
-    for (int k = 0; k < 20; ++k) {
+    for (int k = 0; k < batch; ++k) REQUIRE(q.write(nullptr, 0));
+    for (int k = 0; k < batch; ++k) {
       ReadSpan const r = q.peek();
       REQUIRE(r.data() != nullptr);  // a delivered empty record, not "no record"
       CHECK(r.size() == 0);
@@ -257,20 +270,22 @@ TEST_CASE_TEMPLATE("MpscRing zero-length records", Q, MpscCompact, MpscPadded) {
 // to deliver everything already accepted.
 // ---------------------------------------------------------------------------
 TEST_CASE_TEMPLATE("MpscRing full boundary declines without side effects", Q, MpscCompact,
-                   MpscPadded) {
+                   MpscPadded, MpscPadded256) {
   Q q;
   REQUIRE(Q::create(smallConfig(), q));
   REQUIRE(q.attachReader());
 
   // Larger than the ring can ever hold: a permanent error, not backpressure.
-  CHECK(q.reserve(4096).data() == nullptr);
+  u64_t const capacity = q.region().capacity();
+  CHECK(q.reserve(capacity).data() == nullptr);
   CHECK(q.status() == Status::kTooLarge);
-  CHECK(q.reserve(4033).data() == nullptr);
+  CHECK(q.reserve(capacity - Q::kCellGrain + 1).data() == nullptr);
   CHECK(q.status() == Status::kTooLarge);
 
   // Largest record this configuration can hold: capacity minus the one-grain
   // admission slack.
-  WriteSpan const big = q.reserve(4032);
+  sz_t const max_payload = capacity - Q::kCellGrain;
+  WriteSpan const big = q.reserve(max_payload);
   REQUIRE(big.data() != nullptr);
   std::memset(big.data(), 0x7e, big.size());
   q.commit(big, big.size());
@@ -288,19 +303,21 @@ TEST_CASE_TEMPLATE("MpscRing full boundary declines without side effects", Q, Mp
 
   ReadSpan const r = q.peek();
   REQUIRE(r.data() != nullptr);
-  CHECK(r.size() == 4032);
+  CHECK(r.size() == max_payload);
   for (sz_t i = 0; i < r.size(); ++i) REQUIRE(r[i] == std::byte{0x7e});
   q.pop();
 
   // Every declined reserve above must have left the frontier untouched, so
   // admission resumes immediately once the reader drains.
-  for (unsigned i = 0; i < 60; ++i) {
+  unsigned const available = static_cast<unsigned>(capacity / Q::kCellGrain - 1);
+  unsigned const records = available < 60 ? available : 60;
+  for (unsigned i = 0; i < records; ++i) {
     WriteSpan const s = q.reserve(56);
     REQUIRE(s.data() != nullptr);
     std::memset(s.data(), static_cast<int>(i), 56);
     q.commit(s, 56);
   }
-  for (unsigned i = 0; i < 60; ++i) {
+  for (unsigned i = 0; i < records; ++i) {
     ReadSpan const rr = q.peek();
     REQUIRE(rr.data() != nullptr);
     REQUIRE(rr.size() == 56);
@@ -314,7 +331,8 @@ TEST_CASE_TEMPLATE("MpscRing full boundary declines without side effects", Q, Mp
 // abort() publishes a void record: it is skipped, the next record still begins
 // at the full reserved extent, and nothing is lost around it.
 // ---------------------------------------------------------------------------
-TEST_CASE_TEMPLATE("MpscRing abort skips exactly the reservation", Q, MpscCompact, MpscPadded) {
+TEST_CASE_TEMPLATE("MpscRing abort skips exactly the reservation", Q, MpscCompact, MpscPadded,
+                   MpscPadded256) {
   Q q;
   REQUIRE(Q::create(smallConfig(), q));
   REQUIRE(q.attachReader());
@@ -357,7 +375,7 @@ TEST_CASE_TEMPLATE("MpscRing abort skips exactly the reservation", Q, MpscCompac
 // the one behaviour that differs observably from in-band queue.
 // ---------------------------------------------------------------------------
 TEST_CASE_TEMPLATE("MpscRing in-flight record does not block later claims", Q, MpscCompact,
-                   MpscPadded) {
+                   MpscPadded, MpscPadded256) {
   Q q;
   REQUIRE(Q::create(smallConfig(), q));
   REQUIRE(q.attachReader());
@@ -380,12 +398,14 @@ TEST_CASE_TEMPLATE("MpscRing in-flight record does not block later claims", Q, M
 
   // The holder's record pins the READER, so nothing is deliverable; but claims
   // behind it must still succeed.
-  for (unsigned i = 0; i < 20; ++i) {
+  unsigned const available = static_cast<unsigned>(q.region().capacity() / Q::kCellGrain - 2);
+  unsigned const behind_target = available < 20 ? available : 20;
+  for (unsigned i = 0; i < behind_target; ++i) {
     std::byte buf[32];
     std::memset(buf, static_cast<int>(i), sizeof(buf));
     if (q.write(buf, sizeof(buf))) ++behind;
   }
-  CHECK(behind.load() == 20);
+  CHECK(behind.load() == behind_target);
   CHECK(q.peek().data() == nullptr);  // reader still pinned at the in-flight record
 
   release.store(true, std::memory_order_release);
@@ -396,7 +416,7 @@ TEST_CASE_TEMPLATE("MpscRing in-flight record does not block later claims", Q, M
   while ((first = q.peek()).data() == nullptr) REQUIRE(!dl.expired());
   CHECK(first.size() == 64);
   q.pop();
-  for (unsigned i = 0; i < 20; ++i) {
+  for (unsigned i = 0; i < behind_target; ++i) {
     ReadSpan r{};
     dl.reset();
     while ((r = q.peek()).data() == nullptr) REQUIRE(!dl.expired());
@@ -418,7 +438,8 @@ TEST_CASE_TEMPLATE("MpscRing in-flight record does not block later claims", Q, M
 // about the READER dying rather than a writer, and it needs a second view over
 // the same planes rather than a fork.
 // ---------------------------------------------------------------------------
-TEST_CASE_TEMPLATE("MpscRing reader restart resumes at read_pos", Q, MpscCompact, MpscPadded) {
+TEST_CASE_TEMPLATE("MpscRing reader restart resumes at read_pos", Q, MpscCompact, MpscPadded,
+                   MpscPadded256) {
   Q q;
   REQUIRE(Q::create(smallConfig(), q));
   REQUIRE(q.attachWriter());
@@ -436,10 +457,12 @@ TEST_CASE_TEMPLATE("MpscRing reader restart resumes at read_pos", Q, MpscCompact
     return t;
   };
 
-  constexpr u32_t kRecords = 20;
+  constexpr u32_t kRecords = Q::kCellGrain == 256 ? 12 : 20;
+  constexpr u32_t kPopped = kRecords / 2;
   for (u32_t t = 0; t < kRecords; ++t) push_tagged(t);
 
-  // First reader: a separate view. Pops 0..9, then PEEKS 10 without popping and
+  // First reader: a separate view. Pops the first half, then PEEKS the next
+  // record without popping and
   // exits. Running it on its own thread makes the death real -- the tid is
   // reaped on join, so the replacement's attach sees a genuinely dead reader
   // rather than a synthetically cleared slot.
@@ -447,7 +470,7 @@ TEST_CASE_TEMPLATE("MpscRing reader restart resumes at read_pos", Q, MpscCompact
     Q r1;
     REQUIRE(Q::createView(q, r1));
     REQUIRE(r1.attachReader());
-    for (u32_t t = 0; t < 10; ++t) {
+    for (u32_t t = 0; t < kPopped; ++t) {
       ReadSpan const r = r1.peek();
       REQUIRE(r.data() != nullptr);
       CHECK(tag_of(r) == t);
@@ -455,17 +478,17 @@ TEST_CASE_TEMPLATE("MpscRing reader restart resumes at read_pos", Q, MpscCompact
     }
     ReadSpan const peeked = r1.peek();  // observed, deliberately NOT popped
     REQUIRE(peeked.data() != nullptr);
-    CHECK(tag_of(peeked) == 10);
+    CHECK(tag_of(peeked) == kPopped);
   });
   first.join();
 
   // join proves C++ completion, but kernel TID liveness can converge later. A
   // failed attach only observes shared ownership, so one successor may retry.
-  // Replacement reader must resume at 10, not 11: the peek did not retire it.
+  // The replacement must resume at the peeked record: peek did not retire it.
   Q r2;
   REQUIRE(Q::createView(q, r2));
   REQUIRE(eventually([&] { return r2.attachReader(); }));
-  for (u32_t t = 10; t < kRecords; ++t) {
+  for (u32_t t = kPopped; t < kRecords; ++t) {
     ReadSpan r = r2.peek();
     auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
     while (r.data() == nullptr) {
@@ -487,7 +510,8 @@ TEST_CASE_TEMPLATE("MpscRing reader restart resumes at read_pos", Q, MpscCompact
 // The incumbent must be a genuinely different live thread: attachReader() is
 // deliberately idempotent for the SAME thread (`cur != self`), so attaching two
 // views from one thread proves nothing and would pass vacuously.
-TEST_CASE_TEMPLATE("MpscRing live reader cannot be displaced", Q, MpscCompact, MpscPadded) {
+TEST_CASE_TEMPLATE("MpscRing live reader cannot be displaced", Q, MpscCompact, MpscPadded,
+                   MpscPadded256) {
   Q q;
   REQUIRE(Q::create(smallConfig(), q));
 
@@ -517,8 +541,8 @@ TEST_CASE_TEMPLATE("MpscRing live reader cannot be displaced", Q, MpscCompact, M
   REQUIRE(eventually([&] { return successor.attachReader(); }));
 }
 
-TEST_CASE_TEMPLATE("MpscRing same-thread second reader view is refused", Q, MpscCompact,
-                   MpscPadded) {
+TEST_CASE_TEMPLATE("MpscRing same-thread second reader view is refused", Q, MpscCompact, MpscPadded,
+                   MpscPadded256) {
   Q q;
   REQUIRE(Q::create(smallConfig(), q));
   REQUIRE(q.attachReader());
@@ -550,7 +574,7 @@ TEST_CASE_TEMPLATE("MpscRing same-thread second reader view is refused", Q, Mpsc
 // the evidence that the request was too large.
 // ---------------------------------------------------------------------------
 TEST_CASE_TEMPLATE("MpscRing declines unrepresentable lengths without lying", Q, MpscCompact,
-                   MpscPadded) {
+                   MpscPadded, MpscPadded256) {
   Q q;
   REQUIRE(Q::create(smallConfig(), q));
   REQUIRE(q.attachWriter());
@@ -583,7 +607,8 @@ TEST_CASE_TEMPLATE("MpscRing declines unrepresentable lengths without lying", Q,
 
 // The bound must be TIGHT, not merely safe: rejecting everything would pass the
 // test above while breaking the queue.
-TEST_CASE_TEMPLATE("MpscRing still admits every representable size", Q, MpscCompact, MpscPadded) {
+TEST_CASE_TEMPLATE("MpscRing still admits every representable size", Q, MpscCompact, MpscPadded,
+                   MpscPadded256) {
   Q q;
   REQUIRE(Q::create(smallConfig(), q));
   REQUIRE(q.attachWriter());
@@ -620,7 +645,7 @@ TEST_CASE_TEMPLATE("MpscRing still admits every representable size", Q, MpscComp
 // kill in that window leaves behind.
 // ---------------------------------------------------------------------------
 TEST_CASE_TEMPLATE("MpscRing: the successor of a kClaimed record is not claimable", Q, MpscCompact,
-                   MpscPadded) {
+                   MpscPadded, MpscPadded256) {
   // This is the invariant that lets recovery promote unconditionally, and it is
   // what the in-band ring got for free by blocking the walk entirely.
   //
@@ -639,9 +664,9 @@ TEST_CASE_TEMPLATE("MpscRing: the successor of a kClaimed record is not claimabl
   REQUIRE(q.attachWriter());
 
   Region const& r = q.region();
-  u64_t const cells = r.capacity() / kGrain;
+  u64_t const cells = r.capacity() / Q::kCellGrain;
   auto claim_at = [&](u64_t pos) {
-    u64_t const cell = (pos / kGrain) & (cells - 1);
+    u64_t const cell = (pos / Q::kCellGrain) & (cells - 1);
     return std::atomic_ref<u64_t>(
       *reinterpret_cast<u64_t*>(r.claimPlane(0) + cell * Q::kClaimStride));
   };
@@ -662,7 +687,7 @@ TEST_CASE_TEMPLATE("MpscRing: the successor of a kClaimed record is not claimabl
   REQUIRE(reserved.load());
   REQUIRE(eventually([&] { return !threadAlive(dead_tid.load()); }));
 
-  u64_t const extent = tpExtentFor(sizeof abuf);
+  u64_t const extent = tpExtentFor<Q::kCellGrain>(sizeof abuf);
   u64_t const p = 0, qpos = p + extent;
   REQUIRE(claim_at(qpos).load() == freeWord(qpos));  // the owner promoted q
 
@@ -784,7 +809,7 @@ TEST_CASE("liveness under fd exhaustion: live reads alive, dead still reads dead
 // finishClaim(). Note the fault suite does NOT cover this branch -- killing a
 // child after reserve() returns leaves kCleared, not kClaimed.
 TEST_CASE_TEMPLATE("MpscRing recovery promotes a successor the dead owner never reached", Q,
-                   MpscCompact, MpscPadded) {
+                   MpscCompact, MpscPadded, MpscPadded256) {
   Q q;
   REQUIRE(Q::create(smallConfig(), q));
   REQUIRE(q.attachReader());
@@ -795,9 +820,9 @@ TEST_CASE_TEMPLATE("MpscRing recovery promotes a successor the dead owner never 
   reaped.join();
 
   Region const& r = q.region();
-  u64_t const cells = r.capacity() / kGrain;
+  u64_t const cells = r.capacity() / Q::kCellGrain;
   auto claim_at = [&](u64_t pos) {
-    u64_t const cell = (pos / kGrain) & (cells - 1);
+    u64_t const cell = (pos / Q::kCellGrain) & (cells - 1);
     return std::atomic_ref<u64_t>(
       *reinterpret_cast<u64_t*>(r.claimPlane(0) + cell * Q::kClaimStride));
   };
@@ -806,7 +831,7 @@ TEST_CASE_TEMPLATE("MpscRing recovery promotes a successor the dead owner never 
   {
     std::byte fill[24];
     std::memset(fill, 0x11, sizeof fill);
-    for (u64_t w = 0; w < r.capacity(); w += tpExtentFor(sizeof fill)) {
+    for (u64_t w = 0; w < r.capacity(); w += tpExtentFor<Q::kCellGrain>(sizeof fill)) {
       REQUIRE(q.write(fill, sizeof fill));
       REQUIRE(q.peek().data() != nullptr);
       q.pop();
@@ -832,7 +857,7 @@ TEST_CASE_TEMPLATE("MpscRing recovery promotes a successor the dead owner never 
   });
   owner.join();
   REQUIRE(reserved.load());
-  u64_t const extent = tpExtentFor(sizeof abuf);
+  u64_t const extent = tpExtentFor<Q::kCellGrain>(sizeof abuf);
   u64_t const p = r.capacity(), qpos = p + extent;
 
   // Forge "died BEFORE promoting": p claimed by a dead owner, and q holding a

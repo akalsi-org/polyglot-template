@@ -1,7 +1,7 @@
 #include "../mpsc/spsc_ring.hh"
 
 // The variants are templates over their policy, so the definitions live in the
-// header. This TU pins the default instantiations and checks the contract, so
+// slot plane. This TU pins the default instantiations and checks the contract, so
 // a protocol change that breaks the API surfaces here rather than at first use.
 
 namespace pgt::mpsc {

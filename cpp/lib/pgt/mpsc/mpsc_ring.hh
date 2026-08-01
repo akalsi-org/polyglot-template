@@ -199,17 +199,20 @@ inline constexpr u64_t kTpAborted = static_cast<u64_t>(State::kAborted);
 // subtraction that underflowed.
 inline constexpr sz_t kTpMaxPayload = static_cast<sz_t>(kMaxExtent);
 
+template <sz_t CellGrain = kGrain>
 [[nodiscard]] inline constexpr sz_t tpExtentFor(sz_t payload) noexcept {
-  sz_t const need = (payload + (kGrain - 1)) & ~static_cast<sz_t>(kGrain - 1);
-  return need == 0 ? kGrain : need;
+  static_assert(CellGrain >= kGrain && std::has_single_bit(CellGrain));
+  sz_t const need = (payload + (CellGrain - 1)) & ~static_cast<sz_t>(CellGrain - 1);
+  return need == 0 ? CellGrain : need;
 }
 
 // The admission-safe form. Compare against a precomputed bound rather than
 // adding, so the check itself cannot overflow.
+template <sz_t CellGrain = kGrain>
 [[nodiscard]] inline constexpr bool tpExtentForChecked(sz_t payload, u64_t& out) noexcept {
   if (payload > kTpMaxPayload) return false;
-  out = tpExtentFor(payload);
-  return true;
+  out = tpExtentFor<CellGrain>(payload);
+  return out <= kMaxExtent;
 }
 
 // The Claim and Result planes are NOT owned here: they live in the Region's
@@ -227,16 +230,21 @@ inline constexpr sz_t kTpMaxPayload = static_cast<sz_t>(kMaxExtent);
 // that in fact touch one physical word -- a miscompilation hazard that no
 // amount of correct atomics can repair.
 
-// `Padded` gives every Claim cell and every Result cell its own 64-byte line.
+// `Padded` gives every Claim cell and every Result cell its own cache line.
 // Compact packs 8 Claim cells / 4 Result cells per line, which is denser and
 // prefetch-friendly but lets neighbouring records' claim CASes and commit
 // stores false-share. Which wins is a measurement, not a deduction -- both are
 // built and both are benchmarked.
-template <typename Policy = DefaultPolicy, bool Padded = false>
+template <typename Policy = DefaultPolicy, bool Padded = false, sz_t CellGrain = kGrain>
 class MpscRing {
  public:
-  static constexpr u64_t kClaimStride = Padded ? 64 : sizeof(u64_t);
-  static constexpr u64_t kResultStride = Padded ? 64 : sizeof(ResultCell);
+  static_assert(CellGrain >= kGrain && std::has_single_bit(CellGrain));
+  static_assert(CellGrain <= kMaxExtent);
+  static_assert(Padded || CellGrain == kGrain,
+                "larger MPSC cells are only supported by the padded layout");
+  static constexpr u64_t kCellGrain = CellGrain;
+  static constexpr u64_t kClaimStride = Padded ? kCacheLine : sizeof(u64_t);
+  static constexpr u64_t kResultStride = Padded ? kCacheLine : sizeof(ResultCell);
 
   MpscRing() = default;
   explicit MpscRing(Policy policy) noexcept : policy_(std::move(policy)) {}
@@ -257,6 +265,7 @@ class MpscRing {
     c.shards = 1;
     c.plane_claim_stride = kClaimStride;
     c.plane_result_stride = kResultStride;
+    c.plane_grain = kCellGrain;
     if (!Region::create(c, out.owned_)) return false;
     out.bind(out.owned_, 0);
     return true;
@@ -289,7 +298,8 @@ class MpscRing {
       errno = saved;
       return false;
     }
-    if (r.claimStride() != kClaimStride || r.resultStride() != kResultStride) {
+    if (r.claimStride() != kClaimStride || r.resultStride() != kResultStride ||
+        r.planeGrain() != kCellGrain) {
       errno = EPROTO;
       return false;  // r's destructor closes dup_fd; the caller's fd is intact
     }
@@ -333,7 +343,7 @@ class MpscRing {
     // Order matters: the representability check comes FIRST, because rounding an
     // unrepresentable length destroys the evidence that it was too large.
     u64_t need = 0;
-    if (!tpExtentForChecked(n, need) || need + kGrain > cap_ || need > kMaxExtent) [[unlikely]] {
+    if (!tpExtentForChecked<CellGrain>(n, need) || need + kCellGrain > cap_) [[unlikely]] {
       t.status = Status::kTooLarge;
       return {};
     }
@@ -341,7 +351,7 @@ class MpscRing {
     // value is freeWord(p), so success proves p was the frontier by content
     // alone. No preliminary load, and the failure value is never reused.
     u64_t const p = hintRef().load(std::memory_order_acquire);
-    if (p >= t.read_cache && p + need + kGrain - t.read_cache <= cap_) [[likely]] {
+    if (p >= t.read_cache && p + need + kCellGrain - t.read_cache <= cap_) [[likely]] {
       u64_t expected = freeWord(p);
       u64_t const mine = packRecord(need, 0, State::kClaimed, t.tid);
       if (claimRef(p).compare_exchange_strong(expected, mine, std::memory_order_acquire,
@@ -522,7 +532,7 @@ class MpscRing {
 
   // Metadata bytes per byte of payload ring, for the overhead table.
   [[nodiscard]] static constexpr double metadataRatio() noexcept {
-    return static_cast<double>(kClaimStride + kResultStride) / kGrain;
+    return static_cast<double>(kClaimStride + kResultStride) / kCellGrain;
   }
 
  private:
@@ -550,7 +560,7 @@ class MpscRing {
     arena_ = region.arena(shard_index);
     cap_ = region.capacity();
     mask_ = region.mask();
-    cell_mask_ = (cap_ / kGrain) - 1;
+    cell_mask_ = (cap_ / kCellGrain) - 1;
     shift_ = static_cast<u32_t>(std::countr_zero(cap_));
     claim_plane_ = region.claimPlane(shard_index);
     result_plane_ = region.resultPlane(shard_index);
@@ -587,7 +597,7 @@ class MpscRing {
     other.reader_attached_ = false;
   }
 
-  [[nodiscard]] u64_t cellOf(u64_t pos) const noexcept { return (pos >> 6) & cell_mask_; }
+  [[nodiscard]] u64_t cellOf(u64_t pos) const noexcept { return (pos / kCellGrain) & cell_mask_; }
 
   [[nodiscard]] std::atomic_ref<u64_t> claimRef(u64_t pos) const noexcept {
     return std::atomic_ref<u64_t>(
@@ -665,7 +675,7 @@ class MpscRing {
   [[gnu::noinline, gnu::cold]] WriteSpan reserveSlow(sz_t n, u64_t need,
                                                      u32_t initial_prior_failures = 0) noexcept {
     WriterTls& t = tls_;
-    u32_t const max_hops = static_cast<u32_t>(cap_ / kGrain);
+    u32_t const max_hops = static_cast<u32_t>(cap_ / kCellGrain);
     u32_t contended = initial_prior_failures;
     for (;;) {
       u64_t p = hintRef().load(std::memory_order_acquire);
@@ -713,10 +723,10 @@ class MpscRing {
       }
 
       if (p < t.read_cache) goto restart;  // stale walk, NOT full
-      if (p + need + kGrain - t.read_cache > cap_) {
+      if (p + need + kCellGrain - t.read_cache > cap_) {
         t.read_cache = readPosRef().load(std::memory_order_acquire);
         if (p < t.read_cache) goto restart;
-        if (p + need + kGrain - t.read_cache > cap_) {
+        if (p + need + kCellGrain - t.read_cache > cap_) {
           policy_.onFull(0);
           u32_t const reader = readerTidRef().load(std::memory_order_acquire);
           t.status = (reader != 0 && !threadAlive(reader)) ? Status::kReaderDead : Status::kFull;
@@ -783,6 +793,7 @@ class MpscRing {
 
 static_assert(QueueLike<MpscRing<DefaultPolicy, false>>);
 static_assert(QueueLike<MpscRing<DefaultPolicy, true>>);
+static_assert(QueueLike<MpscRing<DefaultPolicy, true, 256>>);
 static_assert(std::atomic_ref<u32_t>::is_always_lock_free);
 static_assert(std::atomic_ref<u64_t>::is_always_lock_free);
 

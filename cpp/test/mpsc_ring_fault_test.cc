@@ -449,6 +449,7 @@ TEST_CASE("MpscRing: writer distinguishes a zombie reader from a slow one") {
 TEST_CASE("MpscRing: attaching with a mismatched cell layout is refused") {
   using Compact = MpscRing<DefaultPolicy, false>;
   using Padded = MpscRing<DefaultPolicy, true>;
+  using Padded256 = MpscRing<DefaultPolicy, true, 256>;
 
   Compact compact;
   REQUIRE(Compact::create(smallConfig(), compact));
@@ -460,10 +461,50 @@ TEST_CASE("MpscRing: attaching with a mismatched cell layout is refused") {
   Compact wrong2;
   CHECK_FALSE(Compact::attach(padded.region().fd(), wrong2));
 
+  Padded256 padded256;
+  REQUIRE(Padded256::create(smallConfig(), padded256));
+  Padded wrong3;
+  CHECK_FALSE(Padded::attach(padded256.region().fd(), wrong3));
+  Padded256 wrong4;
+  CHECK_FALSE(Padded256::attach(padded.region().fd(), wrong4));
+
   // The matching layout still attaches, so the check rejects mismatch rather
   // than rejecting everything.
   Compact ok;
   CHECK(Compact::attach(compact.region().fd(), ok));
+
+  Padded256 ok256;
+  CHECK(Padded256::attach(padded256.region().fd(), ok256));
+}
+
+TEST_CASE("MpscRing: padded-256 process attaching by fd alone can write") {
+  using Padded256 = MpscRing<DefaultPolicy, true, 256>;
+  Padded256 q;
+  REQUIRE(Padded256::create(smallConfig(), q));
+  REQUIRE(q.attachReader());
+  REQUIRE(q.attachWriter());
+
+  pid_t const pid = fork();
+  REQUIRE(pid >= 0);
+  if (pid == 0) {
+    Padded256 child;
+    if (!Padded256::attach(q.region().fd(), child)) _exit(1);
+    if (!child.attachWriter()) _exit(2);
+    u32_t const value = 0x256;
+    if (!child.write(&value, sizeof(value))) _exit(3);
+    _exit(0);
+  }
+
+  int st = 0;
+  REQUIRE(waitpid(pid, &st, 0) == pid);
+  REQUIRE(WIFEXITED(st));
+  REQUIRE(WEXITSTATUS(st) == 0);
+  ReadSpan const record = q.peek();
+  REQUIRE(record.size() == sizeof(u32_t));
+  u32_t value = 0;
+  std::memcpy(&value, record.data(), sizeof(value));
+  CHECK(value == 0x256);
+  q.pop();
 }
 
 }  // namespace

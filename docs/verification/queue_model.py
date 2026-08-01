@@ -32,11 +32,9 @@ class ModelViolation(AssertionError):
 
 
 @dataclasses.dataclass(frozen=True, order=True)
-class SDesc:
-  pos: int = -1
+class SSlot:
   extent: int = 0
   payload: int = -1
-  complete: bool = False
 
 
 @dataclasses.dataclass(frozen=True, order=True)
@@ -50,14 +48,14 @@ class SRec:
 
 @dataclasses.dataclass(frozen=True, order=True)
 class SpscState:
-  desc: tuple[SDesc, ...] = (SDesc(), SDesc(), SDesc(), SDesc())
+  slots: tuple[SSlot, ...] = (SSlot(), SSlot(), SSlot(), SSlot())
   publish: int = 0
   read: int = 0
   tail: int = 0
   owner: Literal["free", "live", "stopped", "dead"] = "live"
   gen: int = 1
   writer_gen: int = 1
-  pc: Literal["idle", "reserved", "payload", "desc", "detached"] = "idle"
+  pc: Literal["idle", "reserved", "payload", "slot", "detached"] = "idle"
   res_pos: int = -1
   res_extent: int = 0
   res_payload: int = -1
@@ -94,19 +92,19 @@ def spsc_invariants(s: SpscState, mutant: str, trace: tuple[str, ...]) -> None:
   p = s.read
   seen_payloads: list[int] = []
   while p < s.publish:
-    d = s.desc[p % RING]
-    if not d.complete or d.pos != p or d.extent <= 0:
-      raise ModelViolation("spsc", mutant, trace, "published tail exposes missing or stale descriptor")
-    seen_payloads.append(d.payload)
-    p += d.extent
+    slot = s.slots[p % RING]
+    if slot.extent <= 0:
+      raise ModelViolation("spsc", mutant, trace, "published tail exposes a missing length slot")
+    seen_payloads.append(slot.payload)
+    p += slot.extent
     if p > s.publish:
-      raise ModelViolation("spsc", mutant, trace, "descriptor chain overshoots publication tail")
+      raise ModelViolation("spsc", mutant, trace, "slot chain overshoots publication tail")
   if p != s.publish:
-    raise ModelViolation("spsc", mutant, trace, "descriptor chain does not reach publication tail")
+    raise ModelViolation("spsc", mutant, trace, "slot chain does not reach publication tail")
 
   published_payloads = [r.payload for r in s.records if r.published and not r.popped]
   if seen_payloads != published_payloads:
-    raise ModelViolation("spsc", mutant, trace, "published descriptor chain diverges from committed records")
+    raise ModelViolation("spsc", mutant, trace, "published slot chain diverges from committed records")
   if len(set(s.delivered)) != len(s.delivered):
     raise ModelViolation("spsc", mutant, trace, "duplicate retired delivery")
   if s.delivered != tuple(r.payload for r in s.records if r.popped):
@@ -118,7 +116,7 @@ def spsc_invariants(s: SpscState, mutant: str, trace: tuple[str, ...]) -> None:
       owner = used.setdefault(cell, f"published:{rec.payload}")
       if owner != f"published:{rec.payload}":
         raise ModelViolation("spsc", mutant, trace, "published records overlap physically")
-  if s.pc in {"reserved", "payload", "desc"}:
+  if s.pc in {"reserved", "payload", "slot"}:
     for cell in _span(s.res_pos, s.res_extent):
       if cell in used:
         raise ModelViolation("spsc", mutant, trace, "private reservation overlaps live published record")
@@ -161,10 +159,10 @@ def spsc_transitions(s: SpscState, mutant: str) -> Iterable[tuple[str, SpscState
     yield "payload_store", replace(s, pc="payload")
     yield "abort_private", replace(s, pc="idle", res_pos=-1, res_extent=0, res_payload=-1)
   if owner_can_write and s.pc == "payload":
-    desc = list(s.desc)
-    desc[s.res_pos % RING] = SDesc(s.res_pos, s.res_extent, s.res_payload, True)
-    yield "descriptor_store", replace(s, desc=tuple(desc), pc="desc")
-  if owner_can_write and s.pc == "desc":
+    slots = list(s.slots)
+    slots[s.res_pos % RING] = SSlot(s.res_extent, s.res_payload)
+    yield "slot_store", replace(s, slots=tuple(slots), pc="slot")
+  if owner_can_write and s.pc == "slot":
     rec = SRec(s.res_pos, s.res_extent, s.res_payload, True)
     yield "publish_tail", replace(
       s,
@@ -177,20 +175,20 @@ def spsc_transitions(s: SpscState, mutant: str) -> Iterable[tuple[str, SpscState
       res_payload=-1,
     )
   if s.peek_pos == -1 and s.read < s.publish:
-    d = s.desc[s.read % RING]
-    if d.complete and d.pos == s.read:
+    slot = s.slots[s.read % RING]
+    if slot.extent > 0:
       yield "reader_peek", replace(s, peek_pos=s.read)
   if s.peek_pos != -1:
-    d = s.desc[s.peek_pos % RING]
+    slot = s.slots[s.peek_pos % RING]
 
     def pop_rec(r: SRec) -> SRec:
       return replace(r, popped=True) if r.pos == s.peek_pos else r
 
     yield "reader_pop", replace(
       s,
-      read=s.peek_pos + d.extent,
+      read=s.peek_pos + slot.extent,
       peek_pos=-1,
-      delivered=s.delivered + (d.payload,),
+      delivered=s.delivered + (slot.payload,),
       records=tuple(pop_rec(r) for r in s.records),
     )
   if s.owner == "live":

@@ -107,15 +107,19 @@ struct Config {
   // longer allocation-free.
   bool preallocate = true;
 
-  // Metadata-plane geometry for the split control/data-plane variant
-  // (MpscRing). Zero -- the default -- means no planes, and the region
-  // layout is then byte-identical to what the in-band variants have always
-  // used, so `in-band queue` and the SPSC rings are unaffected.
+  // Metadata-plane geometry for the split control/data-plane queues. Zero --
+  // the default -- means no planes. MpscRing configures Claim + Result planes;
+  // SpscRing configures one compact per-position length plane.
   //
-  // Set by MpscRing::create() from its own compile-time strides. It lives
-  // in Config rather than being inferred because the compact and padded layouts
-  // differ only in stride, and the region has to size the file before any queue
-  // object exists.
+  // Set by each queue's create() from its compile-time strides. It lives in
+  // Config rather than being inferred because the region has to size the file
+  // before any queue object exists.
+  //
+  // plane_grain is the byte distance represented by one metadata cell.
+  // Zero preserves the no-plane geometry; with planes and a zero value,
+  // Region::create() records the historical 64-byte grain. A larger grain is
+  // only valid for queue variants that enforce at least that much record
+  // spacing, and shrinks the plane cell count without changing arena capacity.
   //
   // The planes are placed in the SINGLY-MAPPED control area, never in a
   // mirrored arena: Claim and Result cells are atomics, and the two aliases of a
@@ -125,6 +129,7 @@ struct Config {
   // out of the ring.
   u64_t plane_claim_stride = 0;
   u64_t plane_result_stride = 0;
+  u64_t plane_grain = 0;
 };
 
 // Returned by reserve(): empty when the queue cannot accept the record. commit()

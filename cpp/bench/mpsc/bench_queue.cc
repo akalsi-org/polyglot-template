@@ -397,10 +397,10 @@ u64_t touchPayload(ReadSpan const& payload) {
   return sum;
 }
 
-template <bool Padded, typename PolicyT = DefaultPolicy>
+template <bool Padded, sz_t MinElementSize = kGrain, typename PolicyT = DefaultPolicy>
 RunResult benchMpsc(sz_t capacity, unsigned writers, double secs, sz_t payload,
                     PolicyT policy = {}) {
-  using Q = MpscRing<PolicyT, Padded>;
+  using Q = MpscRing<PolicyT, Padded, MinElementSize>;
   Q q(policy);
   if (!Q::create(Config{.capacity = capacity}, q)) {
     std::fprintf(stderr, "region create failed\n");
@@ -438,10 +438,13 @@ RunResult benchSpsc(sz_t capacity, double secs, sz_t payload) {
     [&] {});
 }
 
-void reportCountersJson(char const* variant, unsigned writers, RunResult const& r) {
+void reportCountersJson(char const* variant, unsigned writers, sz_t payload, sz_t extent,
+                        RunResult const& r) {
   double const per_rec = r.records ? static_cast<double>(r.misses) / r.records : 0.0;
   double const cyc_rec = r.records ? static_cast<double>(r.cycles) / r.records : 0.0;
   double const ins_rec = r.records ? static_cast<double>(r.insns) / r.records : 0.0;
+  double const reserved_gbs = r.records / r.secs * extent / 1e9;
+  double const payload_gbs = r.records / r.secs * payload / 1e9;
   u64_t lo = ~u64_t{0}, hi = 0;
   for (u64_t c : r.per_writer) {
     lo = c < lo ? c : lo;
@@ -450,22 +453,29 @@ void reportCountersJson(char const* variant, unsigned writers, RunResult const& 
   if (r.per_writer.empty()) lo = 0;
   std::printf(
     "{\"mode\":\"counters\",\"variant\":\"%s\",\"writers\":%u,\"seconds\":%.9f,"
-    "\"records\":%llu,\"mrec_s\":%.9f,\"misses\":%llu,\"misses_per_record\":%.6f,"
+    "\"records\":%llu,\"mrec_s\":%.9f,\"payload_bytes\":%zu,\"extent_bytes\":%zu,"
+    "\"payload_gb_s\":%.9f,\"reserved_gb_s\":%.9f,"
+    "\"misses\":%llu,\"misses_per_record\":%.6f,"
     "\"cycles_per_record\":%.3f,\"insns_per_record\":%.3f,\"ipc\":%.4f,"
     "\"fairness_min_max\":%.6f,\"min_writer_records\":%llu,\"max_writer_records\":%llu}\n",
     variant, writers, r.secs, static_cast<unsigned long long>(r.records), r.records / r.secs / 1e6,
-    static_cast<unsigned long long>(r.misses), per_rec, cyc_rec, ins_rec,
-    r.cycles ? static_cast<double>(r.insns) / r.cycles : 0.0,
+    payload, extent, payload_gbs, reserved_gbs, static_cast<unsigned long long>(r.misses), per_rec,
+    cyc_rec, ins_rec, r.cycles ? static_cast<double>(r.insns) / r.cycles : 0.0,
     hi ? static_cast<double>(lo) / hi : 0.0, static_cast<unsigned long long>(lo),
     static_cast<unsigned long long>(hi));
   std::fflush(stdout);
 }
 
-void reportThroughputJson(char const* variant, unsigned writers, RunResult const& r) {
+void reportThroughputJson(char const* variant, unsigned writers, sz_t payload, sz_t extent,
+                          RunResult const& r) {
+  double const reserved_gbs = r.records / r.secs * extent / 1e9;
+  double const payload_gbs = r.records / r.secs * payload / 1e9;
   std::printf(
     "{\"mode\":\"throughput\",\"variant\":\"%s\",\"writers\":%u,"
-    "\"seconds\":%.9f,\"records\":%llu,\"mrec_s\":%.9f}\n",
-    variant, writers, r.secs, static_cast<unsigned long long>(r.records), r.records / r.secs / 1e6);
+    "\"seconds\":%.9f,\"records\":%llu,\"mrec_s\":%.9f,\"payload_bytes\":%zu,"
+    "\"extent_bytes\":%zu,\"payload_gb_s\":%.9f,\"reserved_gb_s\":%.9f}\n",
+    variant, writers, r.secs, static_cast<unsigned long long>(r.records), r.records / r.secs / 1e6,
+    payload, extent, payload_gbs, reserved_gbs);
 }
 
 template <typename Q>
@@ -486,9 +496,9 @@ RunResult benchQueue(Q& q, unsigned writers, double secs, sz_t payload, bool att
     [] {});
 }
 
-void report(char const* name, unsigned writers, sz_t payload, RunResult r) {
+void report(char const* name, unsigned writers, sz_t payload, sz_t extent, RunResult r) {
   double const mrps = r.records / r.secs / 1e6;
-  double const gbs = r.records / r.secs * extentFor(payload) / 1e9;
+  double const gbs = r.records / r.secs * extent / 1e9;
   std::printf("%-24s w=%-2u payload=%-6zu timed=%.3fs %10.2f Mrec/s  %8.2f GB/s  %8.1f ns/rec\n",
               name, writers, payload, r.secs, mrps, gbs, 1e3 / mrps);
   std::fflush(stdout);
@@ -503,10 +513,10 @@ void report(char const* name, unsigned writers, sz_t payload, RunResult r) {
 int usage() {
   std::fprintf(stderr,
                "usage: bench_queue <mode> [args]\n"
-               "  throughput   mpsc|mpsc-padded|spsc <writers> <secs>\n"
-               "  counters     mpsc|mpsc-padded|spsc <writers> <secs>\n"
+               "  throughput   mpsc|mpsc-padded|mpsc-padded-256|spsc <writers> <secs> [payload]\n"
+               "  counters     mpsc|mpsc-padded|mpsc-padded-256|spsc <writers> <secs> [payload]\n"
                "               adds per-thread coherence counters and the fairness ratio\n"
-               "  latency      mpsc|mpsc-padded|spsc <writers> <secs>\n"
+               "  latency      mpsc|mpsc-padded|mpsc-padded-256|spsc <writers> <secs> [payload]\n"
                "  sizes        <secs>    payload size sweep, one writer\n");
   return 1;
 }
@@ -516,13 +526,18 @@ int usage() {
 // a throughput run and a counters run from silently measuring different queues,
 // which is exactly how an earlier campaign compared two different builds.
 template <typename Report>
-int dispatch(std::string const& variant, unsigned writers, double secs, Report&& report) {
+int dispatch(std::string const& variant, unsigned writers, double secs, sz_t payload,
+             Report&& report) {
   constexpr sz_t kCap = 1u << 20;
-  constexpr sz_t kPayload = 56;
   if (variant == "mpsc") {
-    report("mpsc", benchMpsc<false>(kCap, writers, secs, kPayload));
+    report("mpsc", tpExtentFor<kGrain>(payload),
+           benchMpsc<false, kGrain>(kCap, writers, secs, payload));
   } else if (variant == "mpsc-padded") {
-    report("mpsc-padded", benchMpsc<true>(kCap, writers, secs, kPayload));
+    report("mpsc-padded", tpExtentFor<kGrain>(payload),
+           benchMpsc<true, kGrain>(kCap, writers, secs, payload));
+  } else if (variant == "mpsc-padded-256") {
+    report("mpsc-padded-256", tpExtentFor<256>(payload),
+           benchMpsc<true, 256>(kCap, writers, secs, payload));
   } else if (variant == "spsc") {
     // One writer by construction; a request for more is a usage error rather
     // than something to silently clamp.
@@ -530,7 +545,7 @@ int dispatch(std::string const& variant, unsigned writers, double secs, Report&&
       std::fprintf(stderr, "spsc takes exactly one writer\n");
       return 1;
     }
-    report("spsc", benchSpsc(kCap, secs, kPayload));
+    report("spsc", SpscRing<>::extentForPayload(payload), benchSpsc(kCap, secs, payload));
   } else {
     return usage();
   }
@@ -546,29 +561,36 @@ int main(int argc, char** argv) {
   std::string const variant = argc > 2 ? argv[2] : "";
   unsigned const writers = argc > 3 ? static_cast<unsigned>(std::atoi(argv[3])) : 0;
   double const secs = argc > 4 ? std::atof(argv[4]) : 0;
+  sz_t const payload = argc > 5 ? static_cast<sz_t>(std::strtoull(argv[5], nullptr, 10)) : 56;
 
   if (mode == "sizes") {
     double const s = argc > 2 ? std::atof(argv[2]) : 0;
     if (s <= 0) return usage();
     for (sz_t n : {8u, 56u, 120u, 248u, 1016u, 4088u}) {
-      report("mpsc", 1, n, benchMpsc<false>(1u << 20, 1, s, n));
+      report("mpsc", 1, n, tpExtentFor<kGrain>(n), benchMpsc<false, kGrain>(1u << 20, 1, s, n));
     }
     return 0;
   }
 
-  if (writers == 0 || secs <= 0) return usage();
+  if (writers == 0 || secs <= 0 || payload > sizeof(payload_buf)) return usage();
 
   if (mode == "throughput") {
-    return dispatch(variant, writers, secs,
-                    [&](char const* name, RunResult r) { reportThroughputJson(name, writers, r); });
+    return dispatch(variant, writers, secs, payload,
+                    [&](char const* name, sz_t extent, RunResult r) {
+                      reportThroughputJson(name, writers, payload, extent, r);
+                    });
   }
   if (mode == "counters") {
-    return dispatch(variant, writers, secs,
-                    [&](char const* name, RunResult r) { reportCountersJson(name, writers, r); });
+    return dispatch(variant, writers, secs, payload,
+                    [&](char const* name, sz_t extent, RunResult r) {
+                      reportCountersJson(name, writers, payload, extent, r);
+                    });
   }
   if (mode == "latency") {
-    return dispatch(variant, writers, secs,
-                    [&](char const* name, RunResult r) { report(name, writers, 56, r); });
+    return dispatch(variant, writers, secs, payload,
+                    [&](char const* name, sz_t extent, RunResult r) {
+                      report(name, writers, payload, extent, r);
+                    });
   }
   return usage();
 }
