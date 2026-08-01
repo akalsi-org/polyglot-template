@@ -517,6 +517,23 @@ TEST_CASE_TEMPLATE("MpscRing live reader cannot be displaced", Q, MpscCompact, M
   REQUIRE(eventually([&] { return successor.attachReader(); }));
 }
 
+TEST_CASE_TEMPLATE("MpscRing same-thread second reader view is refused", Q, MpscCompact,
+                   MpscPadded) {
+  Q q;
+  REQUIRE(Q::create(smallConfig(), q));
+  REQUIRE(q.attachReader());
+  REQUIRE(q.attachReader());  // idempotent for the same view
+
+  Q challenger;
+  REQUIRE(Q::createView(q, challenger));
+  CHECK_FALSE(challenger.attachReader());
+  REQUIRE(q.attachReader());  // incumbent remains attached
+  q.detachReader();
+  REQUIRE(challenger.attachReader());
+  CHECK_FALSE(q.attachReader());
+  challenger.detachReader();
+}
+
 // ---------------------------------------------------------------------------
 // REGRESSION (found by audit, 2026-07-26): unchecked overflow in the extent
 // rounding admitted an unrepresentable reservation.

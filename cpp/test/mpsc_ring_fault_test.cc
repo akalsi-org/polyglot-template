@@ -404,6 +404,44 @@ TEST_CASE("MpscRing: a process attaching by fd alone can write") {
   CHECK(q.peek().data() == nullptr);
 }
 
+// ---------------------------------------------------------------------------
+// A dead reader turns permanent backpressure into a definite error. Keep the
+// child as an unreaped zombie while checking the status: unlike a joined
+// thread, its numeric TID cannot be recycled by a busy CI host, and /proc
+// exposes the definitive Z state that threadAlive() is required to classify as
+// dead. The old joined-thread test occasionally observed a newly reused TID
+// and correctly got the safe false-ALIVE result, kFull.
+// ---------------------------------------------------------------------------
+TEST_CASE("MpscRing: writer distinguishes a zombie reader from a slow one") {
+  FaultRing q;
+  REQUIRE(FaultRing::create(smallConfig(), q));
+  REQUIRE(q.attachWriter());
+
+  pid_t const pid = fork();
+  REQUIRE(pid >= 0);
+  if (pid == 0) {
+    FaultRing reader;
+    if (!FaultRing::createView(q, reader)) _exit(1);
+    if (!reader.attachReader()) _exit(2);
+    _exit(0);  // deliberately left unreaped until after the status check
+  }
+
+  siginfo_t info{};
+  REQUIRE(waitid(P_PID, static_cast<id_t>(pid), &info, WEXITED | WNOWAIT) == 0);
+  REQUIRE(info.si_code == CLD_EXITED);
+  REQUIRE(info.si_status == 0);
+
+  std::byte buf[64]{};
+  while (q.write(buf, sizeof(buf))) {
+  }
+  CHECK(q.status() == Status::kReaderDead);
+
+  int st = 0;
+  REQUIRE(waitpid(pid, &st, 0) == pid);
+  REQUIRE(WIFEXITED(st));
+  REQUIRE(WEXITSTATUS(st) == 0);
+}
+
 // A binary built for one cell layout must not attach to a region created with
 // the other: it would index the Claim plane with the wrong stride and read a
 // neighbouring record's ownership word as its own. The strides are recorded in

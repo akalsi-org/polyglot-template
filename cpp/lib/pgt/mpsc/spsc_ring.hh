@@ -13,10 +13,12 @@
 #include "pgt/mpsc/region.hh"
 
 #include <pthread.h>
+#include <unistd.h>
 
 #include <atomic>
 #include <bit>
 #include <cassert>
+#include <cerrno>
 #include <cstring>
 #include <mutex>
 #include <utility>
@@ -89,6 +91,7 @@ class SpscRing {
   SpscRing& operator=(SpscRing&& other) noexcept {
     if (this != &other) {
       if (ownsWriter()) detail::misuseTrap("moving over an attached SpscRing");
+      if (reader_attached_) detail::misuseTrap("moving over an attached SpscRing reader");
       moveFrom(std::move(other));
     }
     return *this;
@@ -106,8 +109,20 @@ class SpscRing {
     return true;
   }
   [[nodiscard]] static bool attach(int fd, SpscRing& out) noexcept {
-    if (!Region::attach(fd, out.owned_)) return false;
-    if (out.owned_.shardCount() != 1) return false;
+    int const dup_fd = ::dup(fd);
+    if (dup_fd < 0) return false;
+    Region r;
+    if (!Region::attach(dup_fd, r)) {
+      int const saved = errno;
+      ::close(dup_fd);
+      errno = saved;
+      return false;
+    }
+    if (r.shardCount() != 1) {
+      errno = EPROTO;
+      return false;  // r closes dup_fd; the caller's fd remains untouched
+    }
+    out.owned_ = std::move(r);
     out.bind(out.owned_, 0);
     return true;
   }
@@ -307,13 +322,18 @@ class SpscRing {
     // reservation is outstanding and every store has been issued.
   }
 
-  // Idempotent for the current holder: only
-  // the first call performs the queue-wide claim; the rest re-sync cursors.
+  // Idempotent only for this view. The shared reader slot stores a kernel TID,
+  // not a view identity, so a same-thread second view would otherwise see
+  // `reader_tid == self` and split the stream with an independent rd_. That is
+  // refused locally; a same-object call keeps the existing ownership and merely
+  // re-syncs cursors. Exact cross-object protection after kernel TID reuse is
+  // outside this ABI: the shared slot has no start-time/token field.
   [[nodiscard, gnu::noinline, gnu::cold]] bool attachReader() noexcept {
     if (arena_ == nullptr) return false;
     auto rt = readerTidRef();
     u32_t const self = currentTid();
     u32_t cur = rt.load(std::memory_order_acquire);
+    if (cur == self && !reader_attached_) return false;
     if (cur != self) {
       if (cur != 0 && threadAlive(cur)) return false;  // a live reader exists
       if (!rt.compare_exchange_strong(cur, self, std::memory_order_acq_rel,
@@ -321,10 +341,26 @@ class SpscRing {
         return false;  // lost the takeover race
       }
     }
+    reader_attached_ = true;
     rd_ = readPosRef().load(std::memory_order_acquire);  // resume exactly here
     tail_cache_ = rd_;  // force the next sweep to re-acquire the tail
     peek_extent_ = 0;
     return true;
+  }
+
+  // Reader ownership is explicit. Destruction does not silently detach: that
+  // keeps crash semantics honest, leaving successors to prove TID death before
+  // replaying from read_pos. A live handoff must call detachReader().
+  [[gnu::noinline, gnu::cold]] void detachReader() noexcept {
+    if (!reader_attached_) [[unlikely]]
+      detail::misuseTrap("SpscRing::detachReader by a view that is not attached");
+    u32_t expected = currentTid();
+    if (!readerTidRef().compare_exchange_strong(expected, 0, std::memory_order_acq_rel,
+                                                std::memory_order_relaxed)) {
+      detail::misuseTrap("SpscRing::detachReader by a thread that does not own the reader slot");
+    }
+    reader_attached_ = false;
+    peek_extent_ = 0;
   }
 
   [[nodiscard]] Region const& region() const noexcept { return owned_; }
@@ -368,6 +404,7 @@ class SpscRing {
     rd_ = other.rd_;
     tail_cache_ = other.tail_cache_;
     peek_extent_ = other.peek_extent_;
+    reader_attached_ = other.reader_attached_;
     policy_ = std::move(other.policy_);
     other.ctl_ = nullptr;
     other.sc_ = nullptr;
@@ -377,6 +414,7 @@ class SpscRing {
     other.res_pos_ = detail::kInvalidPos;
     other.wr_tid_ = 0;
     other.wr_gen_ = 0;
+    other.reader_attached_ = false;
   }
 
   // Identity only, never an object address: one writer thread may own several
@@ -484,10 +522,13 @@ class SpscRing {
   u64_t rd_ = 0;           // reader-private cursor; a cache of read_pos
   u64_t tail_cache_ = 0;   // last acquired tail; one acquire per sweep
   u64_t peek_extent_ = 0;  // extent acquired by the successful peek
+  bool reader_attached_ = false;
 
   [[no_unique_address]] Policy policy_{};
 };
 
 static_assert(QueueLike<SpscRing<DefaultPolicy>>);
+static_assert(std::atomic_ref<u32_t>::is_always_lock_free);
+static_assert(std::atomic_ref<u64_t>::is_always_lock_free);
 
 }  // namespace pgt::mpsc

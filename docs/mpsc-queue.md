@@ -457,8 +457,10 @@ attaching process can reconstruct the layout from the descriptor alone.
 binary's — a compact binary attaching to a padded region would index the Claim
 plane with the wrong stride and read a neighbouring record's ownership word.
 
-`attach()` duplicates the descriptor rather than consuming it, so a rejected
-attach leaves the caller's fd intact and probing for the right layout is safe.
+The public ring `attach()` functions duplicate the descriptor and leave the
+caller's fd untouched on both success and failure. The lower-level
+`Region::attach()` takes ownership on success and leaves the fd untouched on
+failure. Probing for the right ring layout is therefore safe.
 
 ## Measurement
 
@@ -516,6 +518,13 @@ measurement control.
 * `ordering_mutants.sh` — release→relaxed mutants of the vouch and the Result-tag
   publication. **x86-64 is TSO, so these mutants are byte-identical there**; only
   the aarch64 CI leg can adjudicate them, and qemu-user is blind (host TSO).
+* `docs/verification/queue_model.py` — dependency-free bounded state exploration
+  of both surviving protocols. The current bounds explore 998 SPSC states and
+  3,483 MPSC states and reject four SPSC and eight MPSC negative controls,
+  including wrong-lap claims, successor-before-vouch, stale-tag recovery,
+  publish-before-descriptor, missing generation fencing, and missing capacity
+  slack. See `docs/verification/queue-model.md` for the exact bounds and
+  assumptions.
 * Break-first discipline: a test is not trusted until it has been shown to fail
   against a deliberately broken implementation, built from a single snapshot copy
   so a concurrent edit cannot shift the baseline.
@@ -538,12 +547,12 @@ measurement control.
 
 ## Known gaps
 
-* **There is no model-checked safety argument for the two-plane protocol.** The
-  Spin model was written against the removed in-band ring and is retained, marked
-  as such, at `docs/verification/removed-inband-ring.pml`. Its invariants and
-  negative controls are reusable; its walker rules are not, because two-plane
-  legalises walking past an in-flight record. Until it is rewritten, this design
-  rests on tests alone.
+* **The executable model is bounded evidence, not an unbounded proof.** It uses a
+  sequentially-consistent transition abstraction with explicit publication
+  ordering, a four-grain ring, two MPSC writers, finite protocol depth, and no
+  integer wrap. It does not prove the full C++ weak-memory state space, Linux IPC
+  atomic ABI assumptions, PID-namespace death detection, or scheduler fairness.
+  Native AArch64 ordering-mutant runs remain required evidence.
 * **Resolved defect: recovery now relies on successor blocking.** A walker may walk past `kClaimed` but cannot claim its immediate successor, so `MpscRing::recover()` in `mpsc_ring.hh` can promote that successor unconditionally before marking the dead record aborted.
 * `threadAlive()` (`liveness.hh`) safely defaults to returning `true` (ALIVE) on resource errors (such as `EMFILE`, `ENFILE`, `EACCES`, or `EINTR` retries), adhering to the false-ALIVE safety doctrine. `existenceProbeSaysGone()` (`sched_getscheduler`, no fd required) returning `ESRCH` and `ENOENT` (from `/proc/<tid>/stat`) are the only conditions that prove a thread is DEAD.
 * Writer-death paths are covered by fork-based tests but NOT by TSan or by the

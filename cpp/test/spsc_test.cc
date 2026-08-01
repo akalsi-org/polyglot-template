@@ -94,6 +94,33 @@ Config smallConfig() {
   return cfg;
 }
 
+void pushTagged(SpscRing<>& q, u32_t tag) {
+  std::byte buf[24];
+  std::memcpy(buf, &tag, 4);
+  for (sz_t i = 4; i < sizeof(buf); ++i) buf[i] = patternByte(0, tag, i);
+  REQUIRE(q.write(buf, sizeof(buf)));
+}
+
+u32_t drainTagged(SpscRing<>& q, u32_t next, u32_t upto) {
+  auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+  while (next < upto) {
+    ReadSpan const r = q.peek();
+    if (r.data() == nullptr) {
+      REQUIRE(std::chrono::steady_clock::now() < deadline);
+      cpuRelax();
+      continue;
+    }
+    REQUIRE(r.size() == 24);
+    u32_t tag = 0;
+    std::memcpy(&tag, r.data(), 4);
+    CHECK(tag == next);
+    for (sz_t i = 4; i < r.size(); ++i) REQUIRE(r[i] == patternByte(0, tag, i));
+    q.pop();
+    ++next;
+  }
+  return next;
+}
+
 TEST_CASE("SpscRing: direct short commit and zero-length write") {
   SpscRing<> q;
   REQUIRE(SpscRing<>::create(smallConfig(), q));
@@ -165,6 +192,21 @@ TEST_CASE("SpscRing live reader cannot be displaced") {
   REQUIRE(eventually([&] { return successor.attachReader(); }));
 }
 
+TEST_CASE("SpscRing same-thread second reader view is refused") {
+  SpscRing<> q;
+  REQUIRE(SpscRing<>::create(smallConfig(), q));
+  REQUIRE(q.attachReader());
+  REQUIRE(q.attachReader());  // idempotent for the same view
+
+  SpscRing<> challenger(q.region(), 0);
+  CHECK_FALSE(challenger.attachReader());
+  REQUIRE(q.attachReader());  // incumbent remains attached
+  q.detachReader();
+  REQUIRE(challenger.attachReader());
+  CHECK_FALSE(q.attachReader());
+  challenger.detachReader();
+}
+
 TEST_CASE("SpscRing: differential with boundary sizes 0, 1, kGrain-8, kGrain") {
   SpscRing<> q;
   REQUIRE(SpscRing<>::create(tinyConfig(1), q));
@@ -219,6 +261,151 @@ TEST_CASE("standalone SpscRing<> rejects inherited writer ownership") {
   REQUIRE(next.data() != nullptr);
   q.commit(next, 0);
   q.detachWriter();
+}
+
+TEST_CASE("SpscRing: a process attaching by fd alone can write after voluntary detach") {
+  SpscRing<> q;
+  REQUIRE(SpscRing<>::create(smallConfig(), q));
+  REQUIRE(q.attachReader());
+  REQUIRE(q.attachWriter());
+
+  for (u32_t tag = 0; tag < 5; ++tag) pushTagged(q, tag);
+  q.detachWriter();
+
+  pid_t const pid = fork();
+  REQUIRE(pid >= 0);
+  if (pid == 0) {
+    SpscRing<> cq;
+    if (!SpscRing<>::attach(q.region().fd(), cq)) _exit(1);
+    if (!cq.attachWriter()) _exit(2);
+    for (u32_t tag = 5; tag < 10; ++tag) {
+      std::byte buf[24];
+      std::memcpy(buf, &tag, 4);
+      for (sz_t i = 4; i < sizeof(buf); ++i) {
+        buf[i] = patternByte(0, tag, i);
+      }
+      if (!cq.write(buf, sizeof(buf))) _exit(3);
+    }
+    cq.detachWriter();
+    _exit(0);
+  }
+
+  int st = 0;
+  REQUIRE(waitpid(pid, &st, 0) == pid);
+  REQUIRE(WIFEXITED(st));
+  REQUIRE(WEXITSTATUS(st) == 0);
+
+  drainTagged(q, 0, 10);
+  CHECK(q.peek().data() == nullptr);
+}
+
+TEST_CASE("SpscRing: a live writer attached by fd cannot be displaced") {
+  SpscRing<> q;
+  REQUIRE(SpscRing<>::create(smallConfig(), q));
+  REQUIRE(q.attachWriter());
+
+  pid_t const pid = fork();
+  REQUIRE(pid >= 0);
+  if (pid == 0) {
+    SpscRing<> challenger;
+    if (!SpscRing<>::attach(q.region().fd(), challenger)) _exit(1);
+    _exit(challenger.attachWriter() ? 2 : 0);
+  }
+
+  int st = 0;
+  REQUIRE(waitpid(pid, &st, 0) == pid);
+  REQUIRE(WIFEXITED(st));
+  CHECK(WEXITSTATUS(st) == 0);
+  q.detachWriter();
+}
+
+TEST_CASE("SpscRing: a stopped writer is live and cannot be taken over") {
+  SpscRing<> q;
+  REQUIRE(SpscRing<>::create(smallConfig(), q));
+
+  pid_t const pid = fork();
+  REQUIRE(pid >= 0);
+  if (pid == 0) {
+    SpscRing<> cq;
+    if (!SpscRing<>::attach(q.region().fd(), cq)) _exit(1);
+    if (!cq.attachWriter()) _exit(2);
+    raise(SIGSTOP);
+    cq.detachWriter();
+    _exit(0);
+  }
+
+  int st = 0;
+  REQUIRE(waitpid(pid, &st, WUNTRACED) == pid);
+  REQUIRE(WIFSTOPPED(st));
+
+  SpscRing<> challenger;
+  REQUIRE(SpscRing<>::attach(q.region().fd(), challenger));
+  CHECK_FALSE(challenger.attachWriter());  // SIGSTOP is not evidence of death.
+
+  REQUIRE(kill(pid, SIGCONT) == 0);
+  REQUIRE(waitpid(pid, &st, 0) == pid);
+  REQUIRE(WIFEXITED(st));
+  CHECK(WEXITSTATUS(st) == 0);
+}
+
+TEST_CASE("SpscRing: dead writer takeover waits until the reader drains") {
+  SpscRing<> q;
+  REQUIRE(SpscRing<>::create(smallConfig(), q));
+  REQUIRE(q.attachReader());
+
+  pid_t const pid = fork();
+  REQUIRE(pid >= 0);
+  if (pid == 0) {
+    SpscRing<> cq;
+    if (!SpscRing<>::attach(q.region().fd(), cq)) _exit(1);
+    if (!cq.attachWriter()) _exit(2);
+    for (u32_t tag = 0; tag < 3; ++tag) {
+      std::byte buf[24];
+      std::memcpy(buf, &tag, 4);
+      for (sz_t i = 4; i < sizeof(buf); ++i) {
+        buf[i] = patternByte(0, tag, i);
+      }
+      if (!cq.write(buf, sizeof(buf))) _exit(3);
+    }
+    _exit(0);  // no detach: leaves a dead owner in the shared writer slot
+  }
+
+  int st = 0;
+  REQUIRE(waitpid(pid, &st, 0) == pid);
+  REQUIRE(WIFEXITED(st));
+  REQUIRE(WEXITSTATUS(st) == 0);
+
+  SpscRing<> successor;
+  REQUIRE(SpscRing<>::attach(q.region().fd(), successor));
+  CHECK_FALSE(successor.attachWriter());  // dead owner, but committed bytes are still live
+
+  drainTagged(q, 0, 3);
+  REQUIRE(eventually([&] { return successor.attachWriter(); }));
+  pushTagged(successor, 3);
+  drainTagged(q, 3, 4);
+  successor.detachWriter();
+}
+
+TEST_CASE("SpscRing: rejected multi-shard attach preserves the caller fd") {
+  Region multi;
+  Config cfg = smallConfig();
+  cfg.shards = 2;
+  REQUIRE(Region::create(cfg, multi));
+
+  int const fd = multi.fd();
+  REQUIRE(fd >= 0);
+  SpscRing<> rejected;
+  errno = 0;
+  CHECK_FALSE(SpscRing<>::attach(fd, rejected));
+  CHECK(errno == EPROTO);
+  CHECK(fcntl(fd, F_GETFD) >= 0);
+  CHECK(rejected.region().fd() < 0);
+
+  int const probe_fd = dup(fd);
+  REQUIRE(probe_fd >= 0);
+  Region probe;
+  REQUIRE(Region::attach(probe_fd, probe));
+  CHECK(probe.shardCount() == 2);
 }
 
 // ---------------------------------------------------------------------------

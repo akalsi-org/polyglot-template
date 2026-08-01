@@ -124,11 +124,10 @@
 // ============================================================================
 //
 //   * sharding composition is not wired up; this is a standalone ring only.
-//   * There is no model-checked safety argument. The Spin model was written
-//     against the removed in-band ring and is retained, marked as such, at
-//     docs/verification/removed-inband-ring.pml. Its invariants and negative
-//     controls are reusable; its walker rules are not, because this design
-//     legalises walking past an in-flight record.
+//   * The executable model at docs/verification/queue-model.md is bounded
+//     exhaustive evidence, not an unbounded proof. The older Spin model was
+//     written against the removed in-band ring and is retained, marked as such,
+//     at docs/verification/removed-inband-ring.pml.
 
 #include "pgt/core/types.hh"
 #include "pgt/mpsc/api.hh"
@@ -242,8 +241,14 @@ class MpscRing {
   MpscRing() = default;
   explicit MpscRing(Policy policy) noexcept : policy_(std::move(policy)) {}
 
-  MpscRing(MpscRing&&) noexcept = default;
-  MpscRing& operator=(MpscRing&&) noexcept = default;
+  MpscRing(MpscRing&& other) noexcept { moveFrom(std::move(other)); }
+  MpscRing& operator=(MpscRing&& other) noexcept {
+    if (this != &other) {
+      if (reader_attached_) detail::misuseTrap("moving over an attached MpscRing reader");
+      moveFrom(std::move(other));
+    }
+    return *this;
+  }
   MpscRing(MpscRing const&) = delete;
   MpscRing& operator=(MpscRing const&) = delete;
 
@@ -472,6 +477,12 @@ class MpscRing {
     auto rt = readerTidRef();
     u32_t const self = currentTid();
     u32_t cur = rt.load(std::memory_order_acquire);
+    // Idempotent only for this view. The shared ABI stores a TID, not a view
+    // token, so a second object in the same thread must not be allowed to seed a
+    // separate rd_ from the same shared read_pos and split the stream. A future
+    // ABI could add a start-time/token field; this one cannot distinguish a dead
+    // reader from a later kernel TID reuse.
+    if (cur == self && !reader_attached_) return false;
     if (cur != self) {
       if (cur != 0 && threadAlive(cur)) return false;
       if (!rt.compare_exchange_strong(cur, self, std::memory_order_acq_rel,
@@ -479,9 +490,27 @@ class MpscRing {
         return false;
       }
     }
+    reader_attached_ = true;
     rd_ = readPosRef().load(std::memory_order_acquire);
     peek_extent_ = 0;
     return true;
+  }
+
+  // Reader ownership is explicit. Destruction does not silently detach: that
+  // preserves crash/restart semantics, leaving successors to prove TID death.
+  // Voluntary same-thread handoff calls detachReader(); a peeked but unpopped
+  // record remains licensed for at-least-once redelivery because read_pos did
+  // not advance.
+  [[gnu::noinline, gnu::cold]] void detachReader() noexcept {
+    if (!reader_attached_) [[unlikely]]
+      detail::misuseTrap("MpscRing::detachReader by a view that is not attached");
+    u32_t expected = currentTid();
+    if (!readerTidRef().compare_exchange_strong(expected, 0, std::memory_order_acq_rel,
+                                                std::memory_order_relaxed)) {
+      detail::misuseTrap("MpscRing::detachReader by a thread that does not own the reader slot");
+    }
+    reader_attached_ = false;
+    peek_extent_ = 0;
   }
 
   void detachWriter() noexcept {
@@ -527,6 +556,35 @@ class MpscRing {
     result_plane_ = region.resultPlane(shard_index);
     static std::atomic<u64_t> ctr{0};
     epoch_ = ctr.fetch_add(1, std::memory_order_relaxed) + 1;
+  }
+
+  void moveFrom(MpscRing&& other) noexcept {
+    owned_ = std::move(other.owned_);
+    ctl_ = other.ctl_;
+    sc_ = other.sc_;
+    arena_ = other.arena_;
+    claim_plane_ = other.claim_plane_;
+    result_plane_ = other.result_plane_;
+    cap_ = other.cap_;
+    mask_ = other.mask_;
+    cell_mask_ = other.cell_mask_;
+    shift_ = other.shift_;
+    epoch_ = other.epoch_;
+    rd_ = other.rd_;
+    peek_extent_ = other.peek_extent_;
+    reader_attached_ = other.reader_attached_;
+    busy_pos_ = other.busy_pos_;
+    busy_streak_ = other.busy_streak_;
+    busy_threshold_ = other.busy_threshold_;
+    policy_ = std::move(other.policy_);
+
+    other.ctl_ = nullptr;
+    other.sc_ = nullptr;
+    other.arena_ = nullptr;
+    other.claim_plane_ = nullptr;
+    other.result_plane_ = nullptr;
+    other.epoch_ = 0;
+    other.reader_attached_ = false;
   }
 
   [[nodiscard]] u64_t cellOf(u64_t pos) const noexcept { return (pos >> 6) & cell_mask_; }
@@ -712,6 +770,7 @@ class MpscRing {
   u64_t epoch_ = 0;
   u64_t rd_ = 0;
   u64_t peek_extent_ = 0;
+  bool reader_attached_ = false;
 
   static constexpr u32_t kBusyPollsPerLiveness = 128;
   static constexpr u32_t kBusyPollsPerLivenessMax = 1u << 16;
@@ -724,5 +783,7 @@ class MpscRing {
 
 static_assert(QueueLike<MpscRing<DefaultPolicy, false>>);
 static_assert(QueueLike<MpscRing<DefaultPolicy, true>>);
+static_assert(std::atomic_ref<u32_t>::is_always_lock_free);
+static_assert(std::atomic_ref<u64_t>::is_always_lock_free);
 
 }  // namespace pgt::mpsc

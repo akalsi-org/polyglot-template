@@ -43,13 +43,23 @@ def main() -> int:
   variants = sorted({v for v, _ in grouped})
   writers = sorted({w for _, w in grouped})
   stats = {k: quartiles(v) for k, v in grouped.items()}
+  counts = {k: len(v) for k, v in grouped.items()}
 
-  print(f"n per cell: {min(len(v) for v in grouped.values())}")
+  if not grouped:
+    print("no throughput rows")
+    return 0
+
+  print("n per cell:")
+  for (variant, writer_count), values in sorted(grouped.items()):
+    print(f"  {variant} w={writer_count}: {len(values)}")
   header = f"{'writers':>8}" + "".join(f"  {v:>34}" for v in variants)
   print(header)
   for w in writers:
     cells = []
     for v in variants:
+      if (v, w) not in stats:
+        cells.append(f"  {'n/a':>10} [{'':8}, {'':8}]")
+        continue
       lo, med, hi = stats[(v, w)]
       cells.append(f"  {med:>10.4f} [{lo:8.4f}, {hi:8.4f}]")
     print(f"{w:>8}" + "".join(cells))
@@ -58,14 +68,22 @@ def main() -> int:
     print()
     print(f"{'writers':>8}  {'variant':>18}  {'median change':>14}  verdict")
     for w in writers:
+      if (args.baseline, w) not in stats:
+        continue
       blo, bmed, bhi = stats[(args.baseline, w)]
       for v in variants:
         if v == args.baseline:
           continue
+        if (v, w) not in stats:
+          print(f"{w:>8}  {v:>18}  {'n/a':>14}  not run for this writer count")
+          continue
         lo, med, hi = stats[(v, w)]
-        sep = lo > bhi or hi < blo
         change = (med / bmed - 1.0) * 100.0
-        verdict = "IQRs separated" if sep else "IQRs OVERLAP: no measured difference"
+        if min(counts[(args.baseline, w)], counts[(v, w)]) < 2:
+          verdict = "single sample: smoke only, no interval"
+        else:
+          sep = lo > bhi or hi < blo
+          verdict = "IQRs separated" if sep else "IQRs OVERLAP: no measured difference"
         print(f"{w:>8}  {v:>18}  {change:>+13.2f}%  {verdict}")
   return 0
 
