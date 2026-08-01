@@ -732,6 +732,11 @@ TEST_CASE("liveness under fd exhaustion: live reads alive, dead still reads dead
   std::atomic<u32_t> dead_tid{0};
   std::thread reaped([&] { dead_tid.store(currentTid()); });
   reaped.join();
+  // join() proves C++ completion before the kernel must finish removing the
+  // task. Establish that the fd-free oracle has converged before making /proc
+  // unavailable, or the intentional unknown-is-alive fallback can win this
+  // teardown race.
+  REQUIRE(eventually([&] { return existenceProbeSaysGone(dead_tid.load()); }));
 
   // Exhaust the descriptor table. Lower RLIMIT_NOFILE first: on a host with a
   // large limit, opening until natural exhaustion takes long enough that the
