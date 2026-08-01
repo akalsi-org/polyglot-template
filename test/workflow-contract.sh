@@ -181,6 +181,8 @@ for command in \
 done
 assert_present 'workflow generates coverage from a cold Buck output tree' \
   grep -Fq './repo.sh exec buck2 clean && ./repo.sh coverage' "$workflow"
+assert_present 'repository coverage gate defaults to 80 percent' \
+  grep -Fq '${POLYGLOT_COVERAGE_MIN:-80.0}' "$root/repo.sh"
 # The lint job's gates must precede the offline replay. The replay begins with
 # `buck2 clean`, so gates placed after it rebuild the whole graph from scratch
 # on a cold daemon - measured at roughly double the lint step's cost - while

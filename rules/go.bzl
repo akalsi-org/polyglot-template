@@ -378,6 +378,7 @@ def _go_test_impl(ctx: AnalysisContext) -> list[Provider]:
       primary = cov_file,
       tool = None,
       gcnos = None,
+      headers = None,
       toolchain_dir = None,
     ))
   return providers

@@ -51,9 +51,35 @@ def _merge_counts(counts, file, line, hit):
   file_counts[line] = max(file_counts.get(line, 0), hit)
 
 
+def _cxx_header_map(entry):
+  header_map = {}
+  for header in entry.get("headers", []):
+    physical = os.path.normpath(header)
+    logical = physical
+    lib_prefix = "cpp/lib/"
+    if logical.startswith(lib_prefix):
+      logical = logical[len(lib_prefix):]
+    header_map[logical] = physical
+  return header_map
+
+
+def _normalize_cxx_source(path, header_map):
+  if path.startswith("/"):
+    return None
+  if path.startswith("buck-out/"):
+    marker = "__include_tree__/"
+    marker_index = path.find(marker)
+    if marker_index == -1:
+      return None
+    logical = os.path.normpath(path[marker_index + len(marker):])
+    return header_map.get(logical)
+  return os.path.normpath(path)
+
+
 def _process_cxx_gcov(entry, counts, scratch_root):
   gcda_dir = entry["primary"]
   gcov_bin = os.path.abspath(entry["tool"])
+  header_map = _cxx_header_map(entry)
   for gcno in entry["gcnos"]:
     if not gcno.endswith(".gcno"):
       continue
@@ -98,8 +124,9 @@ def _process_cxx_gcov(entry, counts, scratch_root):
         with gzip.open(os.path.join(work, name), "rt") as f:
           data = json.load(f)
         for file_entry in data["files"]:
-          path = file_entry["file"]
-          if path.startswith("/") or path.startswith("buck-out/"):
+          raw_path = file_entry["file"]
+          path = _normalize_cxx_source(raw_path, header_map)
+          if path is None:
             # Toolchain/system headers get dropped two ways: gcc's own
             # implicit search dirs (libstdc++, ...) yield ABSOLUTE paths,
             # while the vendored doctest.h under the extracted toolchain
@@ -109,10 +136,9 @@ def _process_cxx_gcov(entry, counts, scratch_root):
             # text but not this repo's own source and not stable (it
             # embeds a config-hash-bearing buck-out path). Neither belongs
             # in "every path in the merged lcov is repo source" (see this
-            # module's docstring), so both prefixes are dropped here. This
-            # repo's own sources are always compiled with a plain
-            # repo-relative src arg (e.g. "cpp/lib/example/example.cc"),
-            # which starts with neither prefix.
+            # module's docstring), so both prefixes are dropped here. Buck
+            # include-tree paths are accepted only when the logical suffix
+            # maps to a first-party header declared by this test target.
             continue
           for line in file_entry["lines"]:
             _merge_counts(counts, path, line["line_number"], line.get("count", 0))

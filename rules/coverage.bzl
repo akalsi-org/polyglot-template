@@ -92,6 +92,13 @@ CoverageInfo = provider(fields = [
   # decode it - see tools/coverage_merge.py).
   "gcnos",
 
+  # cxx_gcov only: list[Artifact], the first-party headers reachable by the
+  # test. GCC records headers included through Buck's symlinked include trees
+  # under a buck-out path; the merger uses this declared mapping to recover
+  # their canonical repository paths without admitting generated/toolchain
+  # files into coverage.
+  "headers",
+
   # cxx_gcov only: Artifact, the extracted gcc-musl toolchain dir (kept
   # alongside `tool` for the same reason rules/cxx.bzl's _toolchain_tools
   # keeps `dir` alongside its .project()ed paths - a toolchain binary
@@ -106,6 +113,8 @@ def _entry_for(name, info):
     entry["tool"] = info.tool
   if info.gcnos != None:
     entry["gcnos"] = info.gcnos
+  if info.headers != None:
+    entry["headers"] = info.headers
   return entry
 
 def _hidden_for(info):
@@ -114,6 +123,8 @@ def _hidden_for(info):
     hidden.append(info.tool)
   if info.gcnos != None:
     hidden += info.gcnos
+  if info.headers != None:
+    hidden += info.headers
   if info.toolchain_dir != None:
     hidden.append(info.toolchain_dir)
   return hidden

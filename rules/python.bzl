@@ -506,7 +506,7 @@ def _py_test_impl(ctx: AnalysisContext) -> list[Provider]:
   ]
   if ctx.attrs._coverage_enabled:
     lcov = _py_test_coverage_action(ctx, gcc, py, srcs, roots, start)
-    providers.append(CoverageInfo(kind = "python_lcov", primary = lcov, tool = None, gcnos = None, toolchain_dir = None))
+    providers.append(CoverageInfo(kind = "python_lcov", primary = lcov, tool = None, gcnos = None, headers = None, toolchain_dir = None))
   return providers
 
 _py_test_rule = rule(

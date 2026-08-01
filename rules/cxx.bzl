@@ -502,6 +502,7 @@ def _cxx_test_impl(ctx: AnalysisContext) -> list[Provider]:
       primary = gcov_dir,
       tool = tools.gcov,
       gcnos = gcnos,
+      headers = _flatten_tset(hdrs),
       toolchain_dir = tools.dir,
     ))
   return providers

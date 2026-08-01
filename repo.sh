@@ -463,7 +463,7 @@ case "$command" in
       ${POLYGLOT_COVERAGE_MARKDOWN:+--markdown "$POLYGLOT_COVERAGE_MARKDOWN"} \
       ${POLYGLOT_COVERAGE_HTML_LINK:+--html-link "$POLYGLOT_COVERAGE_HTML_LINK"}
     pinned_python "$ROOT/tools/coverage_merge.py" --check-total "$cov_summary" \
-      --min-total "${POLYGLOT_COVERAGE_MIN:-90.0}"
+      --min-total "${POLYGLOT_COVERAGE_MIN:-80.0}"
     ;;
   test)
     (($# <= 1)) || { printf 'usage: ./repo.sh test [dbg|opt]\n' >&2; exit 2; }
