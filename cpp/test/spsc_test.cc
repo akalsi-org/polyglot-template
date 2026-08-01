@@ -12,7 +12,7 @@
 
 #include "pgt/core/platform.hh"
 #include "pgt/mpsc/desc.hh"
-#include "pgt/mpsc/queue.hh"
+#include "pgt/mpsc/spsc_ring.hh"
 #include "pgt/mpsc/region.hh"
 
 #include <doctest/doctest.h>
@@ -45,6 +45,16 @@ struct Deadline {
     std::chrono::steady_clock::now() + std::chrono::seconds(60);
   [[nodiscard]] bool expired() const { return std::chrono::steady_clock::now() > end; }
 };
+
+template <typename F>
+bool eventually(F&& f) {
+  auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (!f()) {
+    if (std::chrono::steady_clock::now() >= deadline) return false;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  return true;
+}
 
 Config tinyConfig(u32_t shards) {
   Config cfg;
@@ -84,9 +94,9 @@ Config smallConfig() {
   return cfg;
 }
 
-TEST_CASE("Spsc: direct short commit and zero-length write") {
-  Spsc q;
-  REQUIRE(Spsc::create(smallConfig(), q));
+TEST_CASE("SpscRing: direct short commit and zero-length write") {
+  SpscRing<> q;
+  REQUIRE(SpscRing<>::create(smallConfig(), q));
   REQUIRE(q.attachWriter());
   REQUIRE(q.attachReader());
 
@@ -129,9 +139,35 @@ TEST_CASE("Spsc: direct short commit and zero-length write") {
 // Region.
 // ---------------------------------------------------------------------------
 
-TEST_CASE("Spsc: differential with boundary sizes 0, 1, kGrain-8, kGrain") {
-  Spsc q;
-  REQUIRE(Spsc::create(tinyConfig(1), q));
+TEST_CASE("SpscRing live reader cannot be displaced") {
+  SpscRing<> q;
+  REQUIRE(SpscRing<>::create(smallConfig(), q));
+
+  std::atomic<bool> attached{false};
+  std::atomic<bool> release{false};
+  std::thread incumbent([&] {
+    SpscRing<> r1(q.region(), 0);
+    REQUIRE(r1.attachReader());
+    attached.store(true, std::memory_order_release);
+    while (!release.load(std::memory_order_acquire)) std::this_thread::yield();
+  });
+  while (!attached.load(std::memory_order_acquire)) std::this_thread::yield();
+
+  SpscRing<> challenger(q.region(), 0);
+  CHECK_FALSE(challenger.attachReader());  // refused: the incumbent is alive
+
+  release.store(true, std::memory_order_release);
+  incumbent.join();
+
+  // join proves C++ completion, but kernel TID liveness can converge later. A
+  // failed attach only observes shared ownership, so one successor may retry.
+  SpscRing<> successor(q.region(), 0);
+  REQUIRE(eventually([&] { return successor.attachReader(); }));
+}
+
+TEST_CASE("SpscRing: differential with boundary sizes 0, 1, kGrain-8, kGrain") {
+  SpscRing<> q;
+  REQUIRE(SpscRing<>::create(tinyConfig(1), q));
   std::thread wt([&] {
     REQUIRE(q.attachWriter());
     Deadline dl;
@@ -163,12 +199,12 @@ TEST_CASE("Spsc: differential with boundary sizes 0, 1, kGrain-8, kGrain") {
 }
 
 // The exact bug that escaped every compile-time check last week: reader_tid is
-// queue-wide, Sharded attaches ring by ring, and rings 1..K-1 saw "a live
+// queue-wide, the former shard composition attaches ring by ring, and rings 1..K-1 saw "a live
 // reader" -- the caller itself -- and failed.
 
-TEST_CASE("standalone Spsc rejects inherited writer ownership") {
-  Spsc q;
-  REQUIRE(Spsc::create(smallConfig(), q));
+TEST_CASE("standalone SpscRing<> rejects inherited writer ownership") {
+  SpscRing<> q;
+  REQUIRE(SpscRing<>::create(smallConfig(), q));
   REQUIRE(q.attachWriter());
 
   WriteSpan const s = q.reserve(16);
@@ -195,9 +231,9 @@ TEST_CASE("standalone Spsc rejects inherited writer ownership") {
 // The admission test is `need > max_need_`, which zero passes trivially because
 // zero is small. A zero extent also violates the encoding contract that an
 // extent is never zero, and a reader advancing by zero does not terminate.
-TEST_CASE("Spsc declines unrepresentable lengths and never yields a zero extent") {
-  Spsc q;
-  REQUIRE(Spsc::create(smallConfig(), q));
+TEST_CASE("SpscRing<> declines unrepresentable lengths and never yields a zero extent") {
+  SpscRing<> q;
+  REQUIRE(SpscRing<>::create(smallConfig(), q));
   REQUIRE(q.attachWriter());
   REQUIRE(q.attachReader());
 
@@ -232,9 +268,9 @@ TEST_CASE("Spsc declines unrepresentable lengths and never yields a zero extent"
 // PROVEN dead, which cannot be arranged for the calling thread. What is under
 // test is that ownsWriter() consults the generation at all -- if it does, an
 // incarnation change invalidates this view and the misuse trap fires.
-TEST_CASE("Spsc ownership is fenced by the slot generation, not just the tid") {
-  Spsc q;
-  REQUIRE(Spsc::create(smallConfig(), q));
+TEST_CASE("SpscRing<> ownership is fenced by the slot generation, not just the tid") {
+  SpscRing<> q;
+  REQUIRE(SpscRing<>::create(smallConfig(), q));
   REQUIRE(q.attachWriter());
   REQUIRE(q.attachReader());
 
@@ -248,8 +284,8 @@ TEST_CASE("Spsc ownership is fenced by the slot generation, not just the tid") {
   // child traps on the tid check whether or not the generation is consulted at
   // all. It reported a mutant with the generation check deleted as caught.
   int const st = runExpectingAbort([&] {
-    Spsc c;
-    if (!Spsc::create(smallConfig(), c)) _exit(9);
+    SpscRing<> c;
+    if (!SpscRing<>::create(smallConfig(), c)) _exit(9);
     if (!c.attachWriter()) _exit(9);
     std::byte local[24];
     std::memset(local, 0x44, sizeof local);

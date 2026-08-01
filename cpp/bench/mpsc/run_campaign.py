@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-VARIANTS = ("two-plane", "two-plane-padded", "spsc")
+VARIANTS = ("mpsc", "mpsc-padded", "spsc")
 WRITERS = (1, 2, 4, 8)
 
 

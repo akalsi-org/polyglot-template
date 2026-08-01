@@ -1,4 +1,4 @@
-// In-process tests for the two-plane MPSC queue (pgt::mpsc::TwoPlaneRing),
+// In-process tests for the two-plane MPSC queue (pgt::mpsc::MpscRing),
 // the surviving multi-producer variant. Structure and conventions:
 //
 //  * every queue test uses a SMALL capacity and pushes many capacities of data,
@@ -16,13 +16,13 @@
 // benchmarked.
 //
 // Fork-based fault injection (killed / stopped writers) lives in
-// two_plane_fault_test.cc so this file stays runnable under TSan. Unlike Ring,
+// mpsc_ring_fault_test.cc so this file stays runnable under TSan. Unlike in-band queue,
 // this variant has NO in-band descriptor, so the "stale walker probes plain
 // payload bytes" race is structurally absent and needs no suppression.
 
 #include "pgt/mpsc/desc.hh"
 #include "pgt/mpsc/liveness.hh"
-#include "pgt/mpsc/two_plane.hh"
+#include "pgt/mpsc/mpsc_ring.hh"
 
 #include <doctest/doctest.h>
 
@@ -43,8 +43,8 @@ namespace {
 using namespace pgt;
 using namespace pgt::mpsc;
 
-using TwoPlaneCompact = TwoPlaneMpsc;
-using TwoPlanePadded = TwoPlaneMpscPadded;
+using MpscCompact = MpscRing<>;
+using MpscPadded = MpscRing<DefaultPolicy, true>;
 
 class ReferenceQueue {
  public:
@@ -72,6 +72,16 @@ struct Deadline {
   [[nodiscard]] bool expired() const { return std::chrono::steady_clock::now() > end; }
 };
 
+template <typename F>
+bool eventually(F&& f) {
+  auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (!f()) {
+    if (std::chrono::steady_clock::now() >= deadline) return false;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  return true;
+}
+
 std::byte patternByte(u32_t writer, u32_t seq, sz_t i) {
   return static_cast<std::byte>(writer * 151u + seq * 29u + static_cast<u32_t>(i) * 7u + 3u);
 }
@@ -86,12 +96,12 @@ Config smallConfig() {
 // Layout arithmetic. These are the numbers the design rests on, so they are
 // asserted rather than left to prose.
 // ---------------------------------------------------------------------------
-TEST_CASE("two-plane layout arithmetic") {
+TEST_CASE("MpscRing layout arithmetic") {
   // No in-band header: a payload that is a multiple of the grain packs exactly,
-  // which is the case Ring's 8-byte header costs a whole extra grain.
+  // which is the case in-band queue's 8-byte header costs a whole extra grain.
   CHECK(tpExtentFor(0) == kGrain);  // never zero: a zero extent breaks the walk
   CHECK(tpExtentFor(1) == kGrain);
-  CHECK(tpExtentFor(64) == kGrain);  // Ring needs 128 here
+  CHECK(tpExtentFor(64) == kGrain);  // in-band queue needs 128 here
   CHECK(tpExtentFor(65) == 2 * kGrain);
   CHECK(tpExtentFor(128) == 2 * kGrain);
 
@@ -105,16 +115,16 @@ TEST_CASE("two-plane layout arithmetic") {
   }
 
   // Metadata: 8 bytes of Claim + 16 bytes of Result per 64-byte payload grain.
-  CHECK(TwoPlaneCompact::metadataRatio() == doctest::Approx(0.375));
-  CHECK(TwoPlanePadded::metadataRatio() == doctest::Approx(2.0));
+  CHECK(MpscCompact::metadataRatio() == doctest::Approx(0.375));
+  CHECK(MpscPadded::metadataRatio() == doctest::Approx(2.0));
 }
 
 // ---------------------------------------------------------------------------
 // Differential against the reference, single writer, exact byte-stream compare,
 // with arbitrary short commits and boundary sizes, wrapping many times.
 // ---------------------------------------------------------------------------
-TEST_CASE_TEMPLATE("two-plane differential vs reference with short commits", Q, TwoPlaneCompact,
-                   TwoPlanePadded) {
+TEST_CASE_TEMPLATE("MpscRing differential vs reference with short commits", Q, MpscCompact,
+                   MpscPadded) {
   Q q;
   REQUIRE(Q::create(smallConfig(), q));
   REQUIRE(q.attachReader());
@@ -167,8 +177,8 @@ TEST_CASE_TEMPLATE("two-plane differential vs reference with short commits", Q, 
 // Multi-writer integrity and PER-WRITER FIFO. Nothing here asserts cross-writer
 // order (that is a variant property, checked separately below).
 // ---------------------------------------------------------------------------
-TEST_CASE_TEMPLATE("two-plane multi-writer integrity and per-writer FIFO", Q, TwoPlaneCompact,
-                   TwoPlanePadded) {
+TEST_CASE_TEMPLATE("MpscRing multi-writer integrity and per-writer FIFO", Q, MpscCompact,
+                   MpscPadded) {
   constexpr u32_t kWriters = 4;
   constexpr u32_t kPerWriter = 4000;
 
@@ -225,7 +235,7 @@ TEST_CASE_TEMPLATE("two-plane multi-writer integrity and per-writer FIFO", Q, Tw
 // ---------------------------------------------------------------------------
 // Zero-length records survive a wrap and stay distinguishable from "empty".
 // ---------------------------------------------------------------------------
-TEST_CASE_TEMPLATE("two-plane zero-length records", Q, TwoPlaneCompact, TwoPlanePadded) {
+TEST_CASE_TEMPLATE("MpscRing zero-length records", Q, MpscCompact, MpscPadded) {
   Q q;
   REQUIRE(Q::create(smallConfig(), q));
   REQUIRE(q.attachReader());
@@ -246,8 +256,8 @@ TEST_CASE_TEMPLATE("two-plane zero-length records", Q, TwoPlaneCompact, TwoPlane
 // irreversible state change, and a declined reserve must leave the queue able
 // to deliver everything already accepted.
 // ---------------------------------------------------------------------------
-TEST_CASE_TEMPLATE("two-plane full boundary declines without side effects", Q, TwoPlaneCompact,
-                   TwoPlanePadded) {
+TEST_CASE_TEMPLATE("MpscRing full boundary declines without side effects", Q, MpscCompact,
+                   MpscPadded) {
   Q q;
   REQUIRE(Q::create(smallConfig(), q));
   REQUIRE(q.attachReader());
@@ -304,8 +314,7 @@ TEST_CASE_TEMPLATE("two-plane full boundary declines without side effects", Q, T
 // abort() publishes a void record: it is skipped, the next record still begins
 // at the full reserved extent, and nothing is lost around it.
 // ---------------------------------------------------------------------------
-TEST_CASE_TEMPLATE("two-plane abort skips exactly the reservation", Q, TwoPlaneCompact,
-                   TwoPlanePadded) {
+TEST_CASE_TEMPLATE("MpscRing abort skips exactly the reservation", Q, MpscCompact, MpscPadded) {
   Q q;
   REQUIRE(Q::create(smallConfig(), q));
   REQUIRE(q.attachReader());
@@ -339,16 +348,16 @@ TEST_CASE_TEMPLATE("two-plane abort skips exactly the reservation", Q, TwoPlaneC
 // before or after its own claim CAS, never atomically with it, so a ticket
 // stream can legitimately disagree with the claim stream. What is observable --
 // per-writer FIFO, no loss, no duplication, no tearing -- is checked above, and
-// that is the same line the existing Ring suite draws.
+// that is the same line the existing in-band queue suite draws.
 
 // ---------------------------------------------------------------------------
 // A writer holding a reservation across arbitrary user code must NOT block
 // other writers' claims -- only the reader. This is the property the two-plane
 // walk buys by allowing a walker to advance past an in-flight record, and it is
-// the one behaviour that differs observably from Ring.
+// the one behaviour that differs observably from in-band queue.
 // ---------------------------------------------------------------------------
-TEST_CASE_TEMPLATE("two-plane in-flight record does not block later claims", Q, TwoPlaneCompact,
-                   TwoPlanePadded) {
+TEST_CASE_TEMPLATE("MpscRing in-flight record does not block later claims", Q, MpscCompact,
+                   MpscPadded) {
   Q q;
   REQUIRE(Q::create(smallConfig(), q));
   REQUIRE(q.attachReader());
@@ -409,8 +418,7 @@ TEST_CASE_TEMPLATE("two-plane in-flight record does not block later claims", Q, 
 // about the READER dying rather than a writer, and it needs a second view over
 // the same planes rather than a fork.
 // ---------------------------------------------------------------------------
-TEST_CASE_TEMPLATE("two-plane reader restart resumes at read_pos", Q, TwoPlaneCompact,
-                   TwoPlanePadded) {
+TEST_CASE_TEMPLATE("MpscRing reader restart resumes at read_pos", Q, MpscCompact, MpscPadded) {
   Q q;
   REQUIRE(Q::create(smallConfig(), q));
   REQUIRE(q.attachWriter());
@@ -451,10 +459,12 @@ TEST_CASE_TEMPLATE("two-plane reader restart resumes at read_pos", Q, TwoPlaneCo
   });
   first.join();
 
-  // Replacement reader: must resume at 10, not 11. The peek did not retire it.
+  // join proves C++ completion, but kernel TID liveness can converge later. A
+  // failed attach only observes shared ownership, so one successor may retry.
+  // Replacement reader must resume at 10, not 11: the peek did not retire it.
   Q r2;
   REQUIRE(Q::createView(q, r2));
-  REQUIRE(r2.attachReader());
+  REQUIRE(eventually([&] { return r2.attachReader(); }));
   for (u32_t t = 10; t < kRecords; ++t) {
     ReadSpan r = r2.peek();
     auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
@@ -477,8 +487,7 @@ TEST_CASE_TEMPLATE("two-plane reader restart resumes at read_pos", Q, TwoPlaneCo
 // The incumbent must be a genuinely different live thread: attachReader() is
 // deliberately idempotent for the SAME thread (`cur != self`), so attaching two
 // views from one thread proves nothing and would pass vacuously.
-TEST_CASE_TEMPLATE("two-plane live reader cannot be displaced", Q, TwoPlaneCompact,
-                   TwoPlanePadded) {
+TEST_CASE_TEMPLATE("MpscRing live reader cannot be displaced", Q, MpscCompact, MpscPadded) {
   Q q;
   REQUIRE(Q::create(smallConfig(), q));
 
@@ -501,10 +510,11 @@ TEST_CASE_TEMPLATE("two-plane live reader cannot be displaced", Q, TwoPlaneCompa
   release.store(true, std::memory_order_release);
   incumbent.join();
 
-  // Once the incumbent is genuinely dead, takeover is permitted.
+  // join proves C++ completion, but kernel TID liveness can converge later. A
+  // failed attach only observes shared ownership, so one successor may retry.
   Q successor;
   REQUIRE(Q::createView(q, successor));
-  CHECK(successor.attachReader());
+  REQUIRE(eventually([&] { return successor.attachReader(); }));
 }
 
 // ---------------------------------------------------------------------------
@@ -522,8 +532,8 @@ TEST_CASE_TEMPLATE("two-plane live reader cannot be displaced", Q, TwoPlaneCompa
 // The fix checks representability BEFORE rounding, because rounding destroys
 // the evidence that the request was too large.
 // ---------------------------------------------------------------------------
-TEST_CASE_TEMPLATE("two-plane declines unrepresentable lengths without lying", Q, TwoPlaneCompact,
-                   TwoPlanePadded) {
+TEST_CASE_TEMPLATE("MpscRing declines unrepresentable lengths without lying", Q, MpscCompact,
+                   MpscPadded) {
   Q q;
   REQUIRE(Q::create(smallConfig(), q));
   REQUIRE(q.attachWriter());
@@ -556,8 +566,7 @@ TEST_CASE_TEMPLATE("two-plane declines unrepresentable lengths without lying", Q
 
 // The bound must be TIGHT, not merely safe: rejecting everything would pass the
 // test above while breaking the queue.
-TEST_CASE_TEMPLATE("two-plane still admits every representable size", Q, TwoPlaneCompact,
-                   TwoPlanePadded) {
+TEST_CASE_TEMPLATE("MpscRing still admits every representable size", Q, MpscCompact, MpscPadded) {
   Q q;
   REQUIRE(Q::create(smallConfig(), q));
   REQUIRE(q.attachWriter());
@@ -593,8 +602,8 @@ TEST_CASE_TEMPLATE("two-plane still admits every representable size", Q, TwoPlan
 // only way to test it deterministically, and the forged state is exactly what a
 // kill in that window leaves behind.
 // ---------------------------------------------------------------------------
-TEST_CASE_TEMPLATE("two-plane: the successor of a kClaimed record is not claimable", Q,
-                   TwoPlaneCompact, TwoPlanePadded) {
+TEST_CASE_TEMPLATE("MpscRing: the successor of a kClaimed record is not claimable", Q, MpscCompact,
+                   MpscPadded) {
   // This is the invariant that lets recovery promote unconditionally, and it is
   // what the in-band ring got for free by blocking the walk entirely.
   //
@@ -634,7 +643,7 @@ TEST_CASE_TEMPLATE("two-plane: the successor of a kClaimed record is not claimab
   });
   owner.join();
   REQUIRE(reserved.load());
-  REQUIRE_FALSE(threadAlive(dead_tid.load()));
+  REQUIRE(eventually([&] { return !threadAlive(dead_tid.load()); }));
 
   u64_t const extent = tpExtentFor(sizeof abuf);
   u64_t const p = 0, qpos = p + extent;
@@ -752,8 +761,8 @@ TEST_CASE("liveness under fd exhaustion: live reads alive, dead still reads dead
 // Also forged, and for the same reason: the window is two adjacent stores inside
 // finishClaim(). Note the fault suite does NOT cover this branch -- killing a
 // child after reserve() returns leaves kCleared, not kClaimed.
-TEST_CASE_TEMPLATE("two-plane recovery promotes a successor the dead owner never reached", Q,
-                   TwoPlaneCompact, TwoPlanePadded) {
+TEST_CASE_TEMPLATE("MpscRing recovery promotes a successor the dead owner never reached", Q,
+                   MpscCompact, MpscPadded) {
   Q q;
   REQUIRE(Q::create(smallConfig(), q));
   REQUIRE(q.attachReader());
@@ -861,11 +870,11 @@ TEST_CASE_TEMPLATE("two-plane recovery promotes a successor the dead owner never
 // Left here, skipped, so the counterexample is not lost. Remove the skip when a
 // viable fix lands; it should then pass unmodified.
 // ---------------------------------------------------------------------------
-TEST_CASE("two-plane: a cell left stale for more than one lap does not strand the ring") {
+TEST_CASE("MpscRing: a cell left stale for more than one lap does not strand the ring") {
   Config cfg;
   cfg.capacity = 4096;
-  TwoPlaneCompact q;
-  REQUIRE(TwoPlaneCompact::create(cfg, q));
+  MpscCompact q;
+  REQUIRE(MpscCompact::create(cfg, q));
   REQUIRE(q.attachReader());
   REQUIRE(q.attachWriter());
 
@@ -874,7 +883,7 @@ TEST_CASE("two-plane: a cell left stale for more than one lap does not strand th
   auto claim_at = [&](u64_t pos) {
     u64_t const c = (pos / kGrain) & (cells - 1);
     return std::atomic_ref<u64_t>(
-      *reinterpret_cast<u64_t*>(r.claimPlane(0) + c * TwoPlaneCompact::kClaimStride));
+      *reinterpret_cast<u64_t*>(r.claimPlane(0) + c * MpscCompact::kClaimStride));
   };
   std::vector<std::byte> buf(4096, std::byte{0x5a});
   auto push_drain = [&](sz_t n) {

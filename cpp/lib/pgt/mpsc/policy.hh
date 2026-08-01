@@ -21,7 +21,7 @@
 // the coherence traffic these queues are built to avoid. Counters must be
 // thread-local and aggregated at teardown.
 
-#include "../core/types.hh"
+#include "pgt/core/types.hh"
 
 #if defined(__x86_64__)
 #include <emmintrin.h>
@@ -79,7 +79,7 @@ struct BaselinePolicy {
 };
 
 // The promoted production policy: post-success successor prefetch plus the
-// explicit 1/2/4/8 CAS-failure pause ladder in Ring. The inherited contention
+// explicit 1/2/4/8 CAS-failure pause ladder in MPSC ring. The inherited contention
 // hook must stay empty or it would add a ninth pause to that ladder.
 struct DefaultPolicy : BaselinePolicy {
   // The explicit 1/2/4/8 CAS-failure pause ladder, owned by the queue rather

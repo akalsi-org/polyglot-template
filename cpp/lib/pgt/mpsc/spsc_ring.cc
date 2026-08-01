@@ -1,4 +1,4 @@
-#include "../mpsc/queue.hh"
+#include "../mpsc/spsc_ring.hh"
 
 // The variants are templates over their policy, so the definitions live in the
 // header. This TU pins the default instantiations and checks the contract, so
@@ -12,6 +12,5 @@ template class SpscRing<BackoffPolicy>;
 
 static_assert(QueueLike<SpscRing<DefaultPolicy>>);
 static_assert(QueueLike<SpscRing<BackoffPolicy>>);
-static_assert(QueueLike<Spsc>);
 
 }  // namespace pgt::mpsc

@@ -1,10 +1,10 @@
-// Benchmarks for the surviving queues: TwoPlaneRing and SpscRing.
+// Benchmarks for the surviving queues: MpscRing and SpscRing.
 //
 // NOT part of the doctest unit-test path -- build and run by hand:
 //
 //   g++ -std=c++20 -O2 -DNDEBUG -march=x86-64-v3 -mtune=generic -mprfchw
 //       -Wall -Wextra -I cpp/lib
-//       cpp/bench/mpsc/bench_queue.cc cpp/lib/pgt/mpsc/queue.cc
+//       cpp/bench/mpsc/bench_queue.cc cpp/lib/pgt/mpsc/spsc_ring.cc
 //       cpp/lib/pgt/mpsc/region.cc cpp/lib/pgt/mpsc/policy.cc
 //       -lpthread -o bench_queue         (one command line)
 //   /tmp/bench_queue <mode> [args]      (run with no args for usage)
@@ -39,8 +39,8 @@
 #error "bench_queue must be built with -DNDEBUG; -O2 alone does not define it"
 #endif
 
-#include "pgt/mpsc/queue.hh"
-#include "pgt/mpsc/two_plane.hh"
+#include "pgt/mpsc/spsc_ring.hh"
+#include "pgt/mpsc/mpsc_ring.hh"
 
 #include <linux/perf_event.h>
 #include <pthread.h>
@@ -398,9 +398,9 @@ u64_t touchPayload(ReadSpan const& payload) {
 }
 
 template <bool Padded, typename PolicyT = DefaultPolicy>
-RunResult benchTwoPlane(sz_t capacity, unsigned writers, double secs, sz_t payload,
-                        PolicyT policy = {}) {
-  using Q = TwoPlaneRing<PolicyT, Padded>;
+RunResult benchMpsc(sz_t capacity, unsigned writers, double secs, sz_t payload,
+                    PolicyT policy = {}) {
+  using Q = MpscRing<PolicyT, Padded>;
   Q q(policy);
   if (!Q::create(Config{.capacity = capacity}, q)) {
     std::fprintf(stderr, "region create failed\n");
@@ -424,10 +424,10 @@ RunResult benchTwoPlane(sz_t capacity, unsigned writers, double secs, sz_t paylo
 // is measured against rather than a competitor: one writer, wait-free, and the
 // reader sweeps one ring.
 RunResult benchSpsc(sz_t capacity, double secs, sz_t payload) {
-  Spsc q;
+  SpscRing<> q;
   Config cfg;
   cfg.capacity = capacity;
-  if (!Spsc::create(cfg, q)) {
+  if (!SpscRing<>::create(cfg, q)) {
     std::fprintf(stderr, "region create failed\n");
     std::exit(1);
   }
@@ -503,10 +503,10 @@ void report(char const* name, unsigned writers, sz_t payload, RunResult r) {
 int usage() {
   std::fprintf(stderr,
                "usage: bench_queue <mode> [args]\n"
-               "  throughput   two-plane|two-plane-padded|spsc <writers> <secs>\n"
-               "  counters     two-plane|two-plane-padded|spsc <writers> <secs>\n"
+               "  throughput   mpsc|mpsc-padded|spsc <writers> <secs>\n"
+               "  counters     mpsc|mpsc-padded|spsc <writers> <secs>\n"
                "               adds per-thread coherence counters and the fairness ratio\n"
-               "  latency      two-plane|two-plane-padded|spsc <writers> <secs>\n"
+               "  latency      mpsc|mpsc-padded|spsc <writers> <secs>\n"
                "  sizes        <secs>    payload size sweep, one writer\n");
   return 1;
 }
@@ -519,10 +519,10 @@ template <typename Report>
 int dispatch(std::string const& variant, unsigned writers, double secs, Report&& report) {
   constexpr sz_t kCap = 1u << 20;
   constexpr sz_t kPayload = 56;
-  if (variant == "two-plane") {
-    report("two-plane", benchTwoPlane<false>(kCap, writers, secs, kPayload));
-  } else if (variant == "two-plane-padded") {
-    report("two-plane-padded", benchTwoPlane<true>(kCap, writers, secs, kPayload));
+  if (variant == "mpsc") {
+    report("mpsc", benchMpsc<false>(kCap, writers, secs, kPayload));
+  } else if (variant == "mpsc-padded") {
+    report("mpsc-padded", benchMpsc<true>(kCap, writers, secs, kPayload));
   } else if (variant == "spsc") {
     // One writer by construction; a request for more is a usage error rather
     // than something to silently clamp.
@@ -551,7 +551,7 @@ int main(int argc, char** argv) {
     double const s = argc > 2 ? std::atof(argv[2]) : 0;
     if (s <= 0) return usage();
     for (sz_t n : {8u, 56u, 120u, 248u, 1016u, 4088u}) {
-      report("two-plane", 1, n, benchTwoPlane<false>(1u << 20, 1, s, n));
+      report("mpsc", 1, n, benchMpsc<false>(1u << 20, 1, s, n));
     }
     return 0;
   }

@@ -4,84 +4,51 @@
 //
 // Two variants survive:
 //
-//   TwoPlaneRing  many writers on one arena, one reader, total order across all
-//                 writers (two_plane.hh). Arbitration, publication, and payload
-//                 live on SEPARATE cache lines: a Claim cell carries ownership,
-//                 a Result cell carries completion, and the payload is touched
-//                 only by its owner and then the reader. Claim-by-CAS on the
-//                 self-certifying FREE(p) word; reader-only recovery gated on
-//                 proven death.
+//   MpscRing  many writers on one arena, one reader, total order across all
+//             writers (mpsc_ring.hh). Arbitration, publication, and payload
+//             live on separate cache lines: a Claim cell carries ownership, a
+//             Result cell carries completion, and only the owner then reader
+//             touch payload. Claims use self-certifying FREE(p) words; reader-
+//             only recovery is gated on proven death.
 //
-//   SpscRing      ONE writer on one arena. No claim arbitration: reserve is a
-//                 plain store, so it is WAIT-FREE rather than lock-free. The
-//                 tail is a publication cursor, so the reader never observes an
-//                 incomplete record and there is NO recovery protocol at all --
-//                 a dead writer's ring simply idles. Fastest, weakest ordering.
+//   SpscRing  one writer on one arena. With no claim arbitration, reserve is a
+//             plain store and wait-free. Its tail is a publication cursor, so
+//             the reader never observes an incomplete record and a dead writer's
+//             ring simply idles.
 //
-// The in-band shared ring (`Ring`/`Mpsc`) and the `Sharded` composition over it
-// (`ShardedMpsc`, `MultiSpsc`) were REMOVED. `Ring` put the descriptor in the
-// same cache line as the first 56 payload bytes, so the claim CAS, the owner's
-// payload writes, and the reader's poll all contended for one line; measured on
-// Zen 5 it lost roughly 80% of throughput across the 2->4 writer step and fell
-// to 0.04 IPC at eight writers. TwoPlaneRing replaces it rather than tuning it:
-// the residual cost was the line sharing, not the claim instruction.
+// The removed in-band queue and its sharded compositions placed a descriptor in
+// the payload's first cache line. Claim, payload writes, and reader polling then
+// contended for that line. MpscRing replaces that layout by separating the three
+// jobs, rather than tuning the old claim path.
 //
-// Ordering is the axis they differ on, and it is a property of the variant
-// rather than of the API. Nothing here promises a total order; consult the
-// variant.
+// Ordering is a property of the selected variant; this common API does not
+// promise a total order.
 //
 // SELECTION
 //
-//   Single producer                  -> Spsc. Nothing else is close; it does no
-//                                       arbitration at all.
-//   Two or more producers            -> TwoPlaneMpsc.
-//   Metadata footprint is critical   -> Spsc if the topology allows it;
-//                                       TwoPlaneRing costs 24 bytes of Claim +
-//                                       Result per 64 bytes of ring (37.5%).
+//   Single producer                  -> SpscRing<>.
+//   Two or more producers            -> MpscRing<>.
+//   Metadata footprint is critical   -> SpscRing<> if topology allows it;
+//                                       MpscRing<> costs 24 metadata bytes per
+//                                       64 payload bytes (37.5%).
 //
-// MEASURED, Zen 5, 56-byte payloads, 25 interleaved processes per point, medians
-// (see docs/mpsc-queue.md for intervals and method):
+// REGISTRATION ASYMMETRY
 //
-//   writers               1       2       4       8      16
-//   TwoPlaneMpsc       41.9    39.9    36.8    15.5     9.7   Mrec/s
-//   misses/record       1.3     1.4     1.7     3.2     5.3
-//   IPC                1.30    1.35    1.35    1.28    1.33
+//   MpscRing<>  no registration. Any thread may write; attachWriter() cannot
+//               fail. Writers are unbounded.
+//   SpscRing<>  exclusive registration enforces one writer. A second thread's
+//               attachWriter() fails rather than silently adding a writer;
+//               maxWriters() == 1.
 //
-// The design does not scale UP -- one total order still means one successful
-// claim per record -- but it degrades gracefully instead of collapsing. The
-// padded cell layout (TwoPlaneMpscPadded) is SLOWER above two writers despite
-// its 200% metadata cost: giving every cell its own line spreads the working set
-// further than it saves in false sharing. Compact is the default for that
-// reason, and the padded layout is retained only as a measurement control.
+// SpscRing<> enforces, rather than merely documents, its single-writer contract:
+// two writers could otherwise silently corrupt the queue. Its cold-path slot
+// claim lives in Region's shared writer registry, so it also holds cross-process.
 //
-// Machine load is the dominant error term in any of these numbers: an earlier
-// campaign run while other processes compiled was wrong by 3.5x and inverted a
-// headline result. Re-measure on a quiet box before trusting any change.
-//
-// REGISTRATION ASYMMETRY, which is a real difference callers must handle:
-//
-//   TwoPlaneMpsc  no registration. Any thread may write; attachWriter() cannot
-//                 fail. Writers are unbounded.
-//   Spsc          registration is EXCLUSIVE and ENFORCES the single-writer
-//                 contract: a second thread's attachWriter() FAILS rather than
-//                 silently creating a second writer. maxWriters() == 1.
-//
-// Spsc enforcing rather than merely documenting its contract is deliberate. Two
-// writers on an SPSC ring is the one misuse that silently corrupts -- the whole
-// algorithm (no claim CAS, publication-cursor semantics, no recovery path) rests
-// on sole ownership. A cold-path slot claim, arbitrated through the Region's
-// SHARED writer registry so it holds cross-process, turns that into a detected
-// failure for free.
-//
-// maxWriters() bounds LIVE writers, not attach() successes over a lifetime. A
-// writer that exits releases its ring: once its owner is provably dead AND the
-// ring has drained, the slot is recycled and a new writer may claim it. So a
-// maxWriters() bounds LIVE writers, not attach() successes over a lifetime: a
-// slot freed by a departed writer is reusable, so a bounded queue admits new
-// writers indefinitely as old ones leave. Only Spsc has a writer capacity, and
-// it is 1. TwoPlaneRing reports kUnboundedWriters.
+// maxWriters() bounds live writers, not lifetime attach successes. A slot from a
+// proven-dead writer is reusable after its ring drains. SpscRing<> has capacity
+// one; MpscRing<> reports kUnboundedWriters.
 
-#include "../core/types.hh"
+#include "pgt/core/types.hh"
 
 #include <cstddef>
 #include <span>
@@ -141,11 +108,11 @@ struct Config {
   bool preallocate = true;
 
   // Metadata-plane geometry for the split control/data-plane variant
-  // (TwoPlaneRing). Zero -- the default -- means no planes, and the region
+  // (MpscRing). Zero -- the default -- means no planes, and the region
   // layout is then byte-identical to what the in-band variants have always
-  // used, so `Ring` and the SPSC rings are unaffected.
+  // used, so `in-band queue` and the SPSC rings are unaffected.
   //
-  // Set by TwoPlaneRing::create() from its own compile-time strides. It lives
+  // Set by MpscRing::create() from its own compile-time strides. It lives
   // in Config rather than being inferred because the compact and padded layouts
   // differ only in stride, and the region has to size the file before any queue
   // object exists.
@@ -171,7 +138,7 @@ enum class Status : u8_t {
   kFull,        // backpressure; retry later
   kReaderDead,  // no reader will ever drain: a definite error, not backpressure
   kTooLarge,    // exceeds what this configuration can ever hold
-  kNoSlot,      // writer registration failed (the Spsc slot is taken)
+  kNoSlot,      // writer registration failed (the SpscRing slot is taken)
 };
 
 // Writer capacity of a variant with no registration limit.

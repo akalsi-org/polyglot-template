@@ -7,19 +7,18 @@ cxx_library(
   name = "mpsc",
   srcs = [
     "policy.cc",
-    "queue.cc",
+    "spsc_ring.cc",
     "region.cc",
   ],
   hdrs = [
     "api.hh",
     "desc.hh",
+    "detail.hh",
     "liveness.hh",
+    "mpsc_ring.hh",
     "policy.hh",
-    "queue.hh",
     "region.hh",
-    # EXPERIMENTAL split control/data-plane variant. A separate type; no
-    # existing variant depends on it.
-    "two_plane.hh",
+    "spsc_ring.hh",
   ],
   deps = ["//cpp/lib/pgt/core:pgt_core"],
   visibility = ["//cpp/..."],

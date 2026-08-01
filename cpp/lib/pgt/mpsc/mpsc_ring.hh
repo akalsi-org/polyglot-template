@@ -1,14 +1,13 @@
 #pragma once
 
-// EXPERIMENTAL: two-plane (split control/data) variant of the shared-ring MPSC
-// queue. `TwoPlaneRing` is a SEPARATE type from `Ring`; nothing here changes any
-// existing variant, encoding, or test.
+// Many-producer, single-consumer mirrored ring. MpscRing separates claim,
+// publication, and payload storage; it replaces the removed in-band MPSC queue.
 //
 // ============================================================================
 // Why
 // ============================================================================
 //
-// `Ring` collapses three unrelated jobs onto one cache line. A record's 8-byte
+// `in-band queue` collapses three unrelated jobs onto one cache line. A record's 8-byte
 // in-band descriptor shares its line with the first 56 bytes of its own
 // payload, so:
 //
@@ -21,7 +20,7 @@
 //
 //   Claim[M]    arbitration and recoverable ownership. 8 bytes per 64-byte
 //               payload grain. Claimed by exact CAS from a self-certifying
-//               FREE(p) word -- the SAME encoding `Ring` uses, unchanged.
+//               FREE(p) word -- the SAME encoding `in-band queue` uses, unchanged.
 //   Result[M]   a SEPARATE array (not interleaved with Claim). 16 bytes per
 //               grain: {committed length, self-certifying commit tag}. The
 //               reader polls here; the owner writes it once, after the payload
@@ -46,12 +45,12 @@
 // gate, and the reader's whole published state stays the single `read_pos` word
 // -- so reader restart still needs nothing new.
 //
-// Lap reuse is defeated exactly as `Ring` defeats it: the FREE word carries the
+// Lap reuse is defeated exactly as `in-band queue` defeats it: the FREE word carries the
 // unwrapped position (`freeWord`, desc.hh), so FREE(p) != FREE(p + kN), and the
 // commit tag carries the same unwrapped position.
 //
 // ============================================================================
-// What changes relative to Ring, and what does not
+// What changes relative to in-band queue, and what does not
 // ============================================================================
 //
 // DELETED
@@ -60,7 +59,7 @@
 //     extra grain.
 //   * the short-commit trailer. The Claim word keeps the FULL reserved extent
 //     forever; Result carries the actual length. The reader delivers n bytes
-//     and advances by the reserved extent -- which is what `Ring`'s trailer
+//     and advances by the reserved extent -- which is what `in-band queue`'s trailer
 //     amounted to anyway, since a trailer never freed the suffix early.
 //   * the walker's "kClaimed blocks the walk" rule. See below; this is the
 //     change with the most upside.
@@ -72,16 +71,16 @@
 //     frontier -- doing so would make FREE(p) common instead of unique and
 //     would trade Lemma 1 for a much weaker "the hint never leads" argument.
 //     The frontier is created by the PREDECESSOR's promotion store, exactly as
-//     in `Ring`, so at most one reachable cell reads FREE for its own position.
+//     in `in-band queue`, so at most one reachable cell reads FREE for its own position.
 //   * the kCleared vouch. It has exactly one remaining consumer: reader
 //     recovery, which must know whether a dead owner got as far as promoting
 //     its successor cell. It is now a second store to the line the claim CAS
-//     just took exclusively, instead of `Ring`'s store to a cold payload line.
+//     just took exclusively, instead of `in-band queue`'s store to a cold payload line.
 //   * reader-only recovery, gated on proven death via /proc. No timeouts.
 //   * the +kGrain admission slack, so effective capacity is directly
-//     comparable with `Ring` in a benchmark.
+//     comparable with `in-band queue` in a benchmark.
 //
-// WALKING PAST AN IN-FLIGHT RECORD IS NOW LEGAL. In `Ring` a walker meeting
+// WALKING PAST AN IN-FLIGHT RECORD IS NOW LEGAL. In `in-band queue` a walker meeting
 // kClaimed must restart, because the successor slot may still hold stale
 // PAYLOAD -- arbitrary bytes that can decode as anything. Here the successor
 // cell is a Claim cell, and the only values it can hold are well-formed claim
@@ -101,7 +100,7 @@
 // that to 200%.
 //
 // Against that, deleting the in-band header gives capacity back for payloads
-// that are multiples of 64: a 64-byte payload costs 128 bytes of ring in `Ring`
+// that are multiples of 64: a 64-byte payload costs 128 bytes of ring in `in-band queue`
 // and 64 + 24 = 88 here.
 //
 // ============================================================================
@@ -121,10 +120,10 @@
 //   read_pos store / load                       release / acquire
 //
 // ============================================================================
-// Prototype limitations, stated rather than implied
+// Design limitations, stated rather than implied
 // ============================================================================
 //
-//   * Sharded composition is not wired up; this is a standalone ring only.
+//   * sharding composition is not wired up; this is a standalone ring only.
 //   * There is no model-checked safety argument. The Spin model was written
 //     against the removed in-band ring and is retained, marked as such, at
 //     docs/verification/removed-inband-ring.pml. Its invariants and negative
@@ -136,7 +135,7 @@
 #include "pgt/mpsc/desc.hh"
 #include "pgt/mpsc/liveness.hh"
 #include "pgt/mpsc/policy.hh"
-#include "pgt/mpsc/queue.hh"
+#include "pgt/mpsc/detail.hh"
 #include "pgt/mpsc/region.hh"
 
 #include <pthread.h>
@@ -235,20 +234,20 @@ inline constexpr sz_t kTpMaxPayload = static_cast<sz_t>(kMaxExtent);
 // stores false-share. Which wins is a measurement, not a deduction -- both are
 // built and both are benchmarked.
 template <typename Policy = DefaultPolicy, bool Padded = false>
-class TwoPlaneRing {
+class MpscRing {
  public:
   static constexpr u64_t kClaimStride = Padded ? 64 : sizeof(u64_t);
   static constexpr u64_t kResultStride = Padded ? 64 : sizeof(ResultCell);
 
-  TwoPlaneRing() = default;
-  explicit TwoPlaneRing(Policy policy) noexcept : policy_(std::move(policy)) {}
+  MpscRing() = default;
+  explicit MpscRing(Policy policy) noexcept : policy_(std::move(policy)) {}
 
-  TwoPlaneRing(TwoPlaneRing&&) noexcept = default;
-  TwoPlaneRing& operator=(TwoPlaneRing&&) noexcept = default;
-  TwoPlaneRing(TwoPlaneRing const&) = delete;
-  TwoPlaneRing& operator=(TwoPlaneRing const&) = delete;
+  MpscRing(MpscRing&&) noexcept = default;
+  MpscRing& operator=(MpscRing&&) noexcept = default;
+  MpscRing(MpscRing const&) = delete;
+  MpscRing& operator=(MpscRing const&) = delete;
 
-  [[nodiscard]] static bool create(Config const& cfg, TwoPlaneRing& out) noexcept {
+  [[nodiscard]] static bool create(Config const& cfg, MpscRing& out) noexcept {
     Config c = cfg;
     c.shards = 1;
     c.plane_claim_stride = kClaimStride;
@@ -265,7 +264,7 @@ class TwoPlaneRing {
   // The stride check is not defensive padding -- a compact binary attaching to
   // a padded region (or the reverse) would index the Claim plane with the wrong
   // stride and silently read a neighbouring record's ownership word.
-  [[nodiscard]] static bool attach(int fd, TwoPlaneRing& out) noexcept {
+  [[nodiscard]] static bool attach(int fd, MpscRing& out) noexcept {
     // Attach to a DUPLICATE, never to the caller's descriptor.
     //
     // Region::attach takes ownership on success and closes on destruction, so
@@ -305,7 +304,7 @@ class TwoPlaneRing {
   //
   // The view takes a FRESH epoch, so a thread holding a reservation on the
   // owner is correctly seen as holding it on a different binding.
-  [[nodiscard]] static bool createView(TwoPlaneRing& owner, TwoPlaneRing& out) noexcept {
+  [[nodiscard]] static bool createView(MpscRing& owner, MpscRing& out) noexcept {
     if (owner.arena_ == nullptr || owner.claim_plane_ == nullptr) return false;
     out.bind(owner.owned_, 0);
     return true;
@@ -315,12 +314,12 @@ class TwoPlaneRing {
 
   PGT_MPSC_HOT inline WriteSpan reserve(sz_t n) noexcept {
     WriterTls& t = tls_;
-    assert(t.p == kInvalidPos && "reserve while a reservation is held");
+    assert(t.p == detail::kInvalidPos && "reserve while a reservation is held");
     if (t.owner_epoch != epoch_) [[unlikely]] {
-      if (t.p != kInvalidPos) [[unlikely]]
-        misuseTrap("reserve while holding a reservation on another two-plane ring");
+      if (t.p != detail::kInvalidPos) [[unlikely]]
+        detail::misuseTrap("reserve while holding a reservation on another MpscRing");
       t.owner_epoch = epoch_;
-      t.read_cache = 0;  // conservative in the SAFE direction; see Ring
+      t.read_cache = 0;  // conservative in the SAFE direction; see in-band queue
     }
     if (t.tid == 0) [[unlikely]] {
       registerAtfork();
@@ -333,7 +332,7 @@ class TwoPlaneRing {
       t.status = Status::kTooLarge;
       return {};
     }
-    // Same fast path as Ring, and sound for the same reason: the CAS's expected
+    // Same fast path as in-band queue, and sound for the same reason: the CAS's expected
     // value is freeWord(p), so success proves p was the frontier by content
     // alone. No preliminary load, and the failure value is never reused.
     u64_t const p = hintRef().load(std::memory_order_acquire);
@@ -353,14 +352,14 @@ class TwoPlaneRing {
 
   void commit(WriteSpan reservation, sz_t actual_n) noexcept {
     WriterTls& t = tls_;
-    if (t.p == kInvalidPos) [[unlikely]]
-      misuseTrap("commit without a live reservation (double commit?)");
+    if (t.p == detail::kInvalidPos) [[unlikely]]
+      detail::misuseTrap("commit without a live reservation (double commit?)");
     if (t.owner_epoch != epoch_) [[unlikely]]
-      misuseTrap("commit on a queue this thread holds no reservation on");
+      detail::misuseTrap("commit on a queue this thread holds no reservation on");
     if (reservation.data() != arena_ + (t.p & mask_) || reservation.size() != t.n)
-      misuseTrap("commit with a span other than the live reservation");
+      detail::misuseTrap("commit with a span other than the live reservation");
     if (actual_n > t.n) [[unlikely]]
-      misuseTrap("committed payload exceeds the reservation");
+      detail::misuseTrap("committed payload exceeds the reservation");
     assert(currentTid() == tidOf(t.word) && "commit across fork or from wrong thread");
     // The Claim word is NOT touched: it keeps the full reserved extent, which
     // is the boundary every walker and the reader advance by. Only Result
@@ -370,19 +369,19 @@ class TwoPlaneRing {
     std::atomic_ref<u64_t>(cell.tag).store(commitTag(t.p),
                                            std::memory_order_release);  // publishes the payload
     policy_.onCommit(t.p, t.need);
-    t.p = kInvalidPos;  // poison
+    t.p = detail::kInvalidPos;  // poison
   }
 
   void abort() noexcept {
     WriterTls& t = tls_;
-    if (t.p == kInvalidPos) [[unlikely]]
-      misuseTrap("abort without a live reservation (double abort?)");
+    if (t.p == detail::kInvalidPos) [[unlikely]]
+      detail::misuseTrap("abort without a live reservation (double abort?)");
     if (t.owner_epoch != epoch_) [[unlikely]]
-      misuseTrap("abort on a queue this thread holds no reservation on");
+      detail::misuseTrap("abort on a queue this thread holds no reservation on");
     assert(currentTid() == tidOf(t.word) && "abort across fork or from wrong thread");
     claimRef(t.p).store(withState(t.word, State::kAborted), std::memory_order_release);
     policy_.onAbort(t.p, t.need);
-    t.p = kInvalidPos;  // poison
+    t.p = detail::kInvalidPos;  // poison
   }
 
   bool write(void const* data, sz_t n) noexcept {
@@ -416,7 +415,7 @@ class TwoPlaneRing {
         return {arena_ + (rd_ & mask_), n};
       }
       // Liveness stays OFF the busy path, and is SPACED rather than timed --
-      // identical doctrine and identical constants to Ring.
+      // identical doctrine and identical constants to in-band queue.
       if (rd_ != busy_pos_) {
         busy_pos_ = rd_;
         busy_streak_ = 0;
@@ -486,7 +485,7 @@ class TwoPlaneRing {
   }
 
   void detachWriter() noexcept {
-    if (tls_.p != kInvalidPos && tls_.owner_epoch == epoch_) abort();
+    if (tls_.p != detail::kInvalidPos && tls_.owner_epoch == epoch_) abort();
   }
 
   [[nodiscard]] Region const& region() const noexcept { return owned_; }
@@ -499,7 +498,7 @@ class TwoPlaneRing {
 
  private:
   struct WriterTls {
-    u64_t p = kInvalidPos;
+    u64_t p = detail::kInvalidPos;
     u64_t need = 0;
     u64_t n = 0;
     u64_t word = 0;
@@ -559,7 +558,7 @@ class TwoPlaneRing {
   }
 
   // Promote the successor cell RECYCLED-or-stale -> FREE(q). Exclusive by the
-  // same argument as Ring's stampSuccessorFree: q cannot be claimed until this
+  // same argument as in-band queue's stampSuccessorFree: q cannot be claimed until this
   // store lands (a claim needs the exact freeWord(q)), q cannot be recycled
   // while this record is uncommitted (I3), and the admission slack guarantees
   // cell(q) is not still owned by a live record of the previous lap.
@@ -589,11 +588,11 @@ class TwoPlaneRing {
     // record reads kClaimed only between the promotion and this store -- two
     // stores, closed before reserve() returns -- rather than for the whole
     // caller-controlled reservation. Without it the guard would block a
-    // successor for the reservation's lifetime, which is Ring's behaviour and
-    // Ring's collapse.
+    // successor for the reservation's lifetime, which is in-band queue's behaviour and
+    // in-band queue's collapse.
     //
     // Note this store lands on the line the CAS above already holds Modified,
-    // unlike Ring's cold successor line.
+    // unlike in-band queue's cold successor line.
     claimRef(p).store(withState(mine, State::kCleared), std::memory_order_release);  // vouch (I2)
     hintRef().store(q, std::memory_order_release);
     tls_.p = p;
@@ -645,7 +644,7 @@ class TwoPlaneRing {
         }
         prev_claimed = (s == kTpClaimed);
         // kClaimed / kCleared / kAborted all carry a full extent, and unlike
-        // Ring a kClaimed record does NOT block the walk: the successor cell
+        // in-band queue a kClaimed record does NOT block the walk: the successor cell
         // holds a well-formed claim word (this lap's or an older one), never
         // raw payload, and Lemma 1 still makes a bad claim impossible.
         {
@@ -688,40 +687,12 @@ class TwoPlaneRing {
   // record, not a recoverable one.
   [[gnu::noinline, gnu::cold]] void recover(u64_t p, u64_t w) noexcept {
     if ((w & kStateMask) == kTpClaimed) {
-      // kClaimed does NOT mean "never promoted". finishClaim() promotes the
-      // successor and only THEN vouches, so Claim[p] reads kClaimed across the
-      // promotion; an owner killed in that window leaves p == kClaimed with q
-      // ALREADY promoted. Because walkers may advance past kClaimed, another
-      // writer can legally have claimed q by now. The store this used to do
-      // unconditionally destroyed that writer's committed record.
-      //
-      // Three cases, and exactly one of them may be written:
-      //
-      //   observed == freeWord(q)   the owner did promote and nobody claimed it.
-      //                             Already correct; leave it alone.
-      //   current-lap claim         the owner promoted AND a live writer owns q.
-      //                             Writing here loses a committed record and
-      //                             lets a third writer reuse live bytes.
-      //   stale older-lap word      the owner died before promoting. Promote, or
-      //                             the frontier never appears and the ring wedges.
-      //
-      // "non-FREE means a CURRENT-lap claim" holds by construction, because the
-      // reader stamps a retirement marker into every cell it retires (see pop()).
-      // A cell is non-FREE only if a claim landed on it AND the reader has not
-      // passed it -- and the reader is at p, behind q. Anything from an earlier
-      // lap was retired and stamped back to FREE; anything never claimed is
-      // still zero, which is also FREE.
-      //
-      // An earlier attempt used a lap-parity bit here and was WRONG: cells
-      // interior to a large record are skipped for a whole lap, so a stale word
-      // can be two or more laps old and the parity comes back around.
-      // Reproduced in three laps; see the regression test. No counter width
-      // fixes this -- a stable record layout skips the same cells forever.
-      // Unconditional, and sound: no walker may claim the successor of a record
-      // it observed kClaimed (see reserveSlow), and this record has been
-      // kClaimed since its CAS. So cell(q) is either freeWord(q) already -- the
-      // owner promoted before dying, and this store is a no-op -- or a stale
-      // word nobody owns.
+      // Unconditional and sound: no walker may claim the successor of a record
+      // it observed kClaimed (see reserveSlow), and this record has held that
+      // state since its claim CAS. Cell(q) is therefore either freeWord(q)
+      // already, if the owner promoted before dying, or a stale word nobody
+      // owns. Classification schemes based on lap parity, retirement stamps,
+      // and chain following are rejected in docs/mpsc-queue.md.
       promoteSuccessor(p + extentOf(w));
     }
     claimRef(p).store(withState(w, State::kAborted), std::memory_order_release);
@@ -744,19 +715,14 @@ class TwoPlaneRing {
 
   static constexpr u32_t kBusyPollsPerLiveness = 128;
   static constexpr u32_t kBusyPollsPerLivenessMax = 1u << 16;
-  u64_t busy_pos_ = kInvalidPos;
+  u64_t busy_pos_ = detail::kInvalidPos;
   u32_t busy_streak_ = 0;
   u32_t busy_threshold_ = kBusyPollsPerLiveness;
 
   [[no_unique_address]] Policy policy_{};
 };
 
-// Aliases. TwoPlaneMpsc is the compact layout; TwoPlaneMpscPadded gives every
-// Claim and Result cell its own cache line.
-using TwoPlaneMpsc = TwoPlaneRing<DefaultPolicy, false>;
-using TwoPlaneMpscPadded = TwoPlaneRing<DefaultPolicy, true>;
-
-static_assert(QueueLike<TwoPlaneMpsc>);
-static_assert(QueueLike<TwoPlaneMpscPadded>);
+static_assert(QueueLike<MpscRing<DefaultPolicy, false>>);
+static_assert(QueueLike<MpscRing<DefaultPolicy, true>>);
 
 }  // namespace pgt::mpsc

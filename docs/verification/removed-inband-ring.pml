@@ -1,8 +1,8 @@
 /*
  * MODELS A REMOVED IMPLEMENTATION.
  *
- * This is the Promela model of the in-band shared ring (`Ring`/`Mpsc`), which
- * was deleted in favour of TwoPlaneRing. It is retained because the invariants
+ * This is the Promela model of the removed in-band queue, superseded by
+ * MpscRing. It is retained because the invariants
  * and the negative controls are reusable, NOT because it verifies anything that
  * currently ships.
  *
@@ -15,7 +15,7 @@
 /*
  * Spin model of the variable-length MPSC byte queue (mpsc-algorithm.md, r3).
  *
- * Abstraction: 64-byte units -> "slots". Ring has R slots. Positions are
+ * Abstraction: 64-byte units -> "slots". in-band queue has R slots. Positions are
  * unwrapped monotonic; physical slot = pos % R, so pos and pos+R alias the
  * SAME descriptor word (the lap-ABA source).
  *

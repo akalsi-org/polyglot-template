@@ -5,15 +5,15 @@ mapped) ring so a record crossing the physical end is still one contiguous span.
 
 | variant | producers | ordering | arbitration | recovery |
 |---|---|---|---|---|
-| `TwoPlaneMpsc` | many | total across all writers | CAS on a Claim cell | reader-only, on proven death |
-| `Spsc` | one | per-writer FIFO | none (wait-free) | none needed |
+| `MpscRing<>` | many | total across all writers | CAS on a Claim cell | reader-only, on proven death |
+| `SpscRing<>` | one | per-writer FIFO | none (wait-free) | none needed |
 
-**The in-band shared ring (`Ring`/`Mpsc`) and the `Sharded` composition over it
-(`ShardedMpsc`, `MultiSpsc`) have been removed.** `Ring` placed its 8-byte
-descriptor at the head of the record, so the descriptor shared a cache line with
-the first 56 payload bytes. The claim CAS wanted that line exclusive, the owner's
-payload writes wanted it exclusive, and the reader's commit poll pulled it
-shared — three actors, three access patterns, one line, per record. Measured on
+**The in-band queue and its sharded compositions have been removed.** That queue
+placed its 8-byte descriptor at the head of the record, so the descriptor shared
+a cache line with the first 56 payload bytes. The claim CAS wanted that line
+exclusive, the owner's payload writes wanted it exclusive, and the reader's
+commit poll pulled it shared — three actors, three access patterns, one line,
+per record. Measured on
 Zen 5 it lost ~80% of throughput across the 2→4 writer step and reached 0.04 IPC
 at eight writers, with 33 coherence misses per record.
 
@@ -35,7 +35,7 @@ against a 70–80% cliff. The residual cost was the line sharing itself.
   evidence of death; there are no timeouts in the protocol.
 * Arbitrary short commit: reserve N, commit any n ≤ N. The reader delivers n
   bytes and advances by the full reserved extent.
-* Per-writer FIFO; `TwoPlaneMpsc` additionally gives a total order.
+* Per-writer FIFO; `MpscRing<>` additionally gives a total order.
 
 ## Memory layout
 
@@ -146,8 +146,8 @@ eliminate sharing between a descriptor and its own payload; see
 
 ## Descriptor
 
-Eight bytes, holding a record's state, extent, and owner. In `TwoPlaneMpsc` this
-word is a **Claim cell** in the control plane; in `Spsc` it is the in-band record
+Eight bytes, holding a record's state, extent, and owner. In `MpscRing<>` this
+word is a **Claim cell** in the control plane; in `SpscRing<>` it is the in-band record
 header. The encoding is shared because the recovery and lap-ABA arguments are the
 same in both. `state` occupies the
 low bits in every encoding so it can be decoded before anything else.
@@ -163,8 +163,7 @@ low bits in every encoding so it can be decoded before anything else.
     bits  3..28   size          reservation extent, 64-byte units (4 GiB)
     bits 29..34   remainder     committed length mod 64
     bits 35..56   tid           owning thread (22 bits; PID_MAX_LIMIT is 2^22)
-    bit  57       lap parity    kLapShift; separates current-lap claim from stale prior-lap word
-    bits 58..63   reserved
+    bits 57..63   reserved
 ```
 
 `pos >> 6` needs exactly 58 bits for a 64-bit position space, and bits 3..60 provide
@@ -353,12 +352,12 @@ Metadata cost is 8 + 16 = **24 bytes per 64 bytes of ring, 37.5%**.
         otherwise             -> spaced liveness check (see Recovery)
 ```
 
-The reader touches the payload line **only after** acquiring the tag. In `Ring`
+The reader touches the payload line **only after** acquiring the tag. In `in-band queue`
 it polled that line throughout the owner's window.
 
 ### Walking past an in-flight record is legal
 
-In `Ring`, a walker meeting `CLAIMED` had to restart: the successor slot might
+In `in-band queue`, a walker meeting `CLAIMED` had to restart: the successor slot might
 still hold arbitrary payload bytes, which can decode as anything. Here the
 successor is a Claim cell, and the only values it can ever hold are well-formed
 claim words — this lap's or an earlier lap's. A walker advancing on a stale word
@@ -368,7 +367,7 @@ hop cap and ends in a restart.
 
 This is why a live writer holding a reservation across arbitrary user code no
 longer stalls every other writer — only the reader. It is also where the fairness
-difference comes from: in `Ring` a writer behind an in-flight record stayed
+difference comes from: in `in-band queue` a writer behind an in-flight record stayed
 behind, giving min/max records-per-writer of 0.32 at two writers; two-plane
 measures 0.96 on the same pinning.
 
@@ -413,24 +412,27 @@ classify was the answer.
 ### Recovery
 
 ```
-  Result tag absent -> spaced by OBSERVATION COUNT, never by time
-        threadAlive(owner)  alive -> keep waiting, widen the spacing
+  Result tag absent -> space liveness checks by OBSERVATION COUNT, never time
+        threadAlive(owner)  alive -> keep waiting, widening the spacing
                             dead  -> RE-READ Result first
                                        committed -> deliver it, never recover
                                        in flight -> if CLAIMED:
-                                                    conditionally promote successor q
-                                                      (if !promoted && !live_claim via bit 57 lap parity)
+                                                    promote successor q
                                                     Claim[p] = ABORTED [release]
 ```
 
-The re-read after the liveness verdict is mandatory: between the load and the
-`/proc` check the owner can have committed *and* died, so both the Claim word and
-the Result tag are stale snapshots. A committed record must be delivered, never
-recovered. When recovering an in-flight `CLAIMED` record, `recover()` checks whether
-successor `q = p + extent` requires promotion. Using bit 57 (`kLapShift`) lap parity,
-it distinguishes a stale prior-lap word from a live current-lap claim (`live_claim`).
-If `q` is neither already promoted (`freeWord(q)`) nor owned by a live current-lap claim,
-`recover()` conditionally promotes `q` to `freeWord(q)` via CAS before writing `Claim[p] = ABORTED`.
+The re-read after the liveness verdict is mandatory: between the first load and
+`/proc` check the owner can have committed and died, so stale Claim and Result
+snapshots must not be recovered. A committed record is delivered.
+
+For an in-flight `kClaimed` record, recovery promotes `q = p + extent`
+unconditionally before marking `p` aborted. This is safe because a walker may
+walk past a `kClaimed` record but may not claim its immediate successor. A dead
+record recovered while still `kClaimed` has held that state since its claim CAS,
+so no writer can own `q`: it is either already `freeWord(q)` from the owner's
+promotion or a stale word left when the owner died before promoting. The
+successor-blocking invariant removes any need to classify `q` using lap parity,
+retirement markers, or chain following.
 
 ## Memory ordering
 
@@ -451,7 +453,7 @@ If `q` is neither already promoted (`freeWord(q)`) nor owned by a live current-l
 Both planes are sized into the same memfd as the arena, covered by the same
 `ftruncate`, `fallocate`, and seals. `Control` records the plane strides so an
 attaching process can reconstruct the layout from the descriptor alone.
-`TwoPlaneRing::attach(fd)` refuses a region whose cell layout differs from the
+`MpscRing::attach(fd)` refuses a region whose cell layout differs from the
 binary's — a compact binary attaching to a padded region would index the Claim
 plane with the wrong stride and read a neighbouring record's ownership word.
 
@@ -465,7 +467,7 @@ interleaved independent processes per point, medians:
 
 | writers | 1 | 2 | 4 | 8 | 16 |
 |---|---:|---:|---:|---:|---:|
-| `TwoPlaneMpsc` Mrec/s | 41.9 | 39.9 | 36.8 | 15.5 | 9.7 |
+| `MpscRing<>` Mrec/s | 41.9 | 39.9 | 36.8 | 15.5 | 9.7 |
 | misses / record | 1.3 | 1.4 | 1.7 | 3.2 | 5.3 |
 | IPC | 1.30 | 1.35 | 1.35 | 1.28 | 1.33 |
 | fairness (min/max) | 1.00 | 0.96 | 0.82 | 0.50 | 0.79 |
@@ -473,7 +475,7 @@ interleaved independent processes per point, medians:
 It does not scale *up* — one total order still means one successful claim per
 record — but it degrades gracefully instead of collapsing.
 
-`TwoPlaneMpscPadded` (one cell per 64-byte line, 200% metadata) is **slower**
+`MpscRing<DefaultPolicy, true>` (one cell per 64-byte line, 200% metadata) is **slower**
 above two writers: spreading the working set across more lines costs more than
 the false sharing it removes. Compact is the default; padded is retained as a
 measurement control.
@@ -499,11 +501,11 @@ measurement control.
 
 ## Verification status
 
-* `two_plane_test.cc` — differential against a mutex-guarded reference with short
+* `mpsc_ring_test.cc` — differential against a mutex-guarded reference with short
   commits, multi-writer integrity and per-writer FIFO, zero-length records, full
   boundary, abort, in-flight non-blocking, reader restart, live-reader
   displacement. Both cell layouts instantiated everywhere.
-* `two_plane_fault_test.cc` — fork-based: killed mid-reservation, recovery
+* `mpsc_ring_fault_test.cc` — fork-based: killed mid-reservation, recovery
   promotes the successor cell, committed-then-dead delivered rather than
   reclaimed, repeated kills across wraps, stopped writer never reclaimed,
   stopped writer blocks the reader but not other writers, cross-process attach by
@@ -518,7 +520,7 @@ measurement control.
   against a deliberately broken implementation, built from a single snapshot copy
   so a concurrent edit cannot shift the baseline.
 * **ThreadSanitizer: clean**, 17 cases / 3,055,434 assertions, 3/3 repeat runs,
-  with NO suppression file. The suppressions that `Ring` required covered one
+  with NO suppression file. The suppressions that `in-band queue` required covered one
   class -- a stale walker's atomic probe landing on bytes concurrently serving as
   another record's payload, which is inherent to an in-band descriptor. This
   design has no in-band descriptor, so that class is structurally absent and the
@@ -542,12 +544,12 @@ measurement control.
   negative controls are reusable; its walker rules are not, because two-plane
   legalises walking past an in-flight record. Until it is rewritten, this design
   rests on tests alone.
-* **Resolved defect: `recover()` successor overwrite hazard.** The race where an owner killed between successor promotion and vouching could leave `p == kClaimed` with `q` promoted—allowing a second writer to claim `q` and then having `recover()` overwrite that live claim—has been resolved. Bit 57 (`kLapShift` in `desc.hh`) now tracks lap parity in non-FREE descriptor words, and `TwoPlaneRing::recover()` (`two_plane.hh`) performs a conditional promotion checking `!promoted && !live_claim` before updating successor `q` to `freeWord(q)` via CAS.
+* **Resolved defect: recovery now relies on successor blocking.** A walker may walk past `kClaimed` but cannot claim its immediate successor, so `MpscRing::recover()` in `mpsc_ring.hh` can promote that successor unconditionally before marking the dead record aborted.
 * `threadAlive()` (`liveness.hh`) safely defaults to returning `true` (ALIVE) on resource errors (such as `EMFILE`, `ENFILE`, `EACCES`, or `EINTR` retries), adhering to the false-ALIVE safety doctrine. `existenceProbeSaysGone()` (`sched_getscheduler`, no fd required) returning `ESRCH` and `ENOENT` (from `/proc/<tid>/stat`) are the only conditions that prove a thread is DEAD.
 * Writer-death paths are covered by fork-based tests but NOT by TSan or by the
   in-process stress suite, which is why writer-death recovery paths require standalone
   fork-based testing.
-* `Sharded` composition is not wired up; `TwoPlaneRing` is a standalone
+* `sharded` composition is not wired up; `MpscRing` is a standalone
   single-shard ring.
 * The mutant that overlays the planes on the payload arena is caught by hanging
   rather than by a clean assertion — a weaker signal than the others.

@@ -18,11 +18,9 @@ namespace pgt::mpsc {
 namespace {
 
 inline constexpr u64_t kMagic = 0x7067'745f'6d70'7363ull;  // "pgt_mpsc"
-// Bumped to 2 when the claim word gained a lap-parity bit (desc.hh kLapShift).
-// A v1 region's claim words have that bit clear regardless of lap, so a v2
-// reader would mistake stale previous-lap words for current-lap claims and
-// decline to promote a successor -- wedging the ring rather than corrupting it,
-// but wedging it silently. Refusing the attach is the honest outcome.
+// Version 2 added Claim/Result plane geometry to Control. A v1 header cannot
+// describe those mappings, so attaching it with the current layout would index
+// unrelated control or arena bytes. Refuse it rather than guessing geometry.
 inline constexpr u32_t kVersion = 2;
 
 // The control area occupies file offsets [0, ctrl): one Control block, one

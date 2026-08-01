@@ -38,19 +38,9 @@ cxx_test(
   deps = ["//cpp/lib/pgt/core:pgt_core"],
 )
 
-# Fork-based fault injection (killed/stopped writers, misuse death tests).
-# Separate from two_plane_test so that one stays runnable under TSan.
-# CROSS-PROCESS fault injection: children attach by fd (or shm name) into
-# fresh mappings and objects (never the parent's), then are killed, stopped,
-# zombified, or forked mid-protocol. Covers writer kill/stop, zombie liveness,
-# reader restart, and slot recycling gated on proven death plus a drained
-# ring -- paths reachable only with real processes and real signals. Every
-# break of the recovery/liveness/registry protocol was verified to make one
-# of these tests fail before it was trusted to pass.
-# EXPERIMENTAL two-plane variant (pgt::mpsc::TwoPlaneRing): control plane
-# (Claim), publication plane (Result), and payload on three separate lines.
-# Same split as above -- the thread-only file stays TSan-runnable, fork-based
-# fault injection lives in its own target.
+# Cross-process fault injection and thread-only MPSC coverage are separate so
+# the latter remains runnable under TSan. The MPSC ring keeps Claim,
+# publication, and payload on separate lines.
 cxx_test(
   name = "region_test",
   srcs = ["region_test.cc"],
@@ -64,14 +54,22 @@ cxx_test(
 )
 
 cxx_test(
-  name = "two_plane_test",
-  srcs = ["two_plane_test.cc"],
+  name = "mpsc_ring_test",
+  srcs = ["mpsc_ring_test.cc"],
   deps = ["//cpp/lib/pgt/mpsc:mpsc"],
 )
 
 cxx_test(
-  name = "two_plane_fault_test",
-  srcs = ["two_plane_fault_test.cc"],
+  name = "mpsc_ring_fault_test",
+  srcs = ["mpsc_ring_fault_test.cc"],
+  deps = ["//cpp/lib/pgt/mpsc:mpsc"],
+)
+
+# Each source is compiled as a separate translation unit, so one public header
+# cannot mask missing direct dependencies in the other.
+cxx_test(
+  name = "mpsc_public_headers_test",
+  srcs = ["mpsc_ring_header_test.cc", "spsc_ring_header_test.cc"],
   deps = ["//cpp/lib/pgt/mpsc:mpsc"],
 )
 

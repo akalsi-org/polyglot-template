@@ -6,7 +6,7 @@ OVERLAPPING IQRs MEAN "NO MEASURED DIFFERENCE". This script prints the
 interval for every cell and marks each comparison separated / overlapping so a
 reader cannot quote a median without its precision.
 
-  python3 cpp/bench/mpsc/summarize_campaign.py results.jsonl --baseline two-plane
+  python3 cpp/bench/mpsc/summarize_campaign.py results.jsonl --baseline mpsc
 """
 
 from __future__ import annotations
@@ -21,6 +21,8 @@ from pathlib import Path
 def quartiles(values: list[float]) -> tuple[float, float, float]:
   ordered = sorted(values)
   n = len(ordered)
+  if n == 1:
+    return ordered[0], ordered[0], ordered[0]
   lo = statistics.median(ordered[: n // 2])
   hi = statistics.median(ordered[(n + 1) // 2 :])
   return lo, statistics.median(ordered), hi
@@ -29,7 +31,7 @@ def quartiles(values: list[float]) -> tuple[float, float, float]:
 def main() -> int:
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument("results", type=Path)
-  parser.add_argument("--baseline", default="two-plane", help="variant to compare against")
+  parser.add_argument("--baseline", default="mpsc", help="variant to compare against")
   args = parser.parse_args()
 
   rows = [json.loads(line) for line in args.results.read_text().splitlines() if line.strip()]

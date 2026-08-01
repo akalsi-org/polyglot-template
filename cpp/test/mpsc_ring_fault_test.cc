@@ -1,12 +1,12 @@
 // Fork-based fault injection for the EXPERIMENTAL two-plane MPSC variant.
 //
-// Kept separate from two_plane_test.cc because fork does not mix with TSan. The
+// Kept separate from mpsc_ring_test.cc because fork does not mix with TSan. The
 // parent stays single-threaded in every test here, so each fork is safe.
 //
 // Child processes never touch doctest: they communicate through exit codes and
 // signals only, and leave via _exit / a fatal signal.
 //
-// The asymmetry under test, unchanged from Ring: a KILLED writer's record is
+// The asymmetry under test, unchanged from in-band queue: a KILLED writer's record is
 // recoverable (a dead thread issues no further stores), a STOPPED writer's is
 // not (it may resume and scribble over recycled bytes) -- so the reader must
 // reclaim the former and must NOT reclaim the latter, with no timeout anywhere.
@@ -20,7 +20,7 @@
 //     defect class, re-checked against the split planes.
 
 #include "pgt/mpsc/desc.hh"
-#include "pgt/mpsc/two_plane.hh"
+#include "pgt/mpsc/mpsc_ring.hh"
 
 #include <doctest/doctest.h>
 
@@ -44,7 +44,7 @@ struct CountingPolicy : DefaultPolicy {
     if (reclaims != nullptr) reclaims->fetch_add(1, std::memory_order_relaxed);
   }
 };
-using FaultRing = TwoPlaneRing<CountingPolicy, false>;
+using FaultRing = MpscRing<CountingPolicy, false>;
 
 Config smallConfig() {
   Config cfg;
@@ -84,7 +84,7 @@ u32_t drainTagged(FaultRing& q, u32_t next, u32_t upto) {
 // A writer SIGKILLed between reserve() and commit(): the reader reclaims its
 // record, and everything committed before and after is delivered exactly once.
 // ---------------------------------------------------------------------------
-TEST_CASE("two-plane: killed mid-reservation writer is reclaimed") {
+TEST_CASE("MpscRing: killed mid-reservation writer is reclaimed") {
   std::atomic<u64_t> reclaims{0};
   CountingPolicy pol;
   pol.reclaims = &reclaims;
@@ -126,7 +126,7 @@ TEST_CASE("two-plane: killed mid-reservation writer is reclaimed") {
 // Recovery must promote the successor cell -- if it does not, no later claim
 // can ever succeed and the queue wedges rather than corrupting.
 // ---------------------------------------------------------------------------
-TEST_CASE("two-plane: recovery promotes the successor cell of a killed claimant") {
+TEST_CASE("MpscRing: recovery promotes the successor cell of a killed claimant") {
   std::atomic<u64_t> reclaims{0};
   CountingPolicy pol;
   pol.reclaims = &reclaims;
@@ -161,7 +161,7 @@ TEST_CASE("two-plane: recovery promotes the successor cell of a killed claimant"
   // The kClaimed branch of recover() -- the case where the owner died before
   // promoting -- cannot be reached by killing a child at an API boundary, since
   // the window is two adjacent stores inside finishClaim(). It is covered by the
-  // forged-state test in two_plane_test.cc instead.
+  // forged-state test in mpsc_ring_test.cc instead.
   std::byte after[8]{std::byte{0x22}};
   REQUIRE(q.write(after, sizeof(after)));
   auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
@@ -187,7 +187,7 @@ TEST_CASE("two-plane: recovery promotes the successor cell of a killed claimant"
 // rewrites it) and only Result distinguishes the two cases, so the Result tag
 // MUST be re-read after the liveness verdict.
 // ---------------------------------------------------------------------------
-TEST_CASE("two-plane: a committed-then-dead writer's record is delivered, not reclaimed") {
+TEST_CASE("MpscRing: a committed-then-dead writer's record is delivered, not reclaimed") {
   std::atomic<u64_t> reclaims{0};
   CountingPolicy pol;
   pol.reclaims = &reclaims;
@@ -233,7 +233,7 @@ TEST_CASE("two-plane: a committed-then-dead writer's record is delivered, not re
 // ---------------------------------------------------------------------------
 // Repeated kills across many wraps, with real claim/commit traffic in between.
 // ---------------------------------------------------------------------------
-TEST_CASE("two-plane: repeated writer kills across wraps") {
+TEST_CASE("MpscRing: repeated writer kills across wraps") {
   std::atomic<u64_t> reclaims{0};
   CountingPolicy pol;
   pol.reclaims = &reclaims;
@@ -272,7 +272,7 @@ TEST_CASE("two-plane: repeated writer kills across wraps") {
 // never evidence of death. On SIGCONT the writer finishes and its record
 // arrives intact.
 // ---------------------------------------------------------------------------
-TEST_CASE("two-plane: stopped writer is never reclaimed and resumes cleanly") {
+TEST_CASE("MpscRing: stopped writer is never reclaimed and resumes cleanly") {
   std::atomic<u64_t> reclaims{0};
   CountingPolicy pol;
   pol.reclaims = &reclaims;
@@ -320,7 +320,7 @@ TEST_CASE("two-plane: stopped writer is never reclaimed and resumes cleanly") {
 // A stopped writer must not block LATER claims -- only delivery. This is the
 // two-plane walk property under a real stopped process rather than a thread.
 // ---------------------------------------------------------------------------
-TEST_CASE("two-plane: a stopped writer blocks the reader but not other writers") {
+TEST_CASE("MpscRing: a stopped writer blocks the reader but not other writers") {
   std::atomic<u64_t> reclaims{0};
   CountingPolicy pol;
   pol.reclaims = &reclaims;
@@ -367,7 +367,7 @@ TEST_CASE("two-plane: a stopped writer blocks the reader but not other writers")
 // ring, which mmaps the region independently from the descriptor -- so a plane
 // pointer that only happened to be valid via inheritance would fail here.
 // ---------------------------------------------------------------------------
-TEST_CASE("two-plane: a process attaching by fd alone can write") {
+TEST_CASE("MpscRing: a process attaching by fd alone can write") {
   FaultRing q;
   REQUIRE(FaultRing::create(smallConfig(), q));
   REQUIRE(q.attachReader());
@@ -408,9 +408,9 @@ TEST_CASE("two-plane: a process attaching by fd alone can write") {
 // the other: it would index the Claim plane with the wrong stride and read a
 // neighbouring record's ownership word as its own. The strides are recorded in
 // the region header precisely so this is detectable rather than silent.
-TEST_CASE("two-plane: attaching with a mismatched cell layout is refused") {
-  using Compact = TwoPlaneRing<DefaultPolicy, false>;
-  using Padded = TwoPlaneRing<DefaultPolicy, true>;
+TEST_CASE("MpscRing: attaching with a mismatched cell layout is refused") {
+  using Compact = MpscRing<DefaultPolicy, false>;
+  using Padded = MpscRing<DefaultPolicy, true>;
 
   Compact compact;
   REQUIRE(Compact::create(smallConfig(), compact));

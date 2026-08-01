@@ -50,7 +50,7 @@ FILTER="*differential*,*multi-writer*,*in-flight*"
 
 build() {  # build <tree> <out>
   g++ -std=c++20 -I "$1" -I "$DT" -O2 -w -pthread \
-    "$ROOT/cpp/test/two_plane_test.cc" "$1/pgt/mpsc/region.cc" "$1/pgt/mpsc/policy.cc" \
+    "$ROOT/cpp/test/mpsc_ring_test.cc" "$1/pgt/mpsc/region.cc" "$1/pgt/mpsc/policy.cc" \
     "$ROOT/cpp/test/doctest_runner.cc" -o "$2" 2> "$WORK/build.log"
 }
 
@@ -61,9 +61,9 @@ run_mutant() {  # run_mutant <name> <sed-expr>
   build "$D" "$D/base" || { echo "$name: INVALID (baseline build failed)"; return 2; }
   timeout 300 "$D/base" -tc="$FILTER" > "$D/base.log" 2>&1 \
     || { echo "$name: INVALID (baseline failed -- tree or box is bad)"; return 2; }
-  sed -i "$expr" "$D/pgt/mpsc/two_plane.hh"
-  cmp -s "$D/pgt/mpsc/two_plane.hh" "$ROOT/cpp/lib/pgt/mpsc/two_plane.hh" \
-    && { echo "$name: INVALID (mutation did not apply -- two_plane.hh drifted?)"; return 2; }
+  sed -i "$expr" "$D/pgt/mpsc/mpsc_ring.hh"
+  cmp -s "$D/pgt/mpsc/mpsc_ring.hh" "$ROOT/cpp/lib/pgt/mpsc/mpsc_ring.hh" \
+    && { echo "$name: INVALID (mutation did not apply -- mpsc_ring.hh drifted?)"; return 2; }
   build "$D" "$D/mut" || { echo "$name: CAUGHT (mutant fails to build)"; return 0; }
   local i
   for i in $(seq 1 "$REPS"); do

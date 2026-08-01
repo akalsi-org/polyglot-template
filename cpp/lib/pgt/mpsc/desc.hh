@@ -2,8 +2,10 @@
 
 // Record descriptor encoding, shared by every queue variant.
 //
-// Eight bytes at the head of each record slot, 64-byte aligned. `state` occupies
-// the low bits in EVERY encoding so it can be decoded before anything else.
+// Eight bytes per record, 64-byte-grain indexed. SpscRing stores the descriptor
+// at the head of the in-band record; MpscRing stores it in the Claim plane.
+// `state` occupies the low bits in EVERY encoding so it can be decoded before
+// anything else.
 //
 //   bits 0..2     state   kFree=0 | kClaimed=1 | kCleared=2 | kCommitted=3 | kAborted=4
 //
@@ -27,10 +29,10 @@
 //      exactly 58 bits for a 64-bit position space and bits 3..60 provide exactly
 //      58, so kFree(p) != kFree(p + k*N) unconditionally.
 //
-//   2. State vouches for the successor. kCleared and above mean the successor slot
-//      has been stamped kFree(succ) or validly claimed; kClaimed means it has not,
-//      and may still hold stale payload from the previous lap. A walker must never
-//      advance past a kClaimed descriptor.
+//   2. State records whether successor promotion is vouched. kCleared means the
+//      owner completed the promotion; kClaimed does not. MpscRing may walk past a
+//      kClaimed cell because its Claim plane never contains payload, but it must
+//      not claim that record's immediate successor.
 //
 // The numeric state values are ABI: this word is shared between separately
 // compiled processes. Do not reorder them, and do not express this as a bitfield
@@ -41,7 +43,7 @@
 // kAborted been 0, an untouched word would decode as a zero-extent aborted record
 // and a walker reaching one would advance by zero.
 
-#include "../core/types.hh"
+#include "pgt/core/types.hh"
 
 namespace pgt::mpsc {
 

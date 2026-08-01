@@ -26,7 +26,7 @@
 #   NOT-CAUGHT the suite does NOT guard it even on weak hardware. The caveat
 #              stays, and the fix is more repetitions or tighter interleaving,
 #              not more architectures.
-#   INVALID    baseline failed or a sed no longer matches queue.hh. The run
+#   INVALID    baseline failed or a sed no longer matches mpsc_ring.hh. The run
 #              proves nothing; fix the script before believing any verdict.
 
 name: ordering-campaign

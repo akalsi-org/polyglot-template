@@ -13,7 +13,7 @@
 
 #include "pgt/core/platform.hh"
 #include "pgt/mpsc/desc.hh"
-#include "pgt/mpsc/queue.hh"
+#include "pgt/mpsc/spsc_ring.hh"
 #include "pgt/mpsc/region.hh"
 
 #include <doctest/doctest.h>
@@ -175,12 +175,12 @@ TEST_CASE("Region: kFile create over a dirty reused file still initialises") {
   CHECK(r.control()->reader_tid == 0);
   CHECK(r.writerBitmap()[0] == 0);
 
-  // And the ring built over it must actually work end to end. Spsc is the
+  // And the ring built over it must actually work end to end. SpscRing<> is the
   // surviving in-band variant; what is under test is the region, not the queue.
-  Spsc q;
+  SpscRing<> q;
   {
     Config qc = cfg;
-    REQUIRE(Spsc::create(qc, q));
+    REQUIRE(SpscRing<>::create(qc, q));
     REQUIRE(q.attachWriter());
     REQUIRE(q.attachReader());
     std::byte buf[24];
