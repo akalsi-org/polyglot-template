@@ -531,8 +531,12 @@ class SpscRing {
   WriterSlot* slot_ = nullptr;
 
   // Writer-owned. Sole writer, so plain members instead of TLS.
-  u64_t wr_tail_ = 0;        // private copy of the publication cursor
-  u64_t wr_read_cache_ = 0;  // last observed read_pos; may lag, never leads
+  // Writer-private mutable state, packed into ONE line of its own: the writer
+  // stores wr_tail_ and the res_* words on every record, so splitting them
+  // across two lines costs a second line transfer per record even when no
+  // reader shares them.
+  alignas(64) u64_t wr_tail_ = 0;  // private copy of the publication cursor
+  u64_t wr_read_cache_ = 0;        // last observed read_pos; may lag, never leads
   u64_t res_pos_ = detail::kInvalidPos;
   u64_t res_need_ = 0;
   sz_t res_n_ = 0;
@@ -541,9 +545,14 @@ class SpscRing {
   Status wr_status_ = Status::kOk;
 
   // Reader-owned.
-  u64_t rd_ = 0;           // reader-private cursor; a cache of read_pos
-  u64_t tail_cache_ = 0;   // last acquired tail; one acquire per sweep
-  u64_t peek_extent_ = 0;  // extent acquired by the successful peek
+  // Reader-private state starts a fresh cache line. Without this the writer's
+  // reservation words (res_pos_/res_need_/res_n_, stored on every reserve and
+  // commit) and these reader words land in the SAME line whenever the object
+  // happens to be 64B-aligned -- which is the common case -- and the two
+  // threads ping-pong that line on every record.
+  alignas(64) u64_t rd_ = 0;  // reader-private cursor; a cache of read_pos
+  u64_t tail_cache_ = 0;      // last acquired tail; one acquire per sweep
+  u64_t peek_extent_ = 0;     // extent acquired by the successful peek
   bool reader_attached_ = false;
 
   [[no_unique_address]] Policy policy_{};

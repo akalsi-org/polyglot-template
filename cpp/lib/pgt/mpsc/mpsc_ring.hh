@@ -778,7 +778,11 @@ class MpscRing {
   u64_t cell_mask_ = 0;
   u32_t shift_ = 0;
   u64_t epoch_ = 0;
-  u64_t rd_ = 0;
+  // Reader-written state on its own line. cap_/mask_/cell_mask_ are read by
+  // EVERY writer on every claim; rd_/peek_extent_ are stored by the reader on
+  // every pop. Sharing one line makes each reader store invalidate that line in
+  // all N writers, so the cost grows with writer count.
+  alignas(64) u64_t rd_ = 0;
   u64_t peek_extent_ = 0;
   bool reader_attached_ = false;
 
