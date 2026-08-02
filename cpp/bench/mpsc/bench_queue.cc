@@ -53,6 +53,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -152,9 +153,83 @@ struct RunResult {
   u64_t insns = 0;
   u64_t sampled = 0;
   u64_t retried = 0;
+  std::vector<u64_t> delay;  // PACED ONLY: scheduled arrival -> commit (1 in 64)
+  u64_t behind = 0;          // PACED ONLY: sampled sends already late at their deadline
 };
 
 double g_ghz = 0;  // TSC GHz, calibrated once in main
+
+// ---------------------------------------------------------------------------
+// offered load
+// ---------------------------------------------------------------------------
+//
+// The saturated loop measures the COLLAPSED regime: every writer is in the
+// claim path continuously, so contention is maximal by construction and the
+// aggregate rate is what survives the resulting cacheline ping-pong. That is
+// the worst case, not the operating point -- a real producer sends at some
+// rate and is idle in between, and at low duty cycle two writers rarely occupy
+// the claim window at once. Paced mode supplies that missing axis so the
+// throughput/fairness curve can be plotted AGAINST offered load rather than
+// read at its single most contended point.
+//
+// Two design choices carry the measurement:
+//
+// * Arrivals are EXPONENTIAL, not fixed-period. Identical fixed-period writers
+//   either collide every cycle or interleave perfectly depending only on their
+//   relative startup phase, so a fixed period samples one arbitrary point of a
+//   bimodal family -- exactly the kind of artifact this file already fights
+//   elsewhere. Poisson arrivals are the memoryless default and make contention
+//   a function of offered load instead of phase.
+//
+// * The schedule is ABSOLUTE: deadline_{k+1} = deadline_k + gap, never
+//   now + gap. Rescheduling from the current time is coordinated omission: a
+//   writer that falls behind would quietly lower its own offered rate, the
+//   backlog would never appear, and the collapse this mode exists to find
+//   would be invisible. With an absolute schedule, lateness accumulates into
+//   `delay` and shows up as a rising curve.
+//
+// Gaps are drawn into a per-writer table BEFORE the timed window: the log() a
+// exponential deviate needs must never run inside the measured loop.
+constexpr sz_t kGapTableSize = 4096;  // power of two: index with a mask
+constexpr sz_t kGapMask = kGapTableSize - 1;
+
+struct Pacing {
+  double per_writer_mrec_s = 0;  // 0 == saturated; the mode is off entirely
+
+  bool enabled() const { return per_writer_mrec_s > 0; }
+
+  // Mean inter-arrival in TSC ticks. rate Mrec/s -> 1000/rate ns -> ticks.
+  double meanTicks() const { return 1e3 / per_writer_mrec_s * g_ghz; }
+};
+
+// splitmix64, keyed by writer index: independent deterministic streams, so a
+// paced run is reproducible and two writers never share an arrival sequence.
+std::vector<u64_t> makeGapTable(unsigned writer, double mean_ticks) {
+  u64_t x = 0x9e3779b97f4a7c15ull * (writer + 1);
+  std::vector<double> draws(kGapTableSize);
+  double sum = 0;
+  for (auto& d : draws) {
+    x += 0x9e3779b97f4a7c15ull;
+    u64_t z = x;
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ull;
+    z = (z ^ (z >> 27)) * 0x94d049bb133111ebull;
+    z ^= z >> 31;
+    // u in (0,1]: -log(u) is Exp(1), scaled to the requested mean below.
+    double const u = (static_cast<double>(z >> 11) + 1.0) * (1.0 / 9007199254740992.0);
+    d = -std::log(u);
+    sum += d;
+  }
+  // Normalize the table to EXACTLY the requested mean. A 4096-draw table has a
+  // sample mean off by ~1/sqrt(4096) = 1.6%, and because the table is fixed and
+  // replayed, that error is a per-writer BIAS rather than noise -- the writer
+  // would offer a rate a couple of percent from the one being plotted on the
+  // x axis. Measured at 2.5% before this scaling. Normalizing preserves the
+  // exponential shape (what drives contention) and fixes only the mean.
+  std::vector<u64_t> gaps(kGapTableSize);
+  double const scale = mean_ticks * kGapTableSize / sum;
+  for (sz_t i = 0; i < kGapTableSize; ++i) gaps[i] = static_cast<u64_t>(draws[i] * scale);
+  return gaps;
+}
 
 // The standard percentile set (design-owner request): p50/p95/p99/p99.99/max,
 // always with the sample count -- a p99.99 from 10k samples is one observation
@@ -247,7 +322,7 @@ struct ThreadCounters {
 };
 
 template <typename SetupFn, typename TryFn, typename DrainFn, typename ResetFn>
-RunResult runFor(unsigned writers, double secs, SetupFn&& setup, TryFn&& tryOne,
+RunResult runFor(unsigned writers, double secs, Pacing const& pace, SetupFn&& setup, TryFn&& tryOne,
                  DrainFn&& drainSome, ResetFn&& resetStats) {
   enum class Phase : unsigned char { kWait, kWarmup, kArmed, kMeasure, kStop };
   constexpr auto kWarmup = std::chrono::milliseconds(250);
@@ -256,8 +331,8 @@ RunResult runFor(unsigned writers, double secs, SetupFn&& setup, TryFn&& tryOne,
   std::atomic<unsigned> armed{0};
   std::atomic<unsigned> finished{0};
   std::vector<u64_t> counts(writers, 0);
-  std::vector<std::vector<u64_t>> costs(writers), adms(writers);
-  std::vector<u64_t> sampled(writers, 0), retried(writers, 0);
+  std::vector<std::vector<u64_t>> costs(writers), adms(writers), dlys(writers);
+  std::vector<u64_t> sampled(writers, 0), retried(writers, 0), behinds(writers, 0);
   std::vector<u64_t> ctr_m(writers, 0), ctr_c(writers, 0), ctr_i(writers, 0);
   std::vector<std::thread> ts;
   ts.reserve(writers);
@@ -269,15 +344,42 @@ RunResult runFor(unsigned writers, double secs, SetupFn&& setup, TryFn&& tryOne,
       // the calling thread, so it must not be hoisted to the parent.
       ThreadCounters counters;
       counters.open();
+      // Built before kWait is released: the allocation and the log() calls must
+      // not land inside the timed window.
+      std::vector<u64_t> const gaps =
+        pace.enabled() ? makeGapTable(w, pace.meanTicks()) : std::vector<u64_t>{};
       ready.fetch_add(1);
       while (phase.load(std::memory_order_acquire) == Phase::kWait) cpuRelax();
       u64_t n = 0;
       auto& cost = costs[w];
       auto& adm = adms[w];
+      auto& dly = dlys[w];
+      u64_t next = 0;  // PACED: absolute deadline of the current arrival
+      sz_t gi = 0;
+      bool late = false;
+      // Blocks until this arrival is due; false means the run ended while
+      // waiting. Warmup is paced too, so the window opens on a queue in the
+      // paced steady state rather than on the backlog a saturated warmup
+      // would have left behind -- otherwise every paced run would begin by
+      // measuring the drain of a full ring.
+      auto paceWait = [&]() -> bool {
+        if (!pace.enabled()) return true;
+        if (next == 0) next = __rdtsc();
+        next += gaps[gi++ & kGapMask];
+        u64_t now = __rdtsc();
+        late = now > next;
+        while (now < next) {
+          if (phase.load(std::memory_order_relaxed) == Phase::kStop) return false;
+          cpuRelax();
+          now = __rdtsc();
+        }
+        return true;
+      };
       while (true) {
         Phase const current = phase.load(std::memory_order_relaxed);
         if (current == Phase::kStop) break;
         if (current == Phase::kWarmup) {
+          if (!paceWait()) break;
           while (!tryOne(w)) cpuRelax();
           continue;
         }
@@ -293,6 +395,7 @@ RunResult runFor(unsigned writers, double secs, SetupFn&& setup, TryFn&& tryOne,
         // The count and samples begin only after every writer is armed.  The
         // reader remains active through shutdown so a writer blocked at the
         // deadline can exit.
+        if (!paceWait()) break;
         if ((n & 63) == 0) {  // sample 1 in 64: percentiles at ~1.5% perturbation
           unsigned aux;
           u64_t const t0 = __rdtscp(&aux);
@@ -307,6 +410,13 @@ RunResult runFor(unsigned writers, double secs, SetupFn&& setup, TryFn&& tryOne,
           if (ta != t0) {
             adm.push_back(ta - t0);
             ++retried[w];
+          }
+          // Response time as the PRODUCER sees it: scheduled arrival to commit,
+          // including any time the writer spent late. This -- not write cost --
+          // is the curve that bends when offered load approaches the knee.
+          if (pace.enabled()) {
+            dly.push_back(t1 - next);
+            if (late) ++behinds[w];
           }
         } else {
           while (!tryOne(w)) cpuRelax();
@@ -342,6 +452,8 @@ RunResult runFor(unsigned writers, double secs, SetupFn&& setup, TryFn&& tryOne,
   r.secs = std::chrono::duration<double>(timed_end - timed_start).count();
   for (auto& v : costs) r.lat.insert(r.lat.end(), v.begin(), v.end());
   for (auto& v : adms) r.adm.insert(r.adm.end(), v.begin(), v.end());
+  for (auto& v : dlys) r.delay.insert(r.delay.end(), v.begin(), v.end());
+  for (auto v : behinds) r.behind += v;
   r.per_writer = counts;
   for (auto v : ctr_m) r.misses += v;
   for (auto v : ctr_c) r.cycles += v;
@@ -399,7 +511,7 @@ u64_t touchPayload(ReadSpan const& payload) {
 
 template <bool Padded, sz_t MinElementSize = kGrain, typename PolicyT = DefaultPolicy>
 RunResult benchMpsc(sz_t capacity, unsigned writers, double secs, sz_t payload,
-                    PolicyT policy = {}) {
+                    Pacing const& pace = {}, PolicyT policy = {}) {
   using Q = MpscRing<PolicyT, Padded, MinElementSize>;
   Q q(policy);
   if (!Q::create(Config{.capacity = capacity}, q)) {
@@ -408,7 +520,7 @@ RunResult benchMpsc(sz_t capacity, unsigned writers, double secs, sz_t payload,
   }
   if (!q.attachReader()) std::exit(1);
   return runFor(
-    writers, secs,
+    writers, secs, pace,
     [&](unsigned writer) {
       if constexpr (requires(PolicyT& p, unsigned w) { p.bindWriter(w); }) {
         q.policy().bindWriter(writer);
@@ -423,7 +535,7 @@ RunResult benchMpsc(sz_t capacity, unsigned writers, double secs, sz_t payload,
 // SpscRing has no claim arbitration, so it is the floor a multi-producer design
 // is measured against rather than a competitor: one writer, wait-free, and the
 // reader sweeps one ring.
-RunResult benchSpsc(sz_t capacity, double secs, sz_t payload) {
+RunResult benchSpsc(sz_t capacity, double secs, sz_t payload, Pacing const& pace = {}) {
   SpscRing<> q;
   Config cfg;
   cfg.capacity = capacity;
@@ -433,7 +545,7 @@ RunResult benchSpsc(sz_t capacity, double secs, sz_t payload) {
   }
   if (!q.attachReader()) std::exit(1);
   return runFor(
-    1, secs, [&](unsigned) { (void)q.attachWriter(); },
+    1, secs, pace, [&](unsigned) { (void)q.attachWriter(); },
     [&](unsigned) { return tryWrite(q, payload_buf, payload); }, [&] { return drainBatch(q); },
     [&] {});
 }
@@ -478,6 +590,44 @@ void reportThroughputJson(char const* variant, unsigned writers, sz_t payload, s
     payload, extent, payload_gbs, reserved_gbs);
 }
 
+// Paced runs answer a different question from throughput runs, so they report a
+// different row: what the writers were ASKED to send, what the queue actually
+// carried, and what the producer-visible response time was at that load. The
+// achieved/offered ratio is the headline -- it is 1.0 while the queue keeps up
+// and falls away at the knee.
+void reportPacedJson(char const* variant, unsigned writers, sz_t payload, sz_t extent,
+                     double per_writer_mrec_s, RunResult& r) {
+  double const offered = per_writer_mrec_s * writers;  // Mrec/s asked for, aggregate
+  double const achieved = r.records / r.secs / 1e6;
+  std::sort(r.delay.begin(), r.delay.end());
+  auto pct = [&](double p) {
+    if (r.delay.empty() || g_ghz <= 0) return 0.0;
+    return r.delay[static_cast<sz_t>(p * (r.delay.size() - 1))] / g_ghz;  // ns
+  };
+  u64_t lo = ~u64_t{0}, hi = 0;
+  for (u64_t c : r.per_writer) {
+    lo = c < lo ? c : lo;
+    hi = c > hi ? c : hi;
+  }
+  if (r.per_writer.empty()) lo = 0;
+  std::printf(
+    "{\"mode\":\"paced\",\"variant\":\"%s\",\"writers\":%u,\"seconds\":%.9f,"
+    "\"offered_per_writer_mrec_s\":%.9f,\"offered_mrec_s\":%.9f,"
+    "\"records\":%llu,\"mrec_s\":%.9f,\"achieved_ratio\":%.6f,"
+    "\"payload_bytes\":%zu,\"extent_bytes\":%zu,\"payload_gb_s\":%.9f,"
+    "\"delay_p50_ns\":%.1f,\"delay_p99_ns\":%.1f,\"delay_max_ns\":%.1f,"
+    "\"delay_samples\":%zu,\"late_fraction\":%.6f,"
+    "\"fairness_min_max\":%.6f,\"min_writer_records\":%llu,\"max_writer_records\":%llu}\n",
+    variant, writers, r.secs, per_writer_mrec_s, offered,
+    static_cast<unsigned long long>(r.records), achieved, offered > 0 ? achieved / offered : 0.0,
+    payload, extent, r.records / r.secs * payload / 1e9, pct(0.50), pct(0.99),
+    r.delay.empty() ? 0.0 : r.delay.back() / g_ghz, r.delay.size(),
+    r.sampled ? static_cast<double>(r.behind) / r.sampled : 0.0,
+    hi ? static_cast<double>(lo) / hi : 0.0, static_cast<unsigned long long>(lo),
+    static_cast<unsigned long long>(hi));
+  std::fflush(stdout);
+}
+
 template <typename Q>
 RunResult benchQueue(Q& q, unsigned writers, double secs, sz_t payload, bool attach) {
   if (!q.attachReader()) {
@@ -485,7 +635,7 @@ RunResult benchQueue(Q& q, unsigned writers, double secs, sz_t payload, bool att
     std::exit(1);
   }
   return runFor(
-    writers, secs,
+    writers, secs, Pacing{},
     [&](unsigned) {
       if (attach && !q.attachWriter()) {
         std::fprintf(stderr, "attachWriter failed (too few shards?)\n");
@@ -517,6 +667,12 @@ int usage() {
                "  counters     mpsc|mpsc-padded|mpsc-padded-256|spsc <writers> <secs> [payload]\n"
                "               adds per-thread coherence counters and the fairness ratio\n"
                "  latency      mpsc|mpsc-padded|mpsc-padded-256|spsc <writers> <secs> [payload]\n"
+               "  paced        mpsc|mpsc-padded|mpsc-padded-256|spsc <writers> <secs> <payload>\n"
+               "               <per_writer_mrec_s>\n"
+               "               offered-load run: Poisson arrivals at the given PER-WRITER rate\n"
+               "               on an absolute schedule. Reports achieved/offered, producer-\n"
+               "               visible delay percentiles, and fairness. Sweep the rate to find\n"
+               "               the knee; the saturated `throughput` mode is its right-hand end.\n"
                "  sizes        <secs>    payload size sweep, one writer\n");
   return 1;
 }
@@ -527,17 +683,17 @@ int usage() {
 // which is exactly how an earlier campaign compared two different builds.
 template <typename Report>
 int dispatch(std::string const& variant, unsigned writers, double secs, sz_t payload,
-             Report&& report) {
+             Report&& report, Pacing const& pace = {}) {
   constexpr sz_t kCap = 1u << 20;
   if (variant == "mpsc") {
     report("mpsc", tpExtentFor<kGrain>(payload),
-           benchMpsc<false, kGrain>(kCap, writers, secs, payload));
+           benchMpsc<false, kGrain>(kCap, writers, secs, payload, pace));
   } else if (variant == "mpsc-padded") {
     report("mpsc-padded", tpExtentFor<kGrain>(payload),
-           benchMpsc<true, kGrain>(kCap, writers, secs, payload));
+           benchMpsc<true, kGrain>(kCap, writers, secs, payload, pace));
   } else if (variant == "mpsc-padded-256") {
     report("mpsc-padded-256", tpExtentFor<256>(payload),
-           benchMpsc<true, 256>(kCap, writers, secs, payload));
+           benchMpsc<true, 256>(kCap, writers, secs, payload, pace));
   } else if (variant == "spsc") {
     // One writer by construction; a request for more is a usage error rather
     // than something to silently clamp.
@@ -545,7 +701,7 @@ int dispatch(std::string const& variant, unsigned writers, double secs, sz_t pay
       std::fprintf(stderr, "spsc takes exactly one writer\n");
       return 1;
     }
-    report("spsc", SpscRing<>::extentForPayload(payload), benchSpsc(kCap, secs, payload));
+    report("spsc", SpscRing<>::extentForPayload(payload), benchSpsc(kCap, secs, payload, pace));
   } else {
     return usage();
   }
@@ -585,6 +741,20 @@ int main(int argc, char** argv) {
                     [&](char const* name, sz_t extent, RunResult r) {
                       reportCountersJson(name, writers, payload, extent, r);
                     });
+  }
+  if (mode == "paced") {
+    double const rate = argc > 6 ? std::atof(argv[6]) : 0;
+    if (rate <= 0) {
+      std::fprintf(stderr, "paced needs a positive per-writer rate in Mrec/s\n");
+      return usage();
+    }
+    Pacing const pace{.per_writer_mrec_s = rate};
+    return dispatch(
+      variant, writers, secs, payload,
+      [&](char const* name, sz_t extent, RunResult r) {
+        reportPacedJson(name, writers, payload, extent, rate, r);
+      },
+      pace);
   }
   if (mode == "latency") {
     return dispatch(variant, writers, secs, payload,
