@@ -22,12 +22,6 @@ Need cross-project ordering/caching?
 Need language-specific correctness?
   -> native ecosystem retains semantic ownership
 
-Need C/C++ incrementality and editor truth?
-  -> the Buck2 action graph is the single compile-action source; compdb is a BXL query over it
-
-Need complex third-party C configuration?
-  -> use upstream build frontend as an isolated adapter
-
 Need reproducible tools?
   -> committed exact lock + transactional local install
 
@@ -62,7 +56,7 @@ proposed, not implemented. The implemented package format is deterministic
 
 ```text
 principle: one stable entrypoint presents the product workflow; specialized tools retain semantic ownership below it
-evidence: command runners simplify UX but cannot correctly replace C dependency graphs, Go modules, Python ABI metadata, or Deno resolution
+evidence: command runners simplify UX but cannot correctly replace Go modules, Python packaging metadata, or Deno resolution
 boundary: repo.sh owns dispatch; Buck2 owns build/test graph ordering and caching; lane tools own language semantics
 validate: help lists every canonical command and each executes through the same environment
 falsifier: a single lower-level tool genuinely and maintainably owns all required language/package semantics
@@ -78,44 +72,8 @@ evidence: Flow's native manifest derives build graph and compile tooling; schema
 boundary: BUCK targets own compile actions, generated code contracts, package identity, and staging
 validate: deterministic regeneration produces no diff and drift checks compare normalized models
 falsifier: the derived artifact contains independent user-authored information that cannot live in the source
-avoid: separately maintaining compile source lists, compdb commands, tests, and package file lists
-enforcement: enforced - `toolchain-lock --check` and `package-validate` are drift gates; the compdb is derived, never hand-maintained
-```
-
-## P3. Tooling Products Are Build Correctness
-
-```text
-principle: consumer-critical tooling artifacts are mandatory build outputs, not optional conveniences
-evidence: Please's stale compdb implementation built successfully while remaining unusable by clangd
-boundary: compdb is derived on demand from the same Buck2 action graph that builds (`./repo.sh compile-commands`), never hand-maintained
-validate: every executed compile action has an equivalent compdb entry and clangd checks representative sources
-falsifier: no consumer uses the artifact and its absence cannot affect development or verification
-avoid: a manual compile-commands step developers must remember
-enforcement: enforced - `bxl/compdb.bxl` derives the database from the action graph and `test/graph-compdb-contract.sh` gates it in CI
-```
-
-## P4. Third-Party Code Is Part Of The Effective Graph
-
-```text
-principle: if the toolchain compiles a translation unit, the canonical compilation database describes it
-evidence: third-party configuration and generated headers affect first-party analysis and navigation
-boundary: compdb is complete by default; lint scope remains separately selectable
-validate: dependency compile counts equal normalized compdb counts
-falsifier: dependency is consumed only as a verified prebuilt binary and no source is compiled
-avoid: excluding upstream source merely to reduce editor noise
-enforcement: not exercised - this checkout compiles no third-party source, so the completeness claim covers first-party C++ and Python-extension actions only
-```
-
-## P5. Prefer Upstream Semantics, Not Upstream Global State
-
-```text
-principle: reuse an upstream build frontend when it carries complex configuration knowledge, but isolate its inputs and outputs
-evidence: rewriting Cargo/TypeScript/complex C dependency behavior in Please exceeded the ownership budget
-boundary: CMake/Meson/Autotools may configure selected dependencies into private prefixes; they do not own first-party builds
-validate: locked source + patches + options + toolchain reproduce declared artifacts offline
-falsifier: source topology is small and more stable than the upstream configuration layer
-avoid: making CMake mandatory because one optional dependency uses it
-enforcement: not implemented - no dependency adapter exists; ARCHITECTURE.md lists third-party dependency adapters as deliberately unimplemented
+avoid: separately maintaining target source lists, tests, and package file lists
+enforcement: enforced - `toolchain-lock --check` and `package-validate` are drift gates
 ```
 
 ## P6. Current Is A Discovery Policy; Reproducible Is A Lock
@@ -146,13 +104,12 @@ enforcement: enforced - bootstrap probes each artifact before stamping, and `./r
 
 ```text
 principle: unstable language/runtime features live in named profiles with dedicated compatibility and benchmark gates
-evidence: GCC C++26 is experimental; Go jsonv2 lacks compatibility guarantees; CPython JIT can regress workloads
-boundary: stable release profile differs from cxx26/jsonv2/python-jit profiles
+evidence: Go experiments can lack compatibility guarantees; CPython JIT can regress workloads
+boundary: stable release profile differs from named experimental profiles
 validate: tests and benchmarks compare default and experimental lanes
 falsifier: upstream graduates the feature and removes the compatibility distinction
 avoid: global GOEXPERIMENT or PYTHON_JIT settings
-exception: Go jsonv2 is a recorded, deliberate violation of the boundary and the avoid clause. `GOEXPERIMENT=jsonv2` is set globally for every Go command by `repo.sh` and `rules/go.bzl`, there is no non-jsonv2 profile, and no comparison lane satisfies the validate clause. README and ARCHITECTURE.md both describe this as the repository's single Go configuration. Treat it as an accepted debt with MR5 exit criteria, not as evidence that P8 holds. The pinned CPython side of the principle does hold: the standalone runtime makes no JIT claim and `PYTHON_JIT` is not set anywhere
-enforcement: exception recorded - partly enforced for CPython, deliberately violated for Go jsonv2 as described above
+enforcement: enforced - Go uses the pinned release defaults, and the standalone Python runtime makes no JIT claim
 ```
 
 ## P9. Runtime Cost Is Per Bundle, Not Per Script
@@ -201,18 +158,6 @@ validate: execute all entrypoints, compile/link SDK consumer, inspect ELF closur
 falsifier: artifact never crosses a process, machine, package, or ownership boundary
 avoid: declaring packaging successful after archive creation alone
 enforcement: partly enforced - `./repo.sh package-smoke` and the in-graph `package_smoke` targets do extract into a clean temporary root and execute the declared entrypoints without host Python, Deno, Go, compiler, or source-tree state, and `polyglot-demo`'s smoke script additionally validates every referenced web asset. The rest of the validate clause is not implemented: nothing compiles or links an SDK consumer, inspects the ELF closure, or verifies licenses. `package_smoke` accepts only `commands`/`checks` and an optional `smoke_script`
-```
-
-## P13. Complete Observability Does Not Mean Universal Policy Enforcement
-
-```text
-principle: describe the full graph, then choose review/lint scope separately
-evidence: clangd needs third-party actions, while project-specific clang-tidy policy over all upstream code creates noise
-boundary: complete compdb always; ordinary lint targets owned code; explicit third-party audit is available
-validate: editor navigation works in dependency code and CI lint remains actionable
-falsifier: upstream source is locally maintained and subject to repository policy
-avoid: making the compdb incomplete to keep lint quiet
-enforcement: enforced for the code this repository owns - the compdb covers every buck2-built C++ and Python-extension action and `lint` scope is selected separately by the `lint` label. The third-party half of the boundary is untested here because no third-party source is compiled
 ```
 
 ## P14. AI Instructions Are Source; AI State Is Liability
@@ -296,7 +241,7 @@ Please was fast and extensible, but missing maintained TypeScript, Rust, packagi
 
 ### MR5. Experimental Features Need Exit Criteria
 
-C++26, jsonv2, Python JIT, remote cache, and dense compression profiles need compatibility and performance evidence plus a policy for promotion or removal.
+Go experiments, Python JIT, remote cache, and dense compression profiles need compatibility and performance evidence plus a policy for promotion or removal.
 
 ### MR6. Separate Discovery, Mutation, And Execution
 
@@ -312,7 +257,7 @@ Further abstraction is noise if it does not alter an artifact owner, command, va
 - Flow native infrastructure: manifest-derived build products, package consumer verification, capability-probing doctor, pinned toolchains.
 - Please spike: strong codegen and C build primitives; weak maintained TS ecosystem; broken upstream compdb; high custom packaging ownership.
 - Deno upstream: React 19/Vite support, bundled TypeScript checker, workspaces, compile size and cross-target behavior.
-- Go upstream: Go 1.26 Green Tea GC default and experimental jsonv2 boundary.
+- Go upstream: Go 1.27 release defaults and the boundary for opt-in experiments.
 - CPython/PBS upstream: experimental JIT boundary, standalone archive variants, ABI/libc constraints.
 - Native toolchain comparison: userdocs release 2628 beats cross-tools 20260515 on compressed and extracted footprint and uniquely satisfies the native ARM64-host requirement among the compared assets; provider choice follows measured host/target capability, not project-name preference.
 - Existing repo skills: one command surface, local toolchains, lint parity, schema islands, artifact consumer tests, progressive disclosure.

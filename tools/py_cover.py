@@ -12,17 +12,7 @@ below) are recorded; files under --exclude (an absolute-or-relative prefix,
 matched the same way as --root) are skipped even if nested under a --root.
 Output paths in the emitted lcov are relative to the current working
 directory (buck2 test actions run with cwd = project root, so this yields
-repo-relative SF: paths) UNLESS a --rewrite OLD=NEW applies, in which case
-the OLD prefix is swapped for NEW first.
-
---rewrite exists because rules/python.bzl's py_extension (e.g.
-python/lib/fastbytes) stages a COPY of its package (__init__.py + the
-compiled extension) under a build-output directory for use as a PYTHONPATH
-root - so at runtime, the file sys.monitoring actually observes executing
-is that build-output copy, not the original python/lib/fastbytes/__init__.py
-source. rules/python.bzl passes one `--rewrite <pkg build dir>=python/lib`
-per py_extension dep root so the emitted lcov still reports the real
-repo-relative source path.
+repo-relative SF: paths) unless a --rewrite OLD=NEW mapping applies.
 
 Usage:
   py_cover.py --root DIR [--root DIR ...] [--exclude DIR ...] \
@@ -103,7 +93,7 @@ def _load_runner(path):
   return module
 
 
-def _run_with_monitoring(runner_path, runner_argv, in_scope):
+def _run_with_monitoring(runner_path, runner_argv, in_scope, roots=()):
   hits = {}
   executable = {}
   seen_codes = set()
@@ -114,9 +104,9 @@ def _run_with_monitoring(runner_path, runner_argv, in_scope):
     # The module's constants contain function, class, and comprehension code
     # objects even when their bodies are never called, so walk them all rather
     # than treating only observed LINE callbacks as executable source lines.
-    if id(code) in seen_codes:
+    if code in seen_codes:
       return
-    seen_codes.add(id(code))
+    seen_codes.add(code)
     path = code.co_filename
     if in_scope(path):
       ap = os.path.abspath(path)
@@ -129,6 +119,17 @@ def _run_with_monitoring(runner_path, runner_argv, in_scope):
     for constant in code.co_consts:
       if isinstance(constant, type(code)):
         remember_executable(constant)
+
+  for root in roots:
+    for directory, _subdirectories, filenames in os.walk(root):
+      for filename in filenames:
+        if not filename.endswith(".py"):
+          continue
+        path = os.path.join(directory, filename)
+        if not in_scope(path):
+          continue
+        with open(path, "rb") as source:
+          remember_executable(compile(source.read(), path, "exec", dont_inherit=True))
 
   def on_line(code, line_number):
     remember_executable(code)
@@ -198,7 +199,7 @@ def _write_lcov(hits, executable, rewrites, out_path):
 def main(argv):
   roots, excludes, rewrites, out_path, runner_path, rest = _parse_args(argv)
   in_scope = _make_scope_check(roots, excludes)
-  hits, executable = _run_with_monitoring(runner_path, rest, in_scope)
+  hits, executable = _run_with_monitoring(runner_path, rest, in_scope, roots)
   _write_lcov(hits, executable, rewrites, out_path)
 
 

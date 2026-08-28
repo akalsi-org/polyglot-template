@@ -80,44 +80,21 @@ expected = "deno"
 [[artifact]]
 tool = "go"
 target = "x86_64-linux-musl"
-version = "1.26.5"
-url = "https://go.dev/dl/go1.26.5.linux-amd64.tar.gz"
-sha256 = "5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053"
-archive = "go1.26.5.linux-amd64.tar.gz"
+version = "1.27.0"
+url = "https://go.dev/dl/go1.27.0.linux-amd64.tar.gz"
+sha256 = "675c26c449cbb18fc24b74650de1eabbae6e16f64326fd85a283fb3b58280685"
+archive = "go1.27.0.linux-amd64.tar.gz"
 expected = "go/bin/go"
 
 [[artifact]]
 tool = "go"
 target = "aarch64-linux-musl"
-version = "1.26.5"
-url = "https://go.dev/dl/go1.26.5.linux-arm64.tar.gz"
-sha256 = "fe4789e92b1f33358680864bbe8704289e7bb5fc207d80623c308935bd696d49"
-archive = "go1.26.5.linux-arm64.tar.gz"
+version = "1.27.0"
+url = "https://go.dev/dl/go1.27.0.linux-arm64.tar.gz"
+sha256 = "51798d2c42d0e1c6ed7fd9f48728b4193abac9e8aad6dbac2fe96a81f5909bda"
+archive = "go1.27.0.linux-arm64.tar.gz"
 expected = "go/bin/go"
 
-[[artifact]]
-tool = "doctest"
-target = "x86_64-linux-musl"
-version = "2.5.3"
-url = "https://github.com/doctest/doctest/archive/refs/tags/v2.5.3.tar.gz"
-sha256 = "174ebc4e769928959614789c5b4e9c3d0a0f81a62bb608756b127bfebfb21331"
-archive = "doctest-v2.5.3.tar.gz"
-expected = "doctest-2.5.3/doctest/doctest.h"
-kind = "header"
-
-[[artifact]]
-tool = "doctest"
-target = "aarch64-linux-musl"
-version = "2.5.3"
-url = "https://github.com/doctest/doctest/archive/refs/tags/v2.5.3.tar.gz"
-sha256 = "174ebc4e769928959614789c5b4e9c3d0a0f81a62bb608756b127bfebfb21331"
-archive = "doctest-v2.5.3.tar.gz"
-expected = "doctest-2.5.3/doctest/doctest.h"
-kind = "header"
-
-# buck2 --version reports a content hash, not semver; the "version" below is the
-# release tag. content_hash pins the exact reported hash so bootstrap/doctor can
-# fail loudly if the downloaded binary reports something else.
 [[artifact]]
 tool = "buck2"
 target = "x86_64-linux-musl"
@@ -142,32 +119,6 @@ expected = "buck2"
 # obtained the same way; the original entry had wrongly copied it here).
 content_hash = "cff84d5d0ee8ff700a2738cb5eaac87995568b0456785ee75148295c4659c50c"
 
-# Upstream's target-specific musllinux wheels bundle the clang-format binary
-# and its runtime libraries. The archive names and hashes are immutable PyPI
-# release artifacts; bootstrap extracts the binary without depending on pip.
-[[artifact]]
-tool = "clang-format"
-target = "x86_64-linux-musl"
-version = "19.1.7"
-url = "https://files.pythonhosted.org/packages/f5/f9/6ce7fe8ff52ded01d02a568358f2ddf993347e44202b6506b039a583b7ed/clang_format-19.1.7-py2.py3-none-musllinux_1_2_x86_64.whl"
-sha256 = "d27ac1a5a8783c9271d41cd5851766ca547ea003efa4e3764f880f319b2d3ed3"
-archive = "clang_format-19.1.7-py2.py3-none-musllinux_1_2_x86_64.whl"
-expected = "clang_format/data/bin/clang-format"
-
-[[artifact]]
-tool = "clang-format"
-target = "aarch64-linux-musl"
-version = "19.1.7"
-url = "https://files.pythonhosted.org/packages/52/04/ed8e2af6b3e29655a858b3aad145f3f0539df0dd1c77815b95f578260bd3/clang_format-19.1.7-py2.py3-none-musllinux_1_2_aarch64.whl"
-sha256 = "ffca915c09aed9137f8c649ad7521bd5ce690c939121db1ba54af2ba63ac8374"
-archive = "clang_format-19.1.7-py2.py3-none-musllinux_1_2_aarch64.whl"
-expected = "clang_format/data/bin/clang-format"
-
-# shellcheck ships statically linked binaries with no runtime dependencies, so
-# it needs neither the musl loader nor a library path - a plain direct wrapper
-# is enough. Pinning it turns shell linting from an opportunistic host-provided
-# gate (present on CI, absent on most developer machines, so its findings
-# surfaced only after a push) into a guaranteed one.
 [[artifact]]
 tool = "shellcheck"
 target = "x86_64-linux-musl"

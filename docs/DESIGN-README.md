@@ -1,8 +1,8 @@
 # Polyglot Repository Template Decision Package
 
-Status: proposed design baseline with executable pinned C++, Python, Go, TypeScript, React 19/browser-TypeScript, bootstrap, package, and tag-release slices at the repository root. Schema work and fleet deployment remain proposed.
+Status: proposed design baseline with executable pinned pure Python, Go, TypeScript, React 19/browser-TypeScript, bootstrap, package, and tag-release slices at the repository root. Schema work and fleet deployment remain proposed.
 
-This document set defines a cloneable, non-JVM, AI-ready monorepo template for C/C++, Go, Python with native extensions, and Deno TypeScript/React. It records both the concrete design and the reasoning rules that produced it.
+This document set defines a cloneable, non-JVM, AI-ready monorepo template for Go, pure Python, and Deno TypeScript/React. It records both the concrete design and the reasoning rules that produced it.
 
 ## Documents
 
@@ -16,13 +16,14 @@ Current and verified:
 - [CURRENT-CAPABILITIES.md](CURRENT-CAPABILITIES.md) — the compatibility and readiness contract; the authority over this document for what is executable today.
 - [ARCHITECTURE.md](ARCHITECTURE.md) — repository layout, commands, toolchains, build graph, packaging, validation, and implementation phases.
 - [LANGUAGE-GUIDE.md](LANGUAGE-GUIDE.md) — per-language source layout, commands, and validation.
+- [mpsc-queue.md](mpsc-queue.md) — Go shared-memory queue API, format version 4, ownership, recovery, ordering, performance, and verification contracts.
 - [TOOLCHAIN-LIFECYCLE.md](TOOLCHAIN-LIFECYCLE.md) — reviewed toolchain update, qualification, recovery, and rollback workflow.
 - [CI-RELEASE.md](CI-RELEASE.md) — GitHub Actions verification jobs, packaging, target archives, evidence sidecars, and the tag-gated release contract.
 - [EDITOR.md](EDITOR.md) — VS Code setup against the pinned toolchain and configured language roots.
-- [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — bootstrap, Buck daemon, cache, compdb, and native-module recovery.
+- [TROUBLESHOOTING.md](TROUBLESHOOTING.md) — bootstrap, Buck daemon, cache, and language-tool recovery.
 - [IMPROVEMENT-ROADMAP.md](IMPROVEMENT-ROADMAP.md) — audit findings turned into phased work, with per-item completion status.
 - [PRINCIPLES.md](PRINCIPLES.md) — durable principles, decision tree, evidence, boundaries, falsifiers, and meta-rules; each principle carries its own enforcement status.
-- [../README.md](../README.md) — runnable target, lock/bootstrap, C++ graph, language source layout, package/runtime closure, AI guide, tests, and live two-runner CI.
+- [../README.md](../README.md) — runnable target, lock/bootstrap, language source layout, package/runtime closure, AI guide, tests, and live two-runner CI.
 
 Proposals — designs for systems that do not exist in this checkout:
 
@@ -32,17 +33,14 @@ Proposals — designs for systems that do not exist in this checkout:
 
 Spikes — research, superseded or not adopted:
 
-- [spikes/serialization/README.md](spikes/serialization/README.md) — nested-array IDL spike comparing Fory, Bebop, FlatBuffers, and a minimal borrowed-view lower bound.
-- [spikes/parallel-build.md](spikes/parallel-build.md) — historical parallel-build spike, predating the Buck2 migration.
 
 ## Decision Summary
 
 ```text
 repo.sh
   -> Buck2                        one in-graph scheduler, build/test/cache
-      -> first-party cxx rules    C/C++ semantic graph (in-graph gcc-musl + mold)
       -> first-party go rules     Go modules/build/test
-      -> first-party python rules wheels/native extensions
+      -> first-party python rules pure Python build/test
       -> first-party deno rules   TypeScript/React (Deno + Vite)
       -> schema compiler          proposed shared generated contracts
       -> first-party package()    one independently versioned package at a time
@@ -55,24 +53,21 @@ The repository owns tool provenance, lifecycle policy, packaging, benchmarks, an
 1. `repo.sh` is the stable human and CI interface.
 2. All tools are pinned in a committed lock and installed transactionally under ignored `.local/`.
 3. Normal bootstrap consumes exact committed pins; reviewed lock changes use the manual `toolchain-lock`/`toolchain-qualify` lifecycle rather than an automatic mutable-artifact updater.
-4. Buck2 is the sole scheduler: one in-graph build/test/cache pass over every first-party rule (`rules/cxx.bzl`, `rules/go.bzl`, `rules/python.bzl`, `rules/deno.bzl`, `rules/package.bzl`), with in-graph toolchains (`toolchains/lock.bzl`, generated from `tools.lock.toml`) rather than a coarse task runner shelling out to per-language build tools.
-5. A BXL compilation-database query (`bxl/compdb.bxl`) over the Buck2-built cpp/python actions materializes one complete root `compile_commands.json` on demand (`./repo.sh compile-commands`), rather than each consumer emitting its own fragment for a separate merge step.
-6. The root compilation database currently merges C++ and Python native-extension fragments; third-party and generated-source import is proposed.
-7. Upstream CMake, Meson, Autotools, or custom builds are optional dependency adapters, not the repository build system.
-8. Go produces native binaries; Green Tea GC is the Go 1.26 default. The current wrapper enables `jsonv2` for every Go command.
-9. Deno owns the implemented TypeScript checking, formatting, linting, testing, and local execution; Vite owns React 19 browser bundles.
-10. Python applications reference one compatible, independently released runtime package. The default stripped standalone runtime makes no JIT claim; an experimental source-built JIT variant is separate.
-11. Packages and runtimes are independently versioned and released. Package runtime requirements are declared in `packages/catalog.bzl`; resolution selects the matching host-triplet runtime closure. No global repository tarball is required.
-12. The implemented package format is deterministic `.tar.gz`, with consumer smoke checks from clean extraction.
-13. `.agents/md/overview.md` is the canonical AI guide and root `AGENTS.md` is a relative symlink to it.
-14. `.agents/skills/` is the repository skill root when repository-owned skills are added. Vendor-specific `.claude/`, `.codex/`, `.grok/`, and runtime state remain ignored and machine-local.
-15. Deployment groups select independently versioned packages and run directly under systemd on inexpensive VPS hosts.
-16. HAProxy owns low-overhead TLS termination, exact subdomain routing, health checks, blue/green activation, and draining through durable plus runtime state. Mesh-safe service discovery supplies backend endpoints through a unicast registry or DNS-backed selector feed, and blue/green slots need not share a host.
-17. Applications declare only a logical subdomain and scope; environments own TLDs, zones, certificate bindings, fleet selectors, and placement policy, while fleet-generated inventory supplies observed addresses.
-18. Wildcard DNS removes per-application propagation, and a central ACME DNS-01 controller distributes wildcard certificates with HAProxy hot activation.
-19. The optional `infra` profile uses OpenTofu for supported provider resources, minimal cloud-init for enrollment, and pinned isolated Ansible for host convergence.
-20. Git-tracked fleet intent owns desired inventory; provider state and host probes generate observed inventory projections.
-21. Host convergence and application deployment are separate lifecycles sharing selectors, bounded execution, resource locks, and signed receipts.
+4. Buck2 is the sole scheduler. It builds, tests, and caches every first-party rule in one graph. First-party rules live under `rules/`. `toolchains/lock.bzl` defines in-graph toolchains from `tools.lock.toml`. No coarse task runner invokes separate language build tools.
+5. Go 1.27 produces native binaries with the release's default runtime and language settings.
+6. Deno owns the implemented TypeScript checking, formatting, linting, testing, and local execution; Vite owns React 19 browser bundles.
+7. Python applications reference one compatible, independently released runtime package. The default stripped standalone runtime makes no JIT claim; an experimental source-built JIT variant is separate.
+8. Packages and runtimes are independently versioned and released. Package runtime requirements are declared in `packages/catalog.bzl`; resolution selects the matching host-triplet runtime closure. No global repository tarball is required.
+9. The implemented package format is deterministic `.tar.gz`, with consumer smoke checks from clean extraction.
+10. `.agents/md/overview.md` is the canonical AI guide and root `AGENTS.md` is a relative symlink to it.
+11. `.agents/skills/` is the repository skill root when repository-owned skills are added. Vendor-specific `.claude/`, `.codex/`, `.grok/`, and runtime state remain ignored and machine-local.
+12. Deployment groups select independently versioned packages and run directly under systemd on inexpensive VPS hosts.
+13. HAProxy owns low-overhead TLS termination, exact subdomain routing, health checks, blue/green activation, and draining through durable plus runtime state. Mesh-safe service discovery supplies backend endpoints through a unicast registry or DNS-backed selector feed, and blue/green slots need not share a host.
+14. Applications declare only a logical subdomain and scope; environments own TLDs, zones, certificate bindings, fleet selectors, and placement policy, while fleet-generated inventory supplies observed addresses.
+15. Wildcard DNS removes per-application propagation, and a central ACME DNS-01 controller distributes wildcard certificates with HAProxy hot activation.
+13. The optional `infra` profile uses OpenTofu for supported provider resources, minimal cloud-init for enrollment, and pinned isolated Ansible for host convergence.
+17. Git-tracked fleet intent owns desired inventory; provider state and host probes generate observed inventory projections.
+18. Host convergence and application deployment are separate lifecycles sharing selectors, bounded execution, resource locks, and signed receipts.
 
 ## Explicit Non-Goals
 
@@ -90,11 +85,9 @@ The repository owns tool provenance, lifecycle policy, packaging, benchmarks, an
 
 Start implementation with one vertical slice only:
 
-- one C or C++ library and executable;
 - one Go executable;
-- one Python application with a tiny native extension;
+- one pure Python application;
 - one Deno React 19 application and one local Deno command;
-- one complete compilation database validated by clangd;
 - one self-contained package with a deterministic archive and consumer smoke test.
 
 Do not expand the template until this slice proves offline normal operation, runtime deduplication, package closure, and manageable configuration ownership.

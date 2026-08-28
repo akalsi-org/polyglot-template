@@ -1,9 +1,0 @@
-load("//rules:cxx.bzl", "cxx_binary")
-
-cxx_binary(
-  name = "hello",
-  srcs = ["main.cc"],
-  deps = ["//cpp/lib/example:example"],
-  pkg_name = "cpp-hello",
-  visibility = ["PUBLIC"],
-)

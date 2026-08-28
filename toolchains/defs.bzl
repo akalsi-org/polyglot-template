@@ -6,7 +6,7 @@ generation loop lives here and toolchains/BUCK just calls it.
 
 load("//rules:group.bzl", "group")
 load("//rules:host.bzl", "native_target")
-load("//rules:toolchain.bzl", "gcc_musl_toolchain", "header_probe_toolchain", "python_toolchain", "version_probe_toolchain")
+load("//rules:toolchain.bzl", "gcc_musl_toolchain", "python_toolchain", "version_probe_toolchain")
 load(":lock.bzl", "TOOLCHAINS")
 
 def define_toolchains():
@@ -21,7 +21,7 @@ def define_toolchains():
     name = "gcc-musl-" + target,
     url = gcc["url"], sha256 = gcc["sha256"], archive = gcc["archive"],
     expected = gcc["expected"], mold = gcc["mold"], loader = gcc["loader"],
-    target_triple = target, reflection_src = "//cpp/test:reflection.cc",
+    target_triple = target,
     probe = True, visibility = ["PUBLIC"],
   )
 
@@ -43,14 +43,6 @@ def define_toolchains():
       probe = True, visibility = ["PUBLIC"],
     )
 
-  doctest = TOOLCHAINS["doctest"][target]
-  header_probe_toolchain(
-    name = "doctest-" + target,
-    url = doctest["url"], sha256 = doctest["sha256"], archive = doctest["archive"],
-    expected = doctest["expected"], probe_pattern = "^#define DOCTEST_VERSION_MAJOR 2$",
-    visibility = ["PUBLIC"],
-  )
-
   # The only instantiated toolchains are already native, so this group is a
   # stable public spelling for CI and targeted toolchain validation.
   group(
@@ -60,7 +52,6 @@ def define_toolchains():
       ":python-" + target,
       ":go-" + target,
       ":deno-" + target,
-      ":doctest-" + target,
     ],
     visibility = ["PUBLIC"],
   )

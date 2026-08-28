@@ -22,7 +22,8 @@
   },
   "go.toolsEnvVars": {
     "CGO_ENABLED": "0",
-    "GOEXPERIMENT": "jsonv2",
+    "GOENV": "off",
+    "GOFLAGS": "-mod=vendor -buildvcs=false",
     "GOTOOLCHAIN": "local"
   },
   "python.analysis.extraPaths": [

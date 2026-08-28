@@ -1,0 +1,16 @@
+# go/lib/unsafeborrow: explicit no-copy conversions and safe alternatives.
+
+load("//rules:go.bzl", "go_library", "go_test")
+
+go_library(
+  name = "unsafeborrow",
+  srcs = ["unsafeborrow.go"],
+  visibility = ["PUBLIC"],
+)
+
+go_test(
+  name = "unsafeborrow_test",
+  srcs = ["unsafeborrow_test.go"],
+  deps = [":unsafeborrow"],
+  packages = ["./go/lib/unsafeborrow"],
+)

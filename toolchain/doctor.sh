@@ -38,18 +38,9 @@ deep_validate_python() {
 }
 
 deep_validate_gcc() {
-  local install=$1 expected=$2 mold binutil binutil_rel
-  mold=$(lock_value gcc-musl "$target" mold)
-  [[ -x $install/$mold ]] || { printf 'invalid: missing mold\n' >&2; return 1; }
-  for binutil in ar ranlib nm strip objcopy ld; do
-    binutil_rel=$(lock_value gcc-musl "$target" "$binutil")
-    [[ -x $install/$binutil_rel ]] || { printf 'invalid: missing %s\n' "$binutil" >&2; return 1; }
-  done
-  [[ $("$install/$expected" -dumpmachine) == "$target" ]] || {
-    printf 'invalid: compiler target mismatch\n' >&2; return 1;
-  }
-  "$install/$mold" --version | grep -q '^mold 2\.41\.0' || return 1
-  "$install/$expected" -std=gnu++26 -freflection -fsyntax-only "$ROOT/cpp/test/reflection.cc"
+  local install=$1 expected=$2 loader
+  loader=$(lock_value gcc-musl "$target" loader)
+  [[ -x $install/$loader ]] || { printf 'invalid: missing musl loader\n' >&2; return 1; }
 }
 
 deep_validate_deno() {
@@ -64,20 +55,6 @@ deep_validate_go() {
   [[ $("$install/$expected" version | awk '{ print $3 }') == "go$version" ]] || {
     printf 'invalid: Go version mismatch\n' >&2; return 1;
   }
-}
-
-deep_validate_clang_format() {
-  local install=$1 expected=$2 gcc_version loader gcc_install loader_dir
-  gcc_version=$(lock_value gcc-musl "$target" version)
-  loader=$(lock_value gcc-musl "$target" loader)
-  gcc_install="$LOCAL/toolchain/$target/gcc-musl-$gcc_version"
-  loader_dir=$(dirname -- "$gcc_install/$loader")
-  "$gcc_install/$loader" --library-path "$loader_dir:$install/clang_format.libs" "$install/$expected" --version >/dev/null
-}
-
-deep_validate_doctest() {
-  local install=$1 expected=$2
-  grep -q '^#define DOCTEST_VERSION_MAJOR 2$' "$install/$expected"
 }
 
 deep_validate_buck2() {
@@ -103,8 +80,6 @@ deep_validate() {
     gcc-musl:*) deep_validate_gcc "$install" "$expected" ;;
     deno:*) deep_validate_deno "$install" "$expected" "$version" ;;
     go:*) deep_validate_go "$install" "$expected" "$version" ;;
-    clang-format:*) deep_validate_clang_format "$install" "$expected" ;;
-    doctest:*) deep_validate_doctest "$install" "$expected" ;;
     buck2:*) deep_validate_buck2 "$install" "$expected" ;;
     *:executable) "$install/$expected" --version >/dev/null ;;
   esac

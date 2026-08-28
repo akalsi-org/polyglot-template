@@ -5,6 +5,7 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 workflow=$root/.github/workflows/verify.yml
 release_workflow=$root/.github/workflows/package-release.yml
 caller_workflow=$root/.github/workflows/ci-release.yml
+ordering_workflow=$root/.github/workflows/ordering-campaign.yml
 
 fail() {
   printf 'workflow contract: failed: %s\n' "$1" >&2
@@ -75,6 +76,27 @@ assert_count 'ARM runners across parallel jobs' 3 'runner: ubuntu-24.04-arm$' "$
 assert_present 'workflow pins actions/cache to the approved SHA' grep -Fq 'actions/cache@5a3ec84eff668545956fd18022155c47e93e2684' "$workflow"
 assert_present 'workflow pins actions/upload-artifact to the approved SHA' grep -Fq 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' "$workflow"
 assert_present 'release workflow pins actions/download-artifact to the approved SHA' grep -Fq 'actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093' "$release_workflow"
+
+assert_present 'ordering campaign remains manually dispatched' grep -Eq '^  workflow_dispatch:$' "$ordering_workflow"
+assert_absent 'ordering campaign must not run on pushes' grep -Eq '^  push:$' "$ordering_workflow"
+assert_absent 'ordering campaign must not run on pull requests' grep -Eq '^  pull_request:$' "$ordering_workflow"
+assert_absent 'ordering campaign must not become a called verification workflow' grep -Eq '^  workflow_call:$' "$ordering_workflow"
+assert_present 'ordering campaign uses a native ARM64 runner' grep -Eq '^    runs-on: ubuntu-24\.04-arm$' "$ordering_workflow"
+assert_present 'ordering campaign checks the native ARM64 target' grep -Fq 'test "$(./repo.sh target)" = aarch64-linux-musl' "$ordering_workflow"
+assert_present 'ordering campaign defaults to sufficient repetitions' grep -Fq '        default: "100"' "$ordering_workflow"
+assert_present 'ordering campaign rejects undersized repetition counts' grep -Fq '((repetitions >= 20))' "$ordering_workflow"
+assert_present 'ordering campaign bootstraps pinned tools' grep -Fq './repo.sh bootstrap --offline || ./repo.sh bootstrap' "$ordering_workflow"
+assert_present 'ordering campaign performs the deep doctor check' grep -Fq './repo.sh doctor --deep' "$ordering_workflow"
+assert_present 'ordering campaign runs the Go mutant script' grep -Fq './repo.sh exec go/lib/mpsc/ordering_mutants.sh' "$ordering_workflow"
+assert_present 'ordering campaign requires every mutant to be caught' grep -Fq 'ORDERING_MUTANTS_REQUIRE_CAUGHT: "1"' "$ordering_workflow"
+assert_present 'ordering campaign passes the requested repetition count' grep -Fq 'ORDERING_MUTANTS_REPETITIONS: ${{ inputs.repetitions }}' "$ordering_workflow"
+assert_present 'ordering campaign preserves a diagnostic log' grep -Fq 'ordering-mutants.log' "$ordering_workflow"
+assert_present 'ordering campaign publishes verdicts in the job summary' grep -Fq 'GITHUB_STEP_SUMMARY' "$ordering_workflow"
+assert_present 'ordering campaign uploads diagnostics after failure' grep -Fq 'name: Upload ordering campaign diagnostics' "$ordering_workflow"
+assert_present 'ordering campaign pins upload-artifact to the approved SHA' \
+  grep -Fq 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' "$ordering_workflow"
+assert_order 'ordering campaign runs deep doctor before mutation testing' "$ordering_workflow" \
+  './repo.sh doctor --deep' './repo.sh exec go/lib/mpsc/ordering_mutants.sh'
 assert_present 'toolchain cache key is runner and target scoped' grep -Fq 'polyglot-v1-${{ runner.os }}-${{ matrix.target }}' "$workflow"
 assert_absent 'Buck cache key must not invalidate for every rule change' grep -Fq "'rules/**'" "$workflow"
 assert_present 'Go build cache path is target scoped' grep -Fq 'buck-out/go-build-cache/${{ matrix.target }}' "$workflow"
@@ -173,9 +195,6 @@ for command in \
   './repo.sh lint' './repo.sh package-validate' './repo.sh infra-test' \
   './repo.sh test opt' './repo.sh coverage' \
   './repo.sh package-target-check "$package"' \
-  './repo.sh cpp-build dbg' './repo.sh cpp-run dbg' \
-  './repo.sh cpp-build opt' './repo.sh cpp-run opt' \
-  './repo.sh exec buck2 test --target-platforms //config:${{ matrix.target }}-opt //python/test:test' \
   './repo.sh python -I -c'; do
   assert_present "workflow retains distinct check: $command" grep -Fq "$command" "$workflow"
 done
@@ -249,7 +268,7 @@ fi
 # be workflow-only steps; they now belong to infra-test, and `ci` is a strict
 # superset of the lint job's gates.
 infra_test_block=$(sed -n '/^  infra-test)/,/^    ;;$/p' "$root/repo.sh")
-for script in test/graph-compdb-contract.sh test/deno-manifest-contract.sh; do
+for script in test/deno-manifest-contract.sh; do
   assert_present "repo infra-test runs $script" grep -Fq "$script" <<<"$infra_test_block"
 done
 ci_block=$(sed -n '/^  ci)/,/^    ;;$/p' "$root/repo.sh")
@@ -258,11 +277,11 @@ for gate in 'doctor --deep' 'lint' 'package-validate' 'infra-test' 'build' 'test
 done
 
 help=$("$root/repo.sh" help)
-for command in shell exec buck2 format lint build test cpp-build cpp-run cpp-test python-build python-test \
+for command in shell exec buck2 format lint build test python-build python-test \
   ts-build ts-test tsweb-build tsweb-test go-build go-test init-project package-list package package-smoke; do
   assert_present "repo help documents '$command'" grep -Eq "^  ${command}( |$)" <<<"$help"
 done
-for removed in _job-budget cpp-configure cpp-reflection-probe; do
+for removed in _job-budget cpp-configure cpp-reflection-probe cpp-build cpp-run cpp-test compile-commands; do
   assert_absent "repo help must not document removed command '$removed'" grep -Eq "^  ${removed}( |$)" <<<"$help"
 done
 
@@ -271,50 +290,47 @@ assert_absent 'repo.sh must not reference Moon' grep -qi 'moon' "$root/repo.sh"
 assert_present 'repo.sh build delegates to the pinned Buck2 binary' grep -Fq '"$POLYGLOT_BUCK2" build' "$root/repo.sh"
 assert_present 'repo.sh test selects the requested target platform' grep -Fq 'mapfile -t plat < <(target_platform_args "$profile")' "$root/repo.sh"
 assert_present 'repo.sh test delegates to pinned Buck2 over the full graph' grep -Fq '"$POLYGLOT_BUCK2" test "${plat[@]}" //...' "$root/repo.sh"
-assert_fixed_count 'aggregate build, test, and cpp-build refresh profile compdb' 3 \
-  '[[ ${POLYGLOT_DEFER_COMPDB:-0} == 1 ]] || "$ROOT/repo.sh" compile-commands "$profile"' "$root/repo.sh"
+assert_absent 'repo.sh has no compilation database surface' grep -Fq 'compile-commands' "$root/repo.sh"
 assert_present 'repo.sh lint runs Buck2 lint-labelled tests' grep -Fq '"$POLYGLOT_BUCK2" test //... --labels lint' "$root/repo.sh"
 
-environment=$("$root/repo.sh" exec bash -c 'printf "%s|%s|%s|%s|%s|%s\n" "$POLYGLOT_ROOT" "$POLYGLOT_TARGET" "$CXX" "$GOROOT" "$DENO_DIR" "$PYTHONPATH"')
-IFS='|' read -r env_root env_target env_cxx env_goroot env_deno_dir env_pythonpath <<<"$environment"
+environment=$("$root/repo.sh" exec bash -c 'printf "%s|%s|%s|%s|%s|%s|%s|%s|%s\n" "$POLYGLOT_ROOT" "$POLYGLOT_TARGET" "$GOROOT" "$DENO_DIR" "$PYTHONPATH" "$GOENV" "$GOTOOLCHAIN" "$CGO_ENABLED" "$GOFLAGS"')
+IFS='|' read -r env_root env_target env_goroot env_deno_dir env_pythonpath env_goenv env_gotoolchain env_cgo env_goflags <<<"$environment"
 assert_equal 'repo environment exposes the repository root' "$root" "$env_root"
 assert_matches 'repo environment selects a supported musl target' '^(x86_64|aarch64)-linux-musl$' "$env_target"
-[[ -x $env_cxx && -d $env_goroot && -d $env_deno_dir ]] || fail 'repo environment must expose executable C++ compiler and Go/Deno directories'
+[[ -d $env_goroot && -d $env_deno_dir ]] || fail 'repo environment must expose Go and Deno directories'
 assert_equal 'repo environment sets the isolated Python path' "$root/build/python/$env_target/lib:$root/python/lib:$root/python/app" "$env_pythonpath"
+assert_equal 'repo environment disables persistent Go configuration' off "$env_goenv"
+assert_equal 'repo environment disables Go toolchain downloads' local "$env_gotoolchain"
+assert_equal 'repo environment disables Go CGO' 0 "$env_cgo"
+assert_matches 'repo environment fixes vendor and VCS build flags' '(^| )-p=[1-9][0-9]* -mod=vendor -buildvcs=false$' "$env_goflags"
 assert_equal 'repo python launcher runs in isolated mode' 'python launcher' "$("$root/repo.sh" exec python -I -c 'print("python launcher")')"
 assert_matches 'repo Go launcher uses Go 1.x' '^go version go1\.' "$("$root/repo.sh" exec go version)"
 assert_matches 'repo Deno launcher uses the pinned release' '^deno 2\.9\.2 ' "$("$root/repo.sh" exec deno --version | head -n1)"
 assert_matches 'repo Buck2 launcher runs Buck2' '^buck2 ' "$("$root/repo.sh" exec buck2 --version)"
 assert_equal 'repo shell resolves Python from .local/bin' "$root/.local/bin/python" "$("$root/repo.sh" exec bash -c 'which python')"
 assert_equal 'repo shell resolves Go from .local/bin' "$root/.local/bin/go" "$("$root/repo.sh" exec bash -c 'which go')"
-assert_equal 'repo shell resolves GCC from .local/bin' "$root/.local/bin/gcc" "$("$root/repo.sh" exec bash -c 'which gcc')"
-assert_equal 'repo shell resolves G++ from .local/bin' "$root/.local/bin/g++" "$("$root/repo.sh" exec bash -c 'which g++')"
 assert_equal 'repo shell resolves Buck2 from .local/bin' "$root/.local/bin/buck2" "$("$root/repo.sh" exec bash -c 'which buck2')"
-for binutil in ar ranlib nm strip objcopy ld; do
-  assert_equal "repo shell resolves $binutil from .local/bin" "$root/.local/bin/$binutil" "$("$root/repo.sh" exec bash -c "which $binutil")"
-done
 assert_equal 'self-contained Python launcher works without environment setup' 'self-contained python' "$(env -i PATH=/usr/bin:/bin "$root/.local/bin/python" -I -c 'print("self-contained python")')"
 assert_matches 'self-contained Go launcher works without environment setup' '^go version go1\.' "$(env -i PATH=/usr/bin:/bin "$root/.local/bin/go" version)"
-assert_equal 'self-contained GCC launcher reports the selected target' "$env_target" "$(env -i PATH=/usr/bin:/bin "$root/.local/bin/gcc" -dumpmachine)"
-assert_equal 'self-contained G++ launcher reports the selected target' "$env_target" "$(env -i PATH=/usr/bin:/bin "$root/.local/bin/g++" -dumpmachine)"
-assert_present 'self-contained ar launcher runs without environment setup' env -i PATH=/usr/bin:/bin "$root/.local/bin/ar" --version
-assert_present 'self-contained strip launcher runs without environment setup' env -i PATH=/usr/bin:/bin "$root/.local/bin/strip" --version
+standalone_go_env=$(env -i PATH=/usr/bin:/bin GOENV=/tmp/host-goenv GOFLAGS=-mod=mod \
+  "$root/.local/bin/go" env GOENV GOTOOLCHAIN CGO_ENABLED GOFLAGS GOPATH GOMODCACHE GOCACHE)
+mapfile -t standalone_go_values <<<"$standalone_go_env"
+assert_equal 'self-contained Go launcher disables persistent Go configuration' '' "${standalone_go_values[0]}"
+assert_equal 'self-contained Go launcher disables toolchain downloads' local "${standalone_go_values[1]}"
+assert_equal 'self-contained Go launcher disables CGO' 0 "${standalone_go_values[2]}"
+assert_matches 'self-contained Go launcher fixes vendor and VCS flags' '^-p=[1-9][0-9]* -mod=vendor -buildvcs=false$' "${standalone_go_values[3]}"
+assert_equal 'self-contained Go launcher isolates GOPATH' "$root/.local/cache/go/path" "${standalone_go_values[4]}"
+assert_equal 'self-contained Go launcher isolates GOMODCACHE' "$root/.local/cache/go/mod" "${standalone_go_values[5]}"
+assert_equal 'self-contained Go launcher isolates GOCACHE' "$root/.local/cache/go/build" "${standalone_go_values[6]}"
 assert_present 'self-contained Buck2 launcher runs without environment setup' env -i PATH=/usr/bin:/bin "$root/.local/bin/buck2" --version
 
-shell_home=$(mktemp -d)
-trap 'rm -rf -- "$shell_home"' EXIT
-printf 'export PATH=/usr/bin:/bin\n' >"$shell_home/.bashrc"
-shell_paths=$(printf 'which python\nwhich go\nwhich gcc\nwhich g++\nwhich buck2\npython -I -c "print(42)"\ngo version\nexit\n' | HOME=$shell_home "$root/repo.sh" shell 2>/dev/null)
-mapfile -t shell_path_lines <<<"$shell_paths"
-assert_equal 'interactive repo shell resolves Python from .local/bin' "$root/.local/bin/python" "${shell_path_lines[0]:-}"
-assert_equal 'interactive repo shell resolves Go from .local/bin' "$root/.local/bin/go" "${shell_path_lines[1]:-}"
-assert_equal 'interactive repo shell resolves GCC from .local/bin' "$root/.local/bin/gcc" "${shell_path_lines[2]:-}"
-assert_equal 'interactive repo shell resolves G++ from .local/bin' "$root/.local/bin/g++" "${shell_path_lines[3]:-}"
-assert_equal 'interactive repo shell resolves Buck2 from .local/bin' "$root/.local/bin/buck2" "${shell_path_lines[4]:-}"
-assert_contains 'interactive repo shell runs Python' $'\n42\n' "$shell_paths"
-assert_contains 'interactive repo shell runs Go' $'\ngo version go1.' "$shell_paths"
 assert_present 'repo.sh sources its dedicated shell rc file' grep -Fq 'repo-shell.bashrc' "$root/repo.sh"
 assert_absent 'repo.sh must not launch shell as a login shell' grep -Fq -- '--login' "$root/repo.sh"
 assert_absent 'repo.sh must not source deprecated toolchain/env' grep -Fq 'toolchain/env' "$root/repo.sh"
+
+# Exercise the Buck rule boundary through generated first-party packages. The
+# lane graph includes the dependency through one target, while another target
+# imports the same package without declaring it.
+bash "$root/test/go-rule-contract.sh"
 
 printf 'workflow contract: ok\n'

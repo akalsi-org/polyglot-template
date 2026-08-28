@@ -1,7 +1,6 @@
 {
   "recommendations": [
     "denoland.vscode-deno",
-    "llvm-vs-code-extensions.vscode-clangd",
     "ms-python.python",
     "ms-python.vscode-pylance",
     "golang.go",

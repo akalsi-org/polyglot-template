@@ -17,6 +17,9 @@ grep -Fq 'no raw-build fallback assembler' "$root/docs/ARCHITECTURE.md"
 grep -Fq 'zero-npm-dependency' "$root/docs/ARCHITECTURE.md"
 grep -Fq 'GitHub artifact attestation' "$root/docs/CI-RELEASE.md"
 grep -Fq 'actions/attest' "$root/docs/CI-RELEASE.md"
+grep -Fq '## Manual ARM64 Ordering Campaign' "$root/docs/CI-RELEASE.md"
+grep -Fq '`ordering-campaign.yml` runs only through manual dispatch' "$root/docs/CI-RELEASE.md"
+grep -Fq 'It defaults to 100 repetitions per mutant' "$root/docs/CI-RELEASE.md"
 grep -Fq 'polyglot.release-manifest/v1' "$root/test/test-package-release.sh"
 grep -Fq 'requires annotated tags' "$root/docs/CURRENT-CAPABILITIES.md"
 grep -Fq 'must be annotated' "$root/docs/CI-RELEASE.md"
@@ -30,7 +33,6 @@ grep -Fq 'Status: the bootstrap-first README Quick Start' "$root/docs/IMPROVEMEN
 # compatibility and release-policy limit explicit so proposal prose cannot be
 # mistaken for a current command guarantee.
 grep -Fq 'No cross-compilation and no macOS or Windows support.' "$root/docs/CURRENT-CAPABILITIES.md"
-grep -Fq 'Sanitizers are explicitly deferred to preserve the hermetic Linux-musl toolchain contract' "$root/docs/CURRENT-CAPABILITIES.md"
 grep -Fq 'npm-dependent runtime packaging is deferred.' "$root/docs/CURRENT-CAPABILITIES.md"
 grep -Fq 'requires annotated tags' "$root/docs/CURRENT-CAPABILITIES.md"
 grep -Fq 'No `repo.sh deploy` interface, remote transport, host mutation' "$root/docs/CURRENT-CAPABILITIES.md"

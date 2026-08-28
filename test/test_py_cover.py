@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import os
 import sys
 import tempfile
 import unittest
@@ -45,12 +46,51 @@ class PythonCoverageTest(unittest.TestCase):
     self.assertIn("SF:", report)
     self.assertNotIn("DA:None", report)
 
-  def _collect_coverage(self, root: Path) -> str:
-    in_scope = py_cover._make_scope_check([str(root)], [])
+  def test_unimported_application_is_reported_uncovered(self) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+      test_root = Path(directory)
+      (test_root / "test_application_probe.py").write_text("def test_application_probe():\n  pass\n")
+      app_root = ROOT / "python/app"
+      report = self._collect_coverage(test_root, roots = [app_root])
+
+    self.assertIn(
+      "SF:python/app/hello/main.py\n"
+      "DA:1,0\n"
+      "DA:4,0\n"
+      "DA:5,0\n"
+      "LF:3\n"
+      "LH:0\n"
+      "end_of_record\n",
+      report,
+    )
+
+  def test_unimported_fixture_lines_are_reported_as_zero(self) -> None:
+    with tempfile.TemporaryDirectory() as directory:
+      root = Path(directory)
+      (root / "test_fixture_probe.py").write_text("def test_fixture_probe():\n  pass\n")
+      fixture = root / "fixture.py"
+      fixture.write_text("VALUE = 7\n\ndef unused():\n  return VALUE\n")
+      report = self._collect_coverage(root)
+
+    self.assertIn(
+      "SF:%s\n"
+      "DA:1,0\n"
+      "DA:3,0\n"
+      "DA:4,0\n"
+      "LF:3\n"
+      "LH:0\n"
+      "end_of_record\n" % os.path.relpath(fixture),
+      report,
+    )
+
+  def _collect_coverage(self, root: Path, roots: list[Path] | None = None) -> str:
+    coverage_roots = roots or [root]
+    in_scope = py_cover._make_scope_check([str(path) for path in coverage_roots], [])
     hits, executable = py_cover._run_with_monitoring(
       str(ROOT / "tools/py_test_runner.py"),
       ["discover", "-s", str(root), "-p", "test_*.py"],
       in_scope,
+      coverage_roots,
     )
     output = root / "coverage.lcov"
     py_cover._write_lcov(hits, executable, [], str(output))

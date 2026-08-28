@@ -20,7 +20,7 @@ PACKAGE_CATALOG = {
       "name": "polyglot-demo",
       "version": "0.1.0",
       "kind": "application",
-      "executables": ["cpp-hello", "go-hello", "python-hello"],
+      "executables": ["go-hello", "python-hello"],
       "supported_targets": ["x86_64-linux-musl", "aarch64-linux-musl"],
       "runtime": {"name": "python", "version": "^3.14", "variant": "install_only_stripped"},
     },

@@ -2,22 +2,6 @@
 # Do not edit by hand; run tools/gen_toolchain_lock.py to refresh.
 
 TOOLCHAINS = {
-  "clang-format": {
-    "aarch64-linux-musl": {
-      "archive": "clang_format-19.1.7-py2.py3-none-musllinux_1_2_aarch64.whl",
-      "expected": "clang_format/data/bin/clang-format",
-      "sha256": "ffca915c09aed9137f8c649ad7521bd5ce690c939121db1ba54af2ba63ac8374",
-      "url": "https://files.pythonhosted.org/packages/52/04/ed8e2af6b3e29655a858b3aad145f3f0539df0dd1c77815b95f578260bd3/clang_format-19.1.7-py2.py3-none-musllinux_1_2_aarch64.whl",
-      "version": "19.1.7",
-    },
-    "x86_64-linux-musl": {
-      "archive": "clang_format-19.1.7-py2.py3-none-musllinux_1_2_x86_64.whl",
-      "expected": "clang_format/data/bin/clang-format",
-      "sha256": "d27ac1a5a8783c9271d41cd5851766ca547ea003efa4e3764f880f319b2d3ed3",
-      "url": "https://files.pythonhosted.org/packages/f5/f9/6ce7fe8ff52ded01d02a568358f2ddf993347e44202b6506b039a583b7ed/clang_format-19.1.7-py2.py3-none-musllinux_1_2_x86_64.whl",
-      "version": "19.1.7",
-    },
-  },
   "deno": {
     "aarch64-linux-musl": {
       "archive": "deno-aarch64-unknown-linux-gnu.zip",
@@ -32,24 +16,6 @@ TOOLCHAINS = {
       "sha256": "934d1bd5cb09eaed7f2e4a4fc58208d04a3c5c0fcde9f319d93d735265c67a4a",
       "url": "https://github.com/denoland/deno/releases/download/v2.9.2/deno-x86_64-unknown-linux-gnu.zip",
       "version": "2.9.2",
-    },
-  },
-  "doctest": {
-    "aarch64-linux-musl": {
-      "archive": "doctest-v2.5.3.tar.gz",
-      "expected": "doctest-2.5.3/doctest/doctest.h",
-      "kind": "header",
-      "sha256": "174ebc4e769928959614789c5b4e9c3d0a0f81a62bb608756b127bfebfb21331",
-      "url": "https://github.com/doctest/doctest/archive/refs/tags/v2.5.3.tar.gz",
-      "version": "2.5.3",
-    },
-    "x86_64-linux-musl": {
-      "archive": "doctest-v2.5.3.tar.gz",
-      "expected": "doctest-2.5.3/doctest/doctest.h",
-      "kind": "header",
-      "sha256": "174ebc4e769928959614789c5b4e9c3d0a0f81a62bb608756b127bfebfb21331",
-      "url": "https://github.com/doctest/doctest/archive/refs/tags/v2.5.3.tar.gz",
-      "version": "2.5.3",
     },
   },
   "gcc-musl": {
@@ -86,18 +52,18 @@ TOOLCHAINS = {
   },
   "go": {
     "aarch64-linux-musl": {
-      "archive": "go1.26.5.linux-arm64.tar.gz",
+      "archive": "go1.27.0.linux-arm64.tar.gz",
       "expected": "go/bin/go",
-      "sha256": "fe4789e92b1f33358680864bbe8704289e7bb5fc207d80623c308935bd696d49",
-      "url": "https://go.dev/dl/go1.26.5.linux-arm64.tar.gz",
-      "version": "1.26.5",
+      "sha256": "51798d2c42d0e1c6ed7fd9f48728b4193abac9e8aad6dbac2fe96a81f5909bda",
+      "url": "https://go.dev/dl/go1.27.0.linux-arm64.tar.gz",
+      "version": "1.27.0",
     },
     "x86_64-linux-musl": {
-      "archive": "go1.26.5.linux-amd64.tar.gz",
+      "archive": "go1.27.0.linux-amd64.tar.gz",
       "expected": "go/bin/go",
-      "sha256": "5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053",
-      "url": "https://go.dev/dl/go1.26.5.linux-amd64.tar.gz",
-      "version": "1.26.5",
+      "sha256": "675c26c449cbb18fc24b74650de1eabbae6e16f64326fd85a283fb3b58280685",
+      "url": "https://go.dev/dl/go1.27.0.linux-amd64.tar.gz",
+      "version": "1.27.0",
     },
   },
   "python": {

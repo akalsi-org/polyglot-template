@@ -1,149 +1,14 @@
 #!/usr/bin/env python3
-"""Normalizes every lane's raw coverage artifact into one merged lcov file
-plus a small per-file % summary.txt.
-
-Invoked by rules/coverage.bzl's coverage_report rule (//:coverage) as
-`python3 coverage_merge.py <manifest.json> <out.lcov> <out summary.txt>`.
-The manifest is a JSON list of per-test-target entries; see
-rules/coverage.bzl's CoverageInfo provider / _entry_for() for the exact
-shape each `kind` carries:
-
-  cxx_gcov:     primary = dir of raw .gcda counters (GCOV_PREFIX output),
-                tool = pinned gcov binary, gcnos = list of .gcno paths
-                sitting next to the objects linked into that test binary.
-                gcov -j decodes each (gcno, gcda) pair to JSON; see
-                https://gcc.gnu.org/onlinedocs/gcc/Invoking-Gcov.html.
-  go_profile:   primary = a `go test -coverprofile` text file (the "simple"
-                format: "mode: ...\\n" then "file:startLine.col,endLine.col
-                numStmt count" lines) - parsed directly, no converter.
-  deno:         primary = the dir `deno test --coverage=<dir>` wrote,
-                containing an already-lcov lcov.info with ABSOLUTE SF: paths
-                rooted at that action's own ephemeral staging directory
-                (named "proj" - see rules/deno.bzl's module docstring); each
-                SF: path is rewritten to whatever follows its last "/proj/"
-                segment, which is exactly the repo-relative path since
-                deno_test always stages sources at their real repo-relative
-                paths underneath "proj".
-  python_lcov:  primary = an already-lcov file (tools/py_cover.py's output,
-                repo-relative paths already, no rewriting needed).
-
-Every lane's raw format ultimately reduces to one shared in-memory shape:
-counts[repo_relative_path][line_number] = hit_count, built up across every
-manifest entry (so a source file exercised by more than one test - e.g.
-cpp/lib/example/example.cc via both example_test and example_edge_test -
-gets its coverage merged, not just overwritten). Counts from independent
-runs are merged with max() rather than summed: this repo only ever reports
-lines-hit / lines-found percentages (never raw hit magnitudes), and max()
-avoids implying a false total from adding independent processes' counts.
-"""
-import gzip
+"""Merge Go, Deno, and Python coverage into LCOV and a summary."""
 import json
 import os
 import re
-import shutil
-import subprocess
 import sys
-import tempfile
 
 
 def _merge_counts(counts, file, line, hit):
   file_counts = counts.setdefault(file, {})
   file_counts[line] = max(file_counts.get(line, 0), hit)
-
-
-def _cxx_header_map(entry):
-  header_map = {}
-  for header in entry.get("headers", []):
-    physical = os.path.normpath(header)
-    logical = physical
-    lib_prefix = "cpp/lib/"
-    if logical.startswith(lib_prefix):
-      logical = logical[len(lib_prefix):]
-    header_map[logical] = physical
-  return header_map
-
-
-def _normalize_cxx_source(path, header_map):
-  if path.startswith("/"):
-    return None
-  if path.startswith("buck-out/"):
-    marker = "__include_tree__/"
-    marker_index = path.find(marker)
-    if marker_index == -1:
-      return None
-    logical = os.path.normpath(path[marker_index + len(marker):])
-    return header_map.get(logical)
-  return os.path.normpath(path)
-
-
-def _process_cxx_gcov(entry, counts, scratch_root):
-  gcda_dir = entry["primary"]
-  gcov_bin = os.path.abspath(entry["tool"])
-  header_map = _cxx_header_map(entry)
-  for gcno in entry["gcnos"]:
-    if not gcno.endswith(".gcno"):
-      continue
-    gcda_rel = gcno[:-len(".gcno")] + ".gcda"
-    gcda_path = os.path.join(gcda_dir, gcda_rel)
-    if not os.path.exists(gcda_path):
-      # The object was compiled+linked into this test binary but the
-      # binary was never actually executed as part of collecting this
-      # entry (shouldn't happen given rules/cxx.bzl always runs the test
-      # binary to produce gcda_dir - guarded defensively anyway).
-      continue
-    work = tempfile.mkdtemp(dir = scratch_root)
-    try:
-      base = os.path.basename(gcno)[:-len(".gcno")]
-      shutil.copy(gcno, os.path.join(work, base + ".gcno"))
-      shutil.copy(gcda_path, os.path.join(work, base + ".gcda"))
-      # gcov resolves the .gcda location from the path recorded inside the
-      # .gcno at compile time, ignoring any argument path we pass here -
-      # co-locating a same-basename .gcno/.gcda pair in one scratch dir and
-      # invoking gcov there (empirically validated) is what makes it find
-      # the actual counters instead of reporting "not executed".
-      # gcov's stderr is captured rather than discarded: a pinned-toolchain
-      # version skew ("version 'B16 ' prefers 'A16 '") is reported there, and
-      # discarding it surfaced only as a bare CalledProcessError with no clue
-      # which pair failed or why.
-      result = subprocess.run(
-        [gcov_bin, "-j", base + ".gcda"],
-        cwd = work,
-        check = False,
-        stdout = subprocess.DEVNULL,
-        stderr = subprocess.PIPE,
-        text = True,
-      )
-      if result.returncode != 0:
-        raise SystemExit(
-          "coverage merge: gcov failed (exit %d) for %s in %s:\n%s"
-          % (result.returncode, base, gcda_dir, result.stderr.strip())
-        )
-      for name in os.listdir(work):
-        if not name.endswith(".gcov.json.gz"):
-          continue
-        with gzip.open(os.path.join(work, name), "rt") as f:
-          data = json.load(f)
-        for file_entry in data["files"]:
-          raw_path = file_entry["file"]
-          path = _normalize_cxx_source(raw_path, header_map)
-          if path is None:
-            # Toolchain/system headers get dropped two ways: gcc's own
-            # implicit search dirs (libstdc++, ...) yield ABSOLUTE paths,
-            # while the vendored doctest.h under the extracted toolchain
-            # (compiled via a relative -I into buck-out - see
-            # rules/cxx.bzl's cxx_test/_doctest_include) yields a
-            # buck-out-RELATIVE path that is technically "repo-relative"
-            # text but not this repo's own source and not stable (it
-            # embeds a config-hash-bearing buck-out path). Neither belongs
-            # in "every path in the merged lcov is repo source" (see this
-            # module's docstring), so both prefixes are dropped here. Buck
-            # include-tree paths are accepted only when the logical suffix
-            # maps to a first-party header declared by this test target.
-            continue
-          for line in file_entry["lines"]:
-            _merge_counts(counts, path, line["line_number"], line.get("count", 0))
-    finally:
-      shutil.rmtree(work, ignore_errors = True)
 
 
 _GO_LINE_RE = re.compile(r"^(\S+):(\d+)\.(\d+),(\d+)\.(\d+) (\d+) (\d+)$")
@@ -358,22 +223,10 @@ def main(argv):
   with open(manifest_path) as f:
     entries = json.load(f)
 
-  # Repo scratch policy: never /tmp (small tmpfs), always under buck-out.
-  # $BUCK_SCRATCH_PATH is populated for ctx.actions.run() build actions
-  # (this merge step is one - see rules/coverage.bzl) even though it is NOT
-  # populated for ExternalRunnerTestInfo commands (see rules/go.bzl's
-  # module docstring on that distinction).
-  scratch_root = os.environ.get("BUCK_SCRATCH_PATH")
-  if not scratch_root:
-    scratch_root = os.path.join("buck-out", "v2", "tmp", "coverage-merge")
-  os.makedirs(scratch_root, exist_ok = True)
-
   counts = {}
   for entry in entries:
     kind = entry["kind"]
-    if kind == "cxx_gcov":
-      _process_cxx_gcov(entry, counts, scratch_root)
-    elif kind == "go_profile":
+    if kind == "go_profile":
       _process_go_profile(entry, counts)
     elif kind == "deno":
       _process_deno(entry, counts)

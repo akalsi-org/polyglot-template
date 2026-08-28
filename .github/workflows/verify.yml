@@ -90,9 +90,6 @@ jobs:
       # gates first spends the restored cache on them instead. The replay
       # still starts from a clean tree, so it proves exactly what it did.
       #
-      # ./repo.sh infra-test now runs graph-compdb-contract.sh and
-      # deno-manifest-contract.sh itself, so local `./repo.sh ci` covers
-      # exactly what this job covers. Do not re-list them here.
       - name: Run repository quality gates & infra tests
         run: |
           ./repo.sh lint
@@ -160,11 +157,6 @@ jobs:
 
       - name: Run debug full-graph test suite
         run: ./repo.sh test dbg
-
-      - name: Build and run C++ dbg profile
-        run: |
-          ./repo.sh cpp-build dbg
-          ./repo.sh cpp-run dbg
 
       # POLYGLOT_COVERAGE_MARKDOWN makes ./repo.sh coverage render the job
       # summary alongside the HTML report, from the same in-memory model, so
@@ -276,14 +268,6 @@ jobs:
 
       - name: Run optimized full-graph test suite
         run: ./repo.sh test opt
-
-      - name: Build and run C++ opt profile
-        run: |
-          ./repo.sh cpp-build opt
-          ./repo.sh cpp-run opt
-
-      - name: Run the opt pyfast extension test
-        run: ./repo.sh exec buck2 test --target-platforms //config:${{ matrix.target }}-opt //python/test:test
 
       - name: Exercise pinned Python runtime
         run: ./repo.sh python -I -c 'import ctypes, hashlib, sqlite3, ssl, sys, zlib; print(sys.version)'

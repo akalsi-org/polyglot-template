@@ -53,7 +53,7 @@ tool_path() {
 }
 
 setup_environment() {
-  local target gcc python deno go buck2 clang_format shellcheck gcc_bin go_root path_prefix loader loader_path env_bin gcc_install jobs
+  local target gcc python deno go buck2 shellcheck go_root path_prefix loader loader_path env_bin gcc_install jobs
   target=$("$ROOT/toolchain/target.sh")
   export POLYGLOT_TARGET=$target
   export POLYGLOT_LOCK_FILE=${POLYGLOT_LOCK_FILE:-$ROOT/tools.lock.toml}
@@ -63,13 +63,11 @@ setup_environment() {
   deno=$(tool_path deno)
   go=$(tool_path go)
   buck2=$(tool_path buck2)
-  clang_format=$(tool_path clang-format)
   shellcheck=$(tool_path shellcheck)
-  for tool in "$gcc" "$python" "$deno" "$go" "$buck2" "$clang_format" "$shellcheck"; do
+  for tool in "$gcc" "$python" "$deno" "$go" "$buck2" "$shellcheck"; do
     [[ -x $tool ]] || { printf 'error: pinned toolchain is not installed; run ./repo.sh bootstrap\n' >&2; return 1; }
   done
 
-  gcc_bin=$(dirname -- "$gcc")
   go_root=$(dirname -- "$(dirname -- "$go")")
   . "$ROOT/toolchain/lock.sh"
   loader=$(lock_value gcc-musl "$target" loader)
@@ -77,24 +75,20 @@ setup_environment() {
   loader_path="$gcc_install/$loader"
   [[ -x $loader_path ]] || { printf 'error: pinned toolchain is not installed; run ./repo.sh bootstrap\n' >&2; return 1; }
   env_bin="$POLYGLOT_LOCAL_DIR/bin"
-  export CC="${gcc%g++}gcc"
-  export CXX=$gcc
-  write_repo_tool_wrappers "$POLYGLOT_LOCAL_DIR" "$CC" "$CXX" "$python" "$loader_path" "$deno" "$go" "$buck2" "$clang_format" "$gcc_install" "$target" "$shellcheck"
-  export POLYGLOT_CXX=$gcc
+  write_repo_tool_wrappers "$POLYGLOT_LOCAL_DIR" "$python" "$loader_path" "$deno" "$go" "$buck2" "$shellcheck"
   export POLYGLOT_PYTHON=$python
   export POLYGLOT_DENO=$deno
   export POLYGLOT_GO=$go
   export POLYGLOT_BUCK2=$buck2
-  export POLYGLOT_CLANG_FORMAT=$env_bin/clang-format
   export POLYGLOT_SHELLCHECK=$env_bin/shellcheck
   export GOROOT=$go_root
   export GOPATH="$POLYGLOT_LOCAL_DIR/cache/go/path"
   export GOMODCACHE="$POLYGLOT_LOCAL_DIR/cache/go/mod"
   export GOCACHE="$POLYGLOT_LOCAL_DIR/cache/go/build"
   export GOBIN="$POLYGLOT_LOCAL_DIR/bin"
+  export GOENV=off
   export GOTOOLCHAIN=local
   export CGO_ENABLED=0
-  export GOEXPERIMENT=jsonv2
   # -p is host-core-count parallelism for direct `./repo.sh go ...`/`go-build`/
   # `go-test` invocations outside buck2 (which schedules its own graph). There
   # is no cross-lane job budget to split any more (that was the retired
@@ -103,11 +97,11 @@ setup_environment() {
   # invocation whose own status masks f's, so a rejected POLYGLOT_JOBS would
   # otherwise leave a malformed `-p=` behind and continue.
   jobs=$(host_jobs)
-  export GOFLAGS="-p=$jobs"
+  export GOFLAGS="-p=$jobs -mod=vendor -buildvcs=false"
   export DENO_DIR="$POLYGLOT_LOCAL_DIR/cache/deno"
   export XDG_CACHE_HOME="$POLYGLOT_LOCAL_DIR/cache/xdg"
   export PYTHONPATH="$ROOT/build/python/$target/lib:$ROOT/python/lib:$ROOT/python/app"
-  path_prefix="$env_bin:$gcc_bin:$go_root/bin:$(dirname -- "$deno"):$(dirname -- "$buck2")"
+  path_prefix="$env_bin:$go_root/bin:$(dirname -- "$deno"):$(dirname -- "$buck2")"
   export POLYGLOT_PATH_PREFIX=$path_prefix
   export PATH="$path_prefix:$PATH"
 }
@@ -129,73 +123,6 @@ target_platform_args() {
   printf -- '--target-platforms\n//config:%s-opt\n' "$target"
 }
 
-stage_python_extensions() {
-  local target stage parent manifest manifest_tmp tmp query_out query_err output_out output_err entry output name rel hash
-  local -a plat=("$@") extensions outputs
-  target=$("$ROOT/toolchain/target.sh")
-  stage="$ROOT/build/python/$target/lib"
-  parent=$(dirname -- "$stage")
-  manifest="$parent/.lib.manifest"
-  query_out=$(scratch_file)
-  query_err=$(scratch_file)
-  if ! "$POLYGLOT_BUCK2" uquery "kind('^_py_extension_rule$', '//...')" >"$query_out" 2>"$query_err"; then
-    cat "$query_err" >&2
-    rm -f "$query_out" "$query_err"
-    return 1
-  fi
-  mapfile -t extensions < <(grep '^root//' "$query_out" | sort)
-  rm -f "$query_out" "$query_err"
-  if ((${#extensions[@]} == 0)); then
-    rm -rf "$stage" "$manifest"
-    return 0
-  fi
-  output_out=$(scratch_file)
-  output_err=$(scratch_file)
-  if ! "$POLYGLOT_BUCK2" build "${plat[@]}" --show-output "${extensions[@]}" >"$output_out" 2>"$output_err"; then
-    cat "$output_err" >&2
-    rm -f "$output_out" "$output_err"
-    return 1
-  fi
-  mapfile -t outputs < <(awk '{ print $2 }' "$output_out" | sort -u)
-  rm -f "$output_out" "$output_err"
-  ((${#outputs[@]} == ${#extensions[@]})) || { printf 'error: extension output query returned an incomplete result\n' >&2; return 1; }
-  mkdir -p "$parent"
-  manifest_tmp=$(mktemp "$parent/.lib.manifest.tmp.XXXXXX")
-  for output in "${outputs[@]}"; do
-    [[ -d $ROOT/$output ]] || { printf 'error: Python extension output is not a directory: %s\n' "$output" >&2; rm -f "$manifest_tmp"; return 1; }
-    while IFS= read -r -d '' entry; do
-      rel=${entry#"$ROOT/$output/"}
-      if [[ -L $entry ]]; then
-        printf 'link %s %s\n' "$rel" "$(readlink -- "$entry")"
-      else
-        hash=$(sha256sum "$entry" | awk '{ print $1 }')
-        printf 'file %s %s\n' "$rel" "$hash"
-      fi
-    done < <(find "$ROOT/$output" \( -type f -o -type l \) -print0 | sort -z)
-  done >"$manifest_tmp"
-  if [[ -d $stage ]] && cmp -s "$manifest_tmp" "$manifest"; then
-    rm -f "$manifest_tmp"
-    return 0
-  fi
-  tmp=$(mktemp -d "$parent/.lib.tmp.XXXXXX")
-  for output in "${outputs[@]}"; do
-    for entry in "$ROOT/$output"/*; do
-      name=$(basename -- "$entry")
-      [[ -e "$tmp/$name" ]] && { printf 'error: Python extension package collision at %s\n' "$name" >&2; rm -rf "$tmp"; rm -f "$manifest_tmp"; return 1; }
-    done
-    cp -R "$ROOT/$output/." "$tmp"
-  done
-  rm -rf "$stage"
-  mv "$tmp" "$stage"
-  mv "$manifest_tmp" "$manifest"
-}
-
-# Package publication is intentionally Buck2-owned. A catalog entry is
-# release metadata, not evidence that this checkout knows how to build its
-# executable payload: only a //packages:<name> package() target supplies that
-# evidence.  Keep the target probe in one place so `package` and CI's early
-# tag gate fail with the same actionable error instead of falling through to
-# the legacy raw-build-dir assembler (which repo.sh never populated).
 require_buck_package_target() {
   local name=$1 probe_err probe_status
   probe_err=$(scratch_file)
@@ -242,12 +169,8 @@ Commands:
                                (bxl/coverage.bxl) and render a browsable
                                single-file HTML report next to it.
   test [dbg|opt]               Test every language target in the selected profile (default: dbg).
-  compile-commands [dbg|opt]   Materialize compile_commands.json via the BXL compdb.
-  cpp-build [dbg|opt]          Build the C++ hello binary via buck2.
-  cpp-run [dbg|opt]            Run the C++ app through buck2.
-  cpp-test                     Build, run, and test the C++ lane via buck2.
   python [args...]             Run the pinned Python through the pinned musl loader.
-  python-build                 Build the pinned-ABI C++ extension via buck2.
+  python-build                 Build the Python application via buck2.
   python-test                  Build and test the Python lane via buck2.
   deno [args...]               Run raw pinned Deno arguments; they may access the network.
   ts-build                     Type-check TypeScript against the frozen graph via buck2.
@@ -425,12 +348,10 @@ case "$command" in
     # "no buildable targets discovered".
     uquery_err=$(scratch_file)
     mapfile -t buildables < <("$POLYGLOT_BUCK2" uquery \
-      "kind('^_(cxx_binary|go_binary|py_binary|deno_check|vite_build)_rule$', '//...')" 2>"$uquery_err" | grep '^root//')
+      "kind('^_(go_binary|py_binary|deno_check|vite_build)_rule$', '//...')" 2>"$uquery_err" | grep '^root//')
     ((${#buildables[@]} > 0)) || { cat "$uquery_err" >&2; rm -f "$uquery_err"; printf 'error: no buildable targets discovered\n' >&2; exit 1; }
     rm -f "$uquery_err"
     "$POLYGLOT_BUCK2" build "${plat[@]}" "${buildables[@]}"
-    stage_python_extensions "${plat[@]}"
-    [[ ${POLYGLOT_DEFER_COMPDB:-0} == 1 ]] || "$ROOT/repo.sh" compile-commands "$profile"
     ;;
   coverage)
     (($# == 0)) || { printf 'usage: ./repo.sh coverage\n' >&2; exit 2; }
@@ -472,52 +393,6 @@ case "$command" in
     setup_environment
     mapfile -t plat < <(target_platform_args "$profile")
     "$POLYGLOT_BUCK2" test "${plat[@]}" //...
-    [[ ${POLYGLOT_DEFER_COMPDB:-0} == 1 ]] || "$ROOT/repo.sh" compile-commands "$profile"
-    ;;
-  compile-commands)
-    (($# <= 1)) || { printf 'usage: ./repo.sh compile-commands [dbg|opt]\n' >&2; exit 2; }
-    profile=${1:-${POLYGLOT_CPP_PROFILE:-dbg}}
-    [[ $profile == dbg || $profile == opt ]] || { printf 'error: profile must be dbg or opt\n' >&2; exit 2; }
-    setup_environment
-    mapfile -t plat < <(target_platform_args "$profile")
-    bxl_err=$(scratch_file)
-    if ! out=$("$POLYGLOT_BUCK2" bxl -M all "${plat[@]}" //bxl:compdb.bxl:compdb 2>"$bxl_err"); then
-      cat "$bxl_err" >&2; rm -f "$bxl_err"
-      printf 'error: compdb bxl failed\n' >&2; exit 1
-    fi
-    rm -f "$bxl_err"
-    out_file=$(printf '%s\n' "$out" | grep -E '^buck-out/.*\.json$' | tail -n1)
-    if [[ -z $out_file || ! -f $out_file ]]; then
-      out=$("$POLYGLOT_BUCK2" bxl -M all --no-remote-cache "${plat[@]}" //bxl:compdb.bxl:compdb 2>/dev/null || true)
-      out_file=$(printf '%s\n' "$out" | grep -E '^buck-out/.*\.json$' | tail -n1)
-    fi
-    [[ -n $out_file && -f $out_file ]] || { printf 'error: compdb bxl output file not found in stdout: %s\n' "$out" >&2; exit 1; }
-    tmp="$ROOT/.compile_commands.json.tmp.$$"
-    cp -- "$out_file" "$tmp"
-    mv -- "$tmp" "$ROOT/compile_commands.json"
-    ;;
-  cpp-build)
-    (($# <= 1)) || { printf 'usage: ./repo.sh cpp-build [dbg|opt]\n' >&2; exit 2; }
-    profile=${1:-${POLYGLOT_CPP_PROFILE:-dbg}}
-    [[ $profile == dbg || $profile == opt ]] || { printf 'error: profile must be dbg or opt\n' >&2; exit 2; }
-    setup_environment
-    mapfile -t plat < <(target_platform_args "$profile")
-    "$POLYGLOT_BUCK2" build "${plat[@]}" //cpp/app/hello:hello
-    [[ ${POLYGLOT_DEFER_COMPDB:-0} == 1 ]] || "$ROOT/repo.sh" compile-commands "$profile"
-    ;;
-  cpp-run)
-    (($# <= 1)) || { printf 'usage: ./repo.sh cpp-run [dbg|opt]\n' >&2; exit 2; }
-    profile=${1:-dbg}
-    [[ $profile == dbg || $profile == opt ]] || { printf 'error: profile must be dbg or opt\n' >&2; exit 2; }
-    setup_environment
-    mapfile -t plat < <(target_platform_args "$profile")
-    "$POLYGLOT_BUCK2" run "${plat[@]}" //cpp/app/hello:hello
-    ;;
-  cpp-test)
-    require_no_args cpp-test "$@"
-    setup_environment
-    "$POLYGLOT_BUCK2" test //cpp/...
-    "$ROOT/repo.sh" cpp-run dbg
     ;;
   python)
     target=$("$ROOT/toolchain/target.sh")
@@ -540,11 +415,6 @@ case "$command" in
     require_no_args python-build "$@"
     setup_environment
     "$POLYGLOT_BUCK2" build //python/app/hello:hello
-    # The application target brings in its Python dependencies, while this
-    # generic helper materializes every declared extension for direct runtime
-    # imports under the target-specific PYTHONPATH root.
-    stage_python_extensions
-    [[ ${POLYGLOT_DEFER_COMPDB:-0} == 1 ]] || "$ROOT/repo.sh" compile-commands "${POLYGLOT_CPP_PROFILE:-dbg}"
     ;;
   python-test)
     require_no_args python-test "$@"
@@ -590,13 +460,13 @@ case "$command" in
     export GOMODCACHE="$POLYGLOT_LOCAL_DIR/cache/go/mod"
     export GOCACHE="$POLYGLOT_LOCAL_DIR/cache/go/build"
     export GOBIN="$POLYGLOT_LOCAL_DIR/bin"
+    export GOENV=off
     export GOTOOLCHAIN=local
     export CGO_ENABLED=0
-    export GOEXPERIMENT=jsonv2
     # See setup_environment: assign first so host_jobs' rejection status is
     # not masked by the `export` builtin's own success.
     go_jobs=$(host_jobs)
-    export GOFLAGS="-p=$go_jobs"
+    export GOFLAGS="-p=$go_jobs -mod=vendor -buildvcs=false"
     export PATH="$GOROOT/bin:$PATH"
     restore_invocation_cwd
     exec "$GOROOT/bin/go" "$@"
@@ -725,7 +595,6 @@ case "$command" in
     pinned_python -m unittest discover -s "$ROOT/test" -p 'test_*.py'
     bash "$ROOT/test/test-package-model.sh"
     bash "$ROOT/test/test-package-release.sh"
-    bash "$ROOT/test/graph-compdb-contract.sh"
     bash "$ROOT/test/deno-manifest-contract.sh"
     ;;
   ci)

@@ -4,15 +4,8 @@
 # `--target-platforms //config:<native-target>-opt` (as `repo.sh package`
 # does). `-m //config:opt` cannot override these targets' default platform.
 #
-# Unlike the old polyglot_package rule (which took one dep attr per staged
-# piece by name), the generic package() rule just takes `deps` - every
-# staged entry (libexec/cpp-hello, bin/go-hello, bin/python-hello,
-# python/lib/*, web, ...) is folded in transitively off these four
-# app-level targets' own PackageInfo (see rules/pkg.bzl), including
-# //python/app/hello:hello's own python/lib deps. bin/ names come from each
-# producing target's own `pkg_name` attr (cpp/app/hello:hello,
-# go/app/hello:hello, python/app/hello:hello all set one - see
-# rules/{cxx,go,python}.bzl).
+# The generic package() rule takes `deps`. Each producing target owns its
+# staged entries. The Python target also carries its Python library closure.
 
 load("//packages:catalog.bzl", "package_by_name")
 load("//rules:file.bzl", "export_file")
@@ -28,7 +21,6 @@ package(
   name = "polyglot-demo",
   version = package_by_name("polyglot-demo")["version"],
   deps = [
-    "//cpp/app/hello:hello",
     "//go/app/hello:hello",
     "//python/app/hello:hello",
     "//tsweb:site",
@@ -40,7 +32,6 @@ package_smoke(
   name = "polyglot-demo-smoke",
   package = ":polyglot-demo",
   commands = {
-    "bin/cpp-hello": [],
     "bin/go-hello": [],
     "bin/python-hello": [],
     "bin/python": ["--version"],

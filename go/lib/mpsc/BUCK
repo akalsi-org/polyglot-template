@@ -1,0 +1,43 @@
+load("//rules:go.bzl", "go_library", "go_test")
+
+go_library(
+  name = "mpsc",
+  srcs = [
+    "api_linux.go",
+    "atomic_ordered.go",
+    "atomic_ordered_amd64.go",
+    "atomic_ordered_amd64.s",
+    "atomic_ordered_arm64.go",
+    "atomic_ordered_arm64.s",
+    "doc.go",
+    "queue_linux.go",
+    "region_linux.go",
+    "spsc_linux.go",
+    "sysnum_amd64.go",
+    "sysnum_arm64.go",
+  ],
+  deps = ["//go/lib/hostcpu:hostcpu"],
+  visibility = ["PUBLIC"],
+)
+
+go_test(
+  name = "mpsc_test",
+  srcs = [
+    "alloc_test.go",
+    "api_cleanup_test.go",
+    "atomic_ordered_test.go",
+    "api_test.go",
+    "audit_test.go",
+    "coverage_test.go",
+    "fault_test.go",
+    "mpsc_generation_test.go",
+    "ordering_test.go",
+    "peek_benchmark_test.go",
+    "queue_test.go",
+    "region_boundary_test.go",
+    "spsc_semantics_test.go",
+    "thread_ownership_test.go",
+  ],
+  deps = [":mpsc"],
+  packages = ["./go/lib/mpsc"],
+)

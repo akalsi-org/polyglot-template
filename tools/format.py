@@ -4,8 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import os
-import subprocess
 from pathlib import Path
 
 
@@ -29,13 +27,6 @@ IGNORED_PARTS = {
 SUFFIXES = {
   ".bzl",
   ".bxl",
-  ".c",
-  ".cc",
-  ".cpp",
-  ".cxx",
-  ".h",
-  ".hh",
-  ".hpp",
   ".json",
   ".py",
   ".sh",
@@ -44,9 +35,6 @@ SUFFIXES = {
   ".yml",
 }
 NAMES = {"BUCK", "repo.sh"}
-CPP_SUFFIXES = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp"}
-CLANG_FORMAT = Path(os.environ.get("POLYGLOT_CLANG_FORMAT", ROOT / ".local/bin/clang-format"))
-
 
 def source_files() -> list[Path]:
   paths = []
@@ -80,18 +68,6 @@ def normalized(source: str) -> str:
   return result + "\n" if source else source
 
 
-def clang_format(files: list[Path], check: bool) -> int:
-  cpp_files = [path for path in files if path.suffix in CPP_SUFFIXES]
-  if not cpp_files:
-    return 0
-  if not CLANG_FORMAT.is_file() or not CLANG_FORMAT.stat().st_mode & 0o111:
-    print("error: pinned clang-format is unavailable; run: ./repo.sh bootstrap")
-    return 1
-  args = [str(CLANG_FORMAT), "--style=file"]
-  args += ["--dry-run", "--Werror"] if check else ["-i"]
-  return subprocess.run(args + [str(path) for path in cpp_files], cwd=ROOT, check=False).returncode
-
-
 def main() -> int:
   parser = argparse.ArgumentParser()
   parser.add_argument("--check", action="store_true", help="fail instead of repairing whitespace")
@@ -110,9 +86,6 @@ def main() -> int:
 
   if errors:
     print("\n".join(errors))
-    print("run: ./repo.sh format")
-    return 1
-  if clang_format(source_files(), args.check):
     print("run: ./repo.sh format")
     return 1
   if changed:

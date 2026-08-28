@@ -4,13 +4,13 @@ This repository is a pinned, offline-after-bootstrap polyglot workspace. Use `./
 
 ## Invariants
 
-- The current CPU architecture selects the build architecture. Native artifacts use the pinned GCC+musl ABI and never cross CPU architectures.
+- The current CPU architecture selects the package target. Go binaries are static, and packaged Python uses the pinned musl runtime closure.
 - `tools.lock.toml` owns tool provenance. Missing or placeholder digests fail closed.
 - `packages/catalog.bzl` is the sole source of package declarations and exact runtime closure resolution.
-- Buck2 is the sole scheduler; there is no separate task runner. `BUCK` files plus `config/flags.bzl` own C++ targets and profile (`dbg`/`opt`) flags — `cpp/cpp.toml` no longer exists. Every first-party rule lives under `rules/` (no prelude in this repo). `compile_commands.json` is materialized by `./repo.sh compile-commands` from a BXL compdb query (`bxl/compdb.bxl`) over the buck2 action graph, not hand-generated.
+- Buck2 is the sole scheduler. `BUCK` files own targets, and `config/flags.bzl` owns profile (`dbg`/`opt`) flags. Every first-party rule lives under `rules/`.
 - Each language owns `lib/<name>/`, `app/<name>/`, and `test/`; its `lib/` directory is an import/include root.
-- `.vscode/settings.json` mirrors repository discovery: clangd uses the root compdb, Deno owns `ts/` and `tsweb/`, and Python analysis includes `python/lib` plus `python/app`.
-- Python native extensions build against the exact pinned interpreter ABI with pinned GCC/musl; pure Go uses the pinned repo-local toolchain with `CGO_ENABLED=0` and isolated caches.
+- `.vscode/settings.json` mirrors repository discovery. Deno owns `ts/` and `tsweb`. Python analysis includes `python/lib` and `python/app`.
+- Python remains pure Python. Go uses the pinned repo-local toolchain with `CGO_ENABLED=0` and isolated caches.
 - Normal build, test, lint, and package operations do not fetch.
 - Build products live under `build/`, release products under `dist/`, and toolchains/caches under ignored `.local/`.
 
@@ -28,29 +28,28 @@ Run `./repo.sh help` for the canonical command list. Start with:
 
 This checkout supports Linux x86-64 and Linux ARM64 hosts only, producing the corresponding CPU-native musl target. Bootstrap must complete before normal development commands; afterward the named Buck-backed commands are offline. The raw `./repo.sh go <args...>` and `./repo.sh deno <args...>` passthroughs deliberately preserve the underlying tool's behavior, so caller-supplied commands may use the network. Use `go-*`, `ts-*`, and `tsweb-*` for the repository's offline-after-bootstrap contract.
 
-Lane commands are thin wrappers over Buck2: `build [dbg|opt]` builds every lane's primary outputs discovered by rule kind (no hand-listed //:build group), `coverage` merges dbg coverage via bxl/coverage.bxl's same rule-kind discovery, `test` runs `buck2 test //...`, `lint` runs `buck2 test //... --labels lint` plus shell/Python infra checks (`infra-lint`). `cpp-build`/`cpp-run`/`cpp-test`, `python-build`/`python-test`, `ts-build`/`ts-test`, `tsweb-build`/`tsweb-test`, and `go-build`/`go-test` each drive their lane's Buck2 targets and only ever use the pinned toolchain, never host compilers or runtimes. `./repo.sh buck2 [args...]` runs the pinned Buck2 binary directly for anything not covered by a named lane command. CI performs real cached bootstrap, deep doctor, language-lane verification, and a cold-buck-out full-graph offline replay inside a no-network namespace, on x64 and ARM64.
+Lane commands are thin wrappers over Buck2. `build [dbg|opt]` discovers each lane's primary outputs by rule kind. No hand-maintained root build group exists. `coverage` uses the same discovery to merge debug profiles. `test` runs `buck2 test //...`. `lint` runs labeled Buck tests and infrastructure checks. Each language command drives only its lane's Buck2 targets. These commands use pinned tools, never host compilers or runtimes. `./repo.sh buck2 [args...]` runs the pinned Buck2 binary directly. CI verifies cached bootstrap, deep doctor, and each language lane. It also replays the cold graph without network access on x64 and ARM64.
 
 ## TL;DR: Effective Daily Workflow And Style
 
 1. Start with `./repo.sh bootstrap --dry-run`, then `./repo.sh bootstrap` and `./repo.sh doctor --deep`. Bootstrap installs the pinned closure; named Buck-backed commands do not fetch afterward. Do not treat raw `go` or `deno` passthrough commands as a network restriction.
 2. Use `./repo.sh format` to apply formatting and `./repo.sh format --check` before handoff. `./repo.sh lint` includes the non-mutating format check.
-3. Use the lane test while iterating (`cpp-test`, `python-test`, `ts-test`, `tsweb-test`, or `go-test`), then `./repo.sh test` for a cross-lane change. Run `./repo.sh coverage` when changing executed behavior.
+3. Use the lane test while iterating (`python-test`, `ts-test`, `tsweb-test`, or `go-test`), then `./repo.sh test` for a cross-lane change. Run `./repo.sh coverage` when changing executed behavior.
 4. Use `./repo.sh build [dbg|opt]` rather than hand-maintaining aggregate build lists; it discovers primary rule kinds automatically. For an ad hoc graph question, use `./repo.sh buck2 ...`.
-5. Never edit `.local/`, `build/`, `dist/`, `buck-out/`, generated `compile_commands.json`, or toolchain wrappers as source. Aggregate `build` and `test` refresh the matching-profile compilation database; use `./repo.sh compile-commands [dbg|opt]` after a clean when an editor-only refresh is needed.
+5. Never edit `.local/`, `build/`, `dist/`, `buck-out/`, or toolchain wrappers as source.
 
-Code style is two spaces for repository-authored code, including Python, Starlark, C/C++, shell, JSON, and TOML. Python and Starlark block nesting is enforced at two spaces; C/C++ editors use `.clang-format` with two-space normal and continuation indents. Deno formats TypeScript with two spaces. Go is the sole syntax-level exception: it stays `gofmt`-canonical with tabs, rendered at width two by `.editorconfig` and VS Code. Do not hand-align generated-looking text, use tabs outside Go/Makefiles, or rely on host formatters; use `./repo.sh format`.
+Code style is two spaces for repository-authored Python, Starlark, shell, JSON, and TOML. Python and Starlark block nesting uses two spaces. Deno formats TypeScript with two spaces. Go is the sole syntax-level exception: it stays `gofmt`-canonical with tabs, rendered at width two by `.editorconfig` and VS Code. Do not hand-align generated-looking text, use tabs outside Go/Makefiles, or rely on host formatters; use `./repo.sh format`.
 
 ## Adding Targets
 
-Keep new code inside its lane: `cpp/{lib,app,test}`, `python/{lib,app,test}`, `go/{lib,app,test}`, `ts/{lib,app,test}`, or `tsweb/{lib,app,test}`. Put the target in the nearest `BUCK` file and copy the closest existing target before inventing attributes. First-party rule APIs, not a prelude or host build tool, are the contract:
+Keep new code inside its lane: `python/{lib,app,test}`, `go/{lib,app,test}`, `ts/{lib,app,test}`, or `tsweb/{lib,app,test}`. Put the target in the nearest `BUCK` file and copy the closest existing target before inventing attributes. First-party rule APIs, not a prelude or host build tool, are the contract:
 
-- C++: load `cxx_library`, `cxx_binary`, and `cxx_test` from `//rules:cxx.bzl`; public headers live below `cpp/lib` and are included by their logical `cpp/lib`-relative path. Give runnable binaries a stable `pkg_name` when they will be packaged.
-- Python: load `py_library`, `py_extension`, `py_binary`, and `py_test` from `//rules:python.bzl`. `py_test` defaults discovery to its own package, uses readable top-level `test_*` functions (including `async def`), and participates in dbg Python coverage. Native extensions use the pinned CPython ABI; C extensions declare `language = "c"`, and C++ header dependencies use `cxx_deps`. Keep import roots and `package` names explicit.
+- Python: load `py_library`, `py_binary`, and `py_test` from `//rules:python.bzl`. `py_test` uses readable top-level `test_*` functions, including `async def`. Keep import roots and `package` names explicit.
 - Go: load `go_library`, `go_binary`, and `go_test` from `//rules:go.bzl`. Keep `CGO_ENABLED=0`; give binaries a `pkg_name` for packaging. A test that invokes `main()` depends on its sibling binary target so Buck tracks `main.go`.
 - Deno/TypeScript: load `deno_library`, `deno_app`, `deno_check`, `deno_test`, or `vite_build` from `//rules:deno.bzl`. List every source in `srcs` and every source closure in `deps`; apps must list `main` in `srcs`. Add every new `deno_library` or `deno_app` to root `//:deno-cache`'s `deps`, or `./repo.sh lint` fails closed.
 - Tests: add a native test rule, not an untracked script. The test macros are discoverable by `./repo.sh test` and dbg coverage automatically. Use `--target-platforms //config:<native-target>-opt` when an opt-only test is needed; `-m` does not override these rules' default target platform.
 
-After adding a target, run its lane command, `./repo.sh lint`, and `./repo.sh test`; aggregate build/test refresh the matching-profile compilation database. Use `./repo.sh compile-commands [dbg|opt]` only when an editor-only refresh is needed. Do not add a hand-maintained root build/test group: rule-kind discovery owns aggregate participation.
+After adding a target, run its lane command, `./repo.sh lint`, and `./repo.sh test`. Do not add a hand-maintained root build/test group: rule-kind discovery owns aggregate participation.
 
 ### Adding A `test/` File — Is It Self-Referential?
 
@@ -71,16 +70,12 @@ catalog/example code (`polyglot-demo`, `gateway`, the `go-cmp` import in
 docstring's MAINTAINER NOTE. If the file tests a Buck2 rule or tool
 mechanism generically (deriving its expectations from the tree rather than
 hardcoding this repo's identity, the way `deno-manifest-contract.sh` does),
-it does not belong on that list. `graph-compdb-contract.sh` is the in-between
-case: it exercises the BXL compdb generically but names four specific graph
-compile actions, two of which are demo sources — so it stays off
-`TEST_STRIP_CANDIDATES` and is instead edited by the demo-pruning pass below.
-
+it does not belong on that list.
 ### Adding Or Removing Demo Code
 
 `./repo.sh init-project`'s second pass prunes leaf demo code
 (`tools/init_project.py`'s `DEMO_STRIP_GROUPS`): the greeting/hello example
-library and app in the C++ and Python lanes. Each group carries the exact
+library and app in the Python and Go lanes. Each group carries the exact
 `Edit`s its removal requires elsewhere in the graph, so every group leaves
 `./repo.sh build`, `test`, `lint`, and `infra-test` passing on its own and in
 any combination.
@@ -100,18 +95,14 @@ deliberately not candidates, because removing those means rewriting
 Template identity that contains no `polyglot-template` needs its own rename
 list, because `RENAME_TARGETS` cannot catch it: package names
 (`polyglot-demo`), the deployment schema ids (`polyglot.deployment-plan/v1`),
-and the `pgt` C++ namespace each have one (`PACKAGE_RENAME_TARGETS`,
-`SCHEMA_RENAME_TARGETS`, `NAMESPACE_RENAME_TARGETS`). Those run AFTER pruning
+each have dedicated rename targets (`PACKAGE_RENAME_TARGETS` and
+`SCHEMA_RENAME_TARGETS`). Those run AFTER pruning
 on purpose: the demo groups' edits anchor on the packages' original names, so
 renaming first would leave the anchors unmatchable and fail the run closed
 partway through.
 
-The KEEP-LIST in that module's docstring records the infrastructure that is
-never a candidate. Consult it before assuming a file is demo scaffolding:
-`python/test/pyfast_test_ext.c` and friends read like a demo fixture but are
-`pyfast.h`'s only test, and `cpp/test/reflection.cc` is
-`rules/toolchain.bzl`'s reflection capability probe — deleting `cpp/test/`
-breaks the toolchain, not just the tests.
+The KEEP-LIST in that module's docstring records reusable infrastructure.
+Consult it before you classify a file as demo scaffolding.
 
 ## Packaging
 
@@ -154,7 +145,3 @@ Which review tool, vendor, or model provides that review is machine-local config
 `cnp` (also `c+p`) means commit the current task's intended changes and push the current branch. Exclude unrelated, generated, credential-bearing, and untracked state unless the user explicitly includes it.
 
 Never commit authentication state, sessions, caches, downloaded tools, build output, or generated agent-runtime databases.
-
-## Component agent guides
-
-- `cpp/lib/pyfast/AGENTS.md` — pyfast: single-header CPython fastcall/vectorcall scaffolding (known defects, wiring gaps, test plan).

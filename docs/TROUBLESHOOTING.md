@@ -6,8 +6,7 @@ generated outputs by hand.
 | Symptom | Safe next command |
 | --- | --- |
 | Toolchain missing or stale | `./repo.sh bootstrap`, then `./repo.sh doctor --deep` |
-| Native Python extension import fails | `./repo.sh python-build`, then run through `./repo.sh python ...` |
-| C++ editor diagnostics are stale | `./repo.sh compile-commands`, then reload clangd |
+| Python import fails | `./repo.sh python-test`, then run through `./repo.sh python ...` |
 | Deno import/type diagnostic is unresolved | `./repo.sh bootstrap`, then restart the Deno language server |
 | Package cannot be built | `./repo.sh package-list`; then `./repo.sh package-target-check <name>` |
 | Package fails outside the source tree | `./repo.sh package-smoke <archive> <name>` |

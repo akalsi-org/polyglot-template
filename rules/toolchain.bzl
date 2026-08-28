@@ -172,43 +172,7 @@ version_probe_toolchain = rule(
   },
 )
 
-# doctest: extract, then grep the pinned major-version header line. Header
-# capability checks do not execute anything, so they always run.
-def _header_probe_toolchain_impl(ctx: AnalysisContext) -> list[Provider]:
-  name = ctx.label.name
-  out_dir = _download_and_extract(ctx, name, ctx.attrs.url, ctx.attrs.sha256, ctx.attrs.archive)
-  stamp = ctx.actions.declare_output(name + ".stamp")
-  probe_script = ctx.actions.write(
-    name + "-probe.sh",
-    [
-      "#!/bin/sh",
-      "set -eu",
-      "HDR=\"$1/%s\"" % ctx.attrs.expected,
-      "grep -q '%s' \"$HDR\" >\"$2\" 2>&1 || { cat \"$2\" >&2; exit 1; }" % ctx.attrs.probe_pattern,
-    ],
-    is_executable = True,
-  )
-  ctx.actions.run(
-    cmd_args(["/bin/sh", probe_script, out_dir, stamp.as_output()]),
-    category = "probe_toolchain",
-    identifier = name,
-    env = action_env(),
-  )
-  return [DefaultInfo(default_outputs = [out_dir, stamp])]
-
-header_probe_toolchain = rule(
-  impl = _header_probe_toolchain_impl,
-  attrs = {
-    "archive": attrs.string(),
-    "expected": attrs.string(),
-    "probe_pattern": attrs.string(),
-    "sha256": attrs.string(),
-    "url": attrs.string(),
-  },
-)
-
-# gcc-musl: extract, then the mold + binutils + dumpmachine + C++26 reflection
-# capability probe mirrored from toolchain/bootstrap.sh's probe_gcc().
+# gcc-musl supplies the musl loader required by the pinned Python runtime.
 def _gcc_musl_toolchain_impl(ctx: AnalysisContext) -> list[Provider]:
   name = ctx.label.name
 
@@ -230,33 +194,18 @@ def _gcc_musl_toolchain_impl(ctx: AnalysisContext) -> list[Provider]:
     ctx.attrs.url,
     ctx.attrs.sha256,
     ctx.attrs.archive,
-    # Loader normalization first (it replaces the symlink), then the exec
-    # bits every consumer of this toolchain relies on - g++/mold/the loader
-    # itself - restored once here rather than by each consumer's own action.
-    normalize_loader + _executable_bits([ctx.attrs.expected, ctx.attrs.mold, ctx.attrs.loader]),
+    normalize_loader + _executable_bits([ctx.attrs.loader]),
   )
   if not ctx.attrs.probe:
     return [DefaultInfo(default_outputs = [out_dir, _skipped_stamp(ctx, name)])]
-  reflection_src = ctx.attrs.reflection_src[DefaultInfo].default_outputs[0]
   stamp = ctx.actions.declare_output(name + ".stamp")
   probe_script = ctx.actions.write(
     name + "-probe.sh",
-    [
-      "#!/bin/sh",
-      "set -eu",
-      "ROOT=\"$1\"",
-      "SRC=\"$2\"",
-      "OUT=\"$3\"",
-      "GXX=\"$ROOT/%s\"" % ctx.attrs.expected,
-      "MOLD=\"$ROOT/%s\"" % ctx.attrs.mold,
-      "[ \"$(\"$GXX\" -dumpmachine)\" = \"%s\" ] || { echo 'compiler target mismatch' >&2; exit 1; }" % ctx.attrs.target_triple,
-      "\"$MOLD\" --version | grep -q '^mold 2\\.41\\.0' || { echo 'mold capability probe failed' >&2; exit 1; }",
-      "\"$GXX\" -std=gnu++26 -freflection -fsyntax-only \"$SRC\" >\"$OUT\" 2>&1 || { cat \"$OUT\" >&2; exit 1; }",
-    ],
+    ["#!/bin/sh", "set -eu", "test -x \"$1/%s\"" % ctx.attrs.loader, "printf ok >\"$2\""],
     is_executable = True,
   )
   ctx.actions.run(
-    cmd_args(["/bin/sh", probe_script, out_dir, reflection_src, stamp.as_output()]),
+    cmd_args(["/bin/sh", probe_script, out_dir, stamp.as_output()]),
     category = "probe_toolchain",
     identifier = name,
     env = action_env(),
@@ -271,7 +220,6 @@ gcc_musl_toolchain = rule(
     "loader": attrs.string(),
     "mold": attrs.string(),
     "probe": attrs.bool(default = True),
-    "reflection_src": attrs.dep(providers = [DefaultInfo]),
     "sha256": attrs.string(),
     "target_triple": attrs.string(),
     "url": attrs.string(),

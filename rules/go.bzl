@@ -1,9 +1,10 @@
 """First-party go_binary / go_test / go_lint rules for the go lane.
 
 Mirrors repo.sh's go/go-build/go-test/go-lint semantics: builds, tests, and
-lints with the pinned in-graph Go 1.26.5 toolchain (GOROOT from the
-extracted toolchain, GOTOOLCHAIN=local, CGO_ENABLED=0, GOEXPERIMENT=jsonv2,
--trimpath), module github.com/akalsi-org/polyglot-template. Go binaries
+lints with the pinned in-graph Go 1.27.0 toolchain (GOROOT from the
+extracted toolchain, GOENV=off, GOTOOLCHAIN=local, CGO_ENABLED=0,
+-mod=vendor, -buildvcs=false, -trimpath), module
+github.com/akalsi-org/polyglot-template. Go binaries
 built with CGO_ENABLED=0 are static, so unlike rules/cxx.bzl's cxx_binary
 there is no musl-loader launcher to wrap them in: RunInfo points straight at
 `go build`'s output.
@@ -113,7 +114,24 @@ _GOROOT_REL = _GO_BIN_DIR.rsplit("/", 1)[0]  # "go"
 # contents, so a single traverse() over a merged node visits it exactly once
 # no matter how many parents reach it.
 GoSourceSet = transitive_set()
-GoInfo = provider(fields = ["srcs"])  # `srcs`: a GoSourceSet transitive_set
+GoInfo = provider(fields = [
+  "include_tests",  # bool: whether this target resolves package test files
+  "owner",  # target label used in closure diagnostics
+  "packages",  # list[str]: package patterns resolved by this target
+  "srcs",  # GoSourceSet: this target's declared transitive source closure
+])
+
+def _flatten_go_srcs(tset):
+  seen = {}
+  flattened = []
+  for value in tset.traverse():
+    for src in value:
+      key = str(src)
+      if key not in seen:
+        seen[key] = True
+        flattened.append(src)
+  return flattened
+
 
 def _go_srcs(ctx: AnalysisContext, own_srcs: list, deps: list):
   """Builds this target's own GoSourceSet tset (own_srcs as this node's own
@@ -126,15 +144,7 @@ def _go_srcs(ctx: AnalysisContext, own_srcs: list, deps: list):
   further consumer's own traversal stays a single pass too instead of
   re-flattening an already-flat list at every level of the graph."""
   tset = ctx.actions.tset(GoSourceSet, value = list(own_srcs), children = [d[GoInfo].srcs for d in deps])
-  seen = {}
-  flattened = []
-  for value in tset.traverse():
-    for src in value:
-      key = str(src)
-      if key not in seen:
-        seen[key] = True
-        flattened.append(src)
-  return flattened, tset
+  return _flatten_go_srcs(tset), tset
 
 _TOOLCHAIN_ATTRS = {
   "_go": attrs.dep(default = "//toolchains:go-" + _NATIVE_TARGET, providers = [DefaultInfo]),
@@ -217,10 +227,11 @@ def _write_go_script(ctx, name, tools, tail_lines):
     # too, for the same shared-/tmp reason as SCRATCH_BASE above.
     "export TMPDIR=\"$SCRATCH/tmp\"",
     "mkdir -p \"$GOCACHE\" \"$GOPATH\" \"$GOMODCACHE\" \"$TMPDIR\"",
-    # -mod=vendor makes the committed dependency closure authoritative. Combined
-    # with GOPROXY=off/GOSUMDB=off, Go cannot resolve or verify through a network
-    # service, and it cannot update go.mod or go.sum during an action.
-    "export CGO_ENABLED=0 GOTOOLCHAIN=local GOEXPERIMENT=jsonv2 GOFLAGS=-mod=vendor GOPROXY=off GOSUMDB=off",
+    # GOENV=off rejects persistent `go env -w` state. -mod=vendor makes the
+    # committed dependency closure authoritative. -buildvcs=false prevents
+    # undeclared Git metadata from changing binaries. GOPROXY=off/GOSUMDB=off
+    # prevent network resolution and manifest updates during an action.
+    "export CGO_ENABLED=0 GOENV=off GOTOOLCHAIN=local GOFLAGS='-mod=vendor -buildvcs=false' GOPROXY=off GOSUMDB=off",
     "export PATH=\"$GOROOT/bin:$PATH\"",
   ] + tail_lines
   return ctx.actions.write(name + ".sh", lines, is_executable = True, allow_args = True)
@@ -238,7 +249,12 @@ def _go_library_impl(ctx: AnalysisContext) -> list[Provider]:
   # folds deps' PackageInfo transitively for uniformity.
   return [
     DefaultInfo(default_outputs = list(ctx.attrs.srcs)),
-    GoInfo(srcs = tset),
+    GoInfo(
+      include_tests = False,
+      owner = str(ctx.label.raw_target()),
+      packages = [],
+      srcs = tset,
+    ),
     package_info(ctx, deps = ctx.attrs.deps),
   ]
 
@@ -265,7 +281,7 @@ def _go_binary_impl(ctx: AnalysisContext) -> list[Provider]:
     # dir (observed: ~63M per invocation accumulating under
     # buck-out/v2/tmp/go-rules). Run as a child; the script's exit status
     # is still the go command's status.
-    "\"$GOROOT/bin/go\" build -trimpath -o \"$1\" \"$PKG\"",
+    "\"$GOROOT/bin/go\" build -buildvcs=false -trimpath -o \"$1\" \"$PKG\"",
   ]
   script, written = _write_go_script(ctx, ctx.attrs.name + "-build", tools, tail)
   ctx.actions.run(
@@ -295,7 +311,12 @@ def _go_binary_impl(ctx: AnalysisContext) -> list[Provider]:
     # go_lint's fmt mode would otherwise hand it to `gofmt -l`). Carries the
     # tset forward (not the flattened own_srcs list) so a further consumer's
     # own traversal stays diamond-safe - see _go_srcs' doc comment.
-    GoInfo(srcs = srcs_tset),
+    GoInfo(
+      include_tests = False,
+      owner = str(ctx.label.raw_target()),
+      packages = [ctx.attrs.package],
+      srcs = srcs_tset,
+    ),
     info,
   ]
 
@@ -337,7 +358,7 @@ def _go_test_coverage_action(ctx, tools, all_srcs):
   coverpkg = ",".join(ctx.attrs.coverage_packages or ctx.attrs.packages)
   tail = [
     # No `exec` - see go_binary's tail comment (EXIT trap must fire).
-    "\"$GOROOT/bin/go\" test -trimpath -coverpkg=" + coverpkg +
+    "\"$GOROOT/bin/go\" test -buildvcs=false -trimpath -coverpkg=" + coverpkg +
     " -coverprofile=\"$1\" " + " ".join(ctx.attrs.packages),
   ]
   script, written = _write_go_script(ctx, ctx.attrs.name + "-cov", tools, tail)
@@ -355,7 +376,7 @@ def _go_test_impl(ctx: AnalysisContext) -> list[Provider]:
   all_srcs = _go_inputs(ctx, own_srcs)
   tail = [
     # No `exec` - see go_binary's tail comment (EXIT trap must fire).
-    "\"$GOROOT/bin/go\" test -trimpath " + " ".join(ctx.attrs.packages),
+    "\"$GOROOT/bin/go\" test -buildvcs=false -trimpath " + " ".join(ctx.attrs.packages),
   ]
   script, written = _write_go_script(ctx, ctx.attrs.name, tools, tail)
   command = cmd_args(script, hidden = all_srcs + written + [tools.go_dir])
@@ -369,23 +390,25 @@ def _go_test_impl(ctx: AnalysisContext) -> list[Provider]:
     ),
     # See go_binary's identical GoInfo addition above for why (tset, not the
     # flattened list - diamond-safe forwarding).
-    GoInfo(srcs = srcs_tset),
+    GoInfo(
+      include_tests = True,
+      owner = str(ctx.label.raw_target()),
+      packages = ctx.attrs.packages,
+      srcs = srcs_tset,
+    ),
   ]
-  if ctx.attrs._coverage_enabled:
+  if ctx.attrs._coverage_enabled and ctx.attrs.coverage:
     cov_file = _go_test_coverage_action(ctx, tools, all_srcs)
     providers.append(CoverageInfo(
       kind = "go_profile",
       primary = cov_file,
-      tool = None,
-      gcnos = None,
-      headers = None,
-      toolchain_dir = None,
     ))
   return providers
 
 _go_test_rule = rule(
   impl = _go_test_impl,
   attrs = {
+    "coverage": attrs.bool(default = True),
     "coverage_packages": attrs.list(attrs.string(), default = []),
     "deps": attrs.list(attrs.dep(providers = [GoInfo]), default = []),
     "packages": attrs.list(attrs.string(), default = ["./go/..."]),
@@ -433,6 +456,7 @@ def _go_lint_impl(ctx: AnalysisContext) -> list[Provider]:
   own_srcs, _tset = _go_srcs(ctx, ctx.attrs.srcs, ctx.attrs.deps)
   all_srcs = _go_inputs(ctx, own_srcs)
   if ctx.attrs.mode == "fmt":
+    gofmt_srcs = [src for src in own_srcs if src.short_path.endswith(".go")]
     # own_srcs (not ctx.attrs.srcs alone): after the per-component split,
     # go/BUCK's own package has no .go files directly in it any more - every
     # file gofmt needs to see arrives via `deps=`' GoInfo (go_library's own
@@ -446,7 +470,7 @@ def _go_lint_impl(ctx: AnalysisContext) -> list[Provider]:
     # lint would silently stop checking that file.
     fmt_check = cmd_args(
       ["OUT=$(", "\"$GOROOT/bin/gofmt\"", "-l"] +
-      [cmd_args(src, format = "\"{}\"") for src in own_srcs] +
+      [cmd_args(src, format = "\"{}\"") for src in gofmt_srcs] +
       [")"],
       delimiter = " ",
     )
@@ -489,10 +513,14 @@ def go_lint(**kwargs):
   kwargs.setdefault("default_target_platform", _DEFAULT_PLATFORM)
   _go_lint_rule(**kwargs)
 
-# --- go_graph_check: drift check between the DECLARED Go source set (this
-# target's own `srcs` plus its transitive `deps`' GoInfo - exactly what
-# rules/go.bzl threads into every action's hidden inputs) and the RESOLVED
-# set `go list -deps -test -json <packages>` actually walks into.
+# --- go_graph_check: two closure checks over the declared Go graph.
+#
+# The lane-wide check compares this target's complete `srcs`/`deps` union with
+# `go list -deps -test -json <packages>`. It catches files that no target owns.
+# The per-target check separately compares every go_binary/go_test dependency's
+# resolved package closure with that target's own transitive GoInfo source set.
+# This second comparison catches a missing dependency edge even when another
+# lane target declares the imported package and hides the file from the union.
 #
 # WHY THIS EXISTS: unlike every other lane here, the Go toolchain is never
 # handed a file list. go build/test/vet take a package PATTERN (e.g.
@@ -514,97 +542,129 @@ def go_lint(**kwargs):
 # outside the repo root are skipped - those are pinned by go.sum and the
 # committed vendor tree, both of which ARE already declared inputs.
 _GO_GRAPH_CHECK_PY = [
-  "import json, os, sys",
+  "import json, os, subprocess, sys",
   "",
-  "listing_path, declared_path = sys.argv[1], sys.argv[2]",
-  "with open(declared_path) as f:",
-  "  declared = set(json.load(f))",
-  "",
-  # Every action here runs with cwd = project root (see rules/go.bzl's
-  # module docstring), so `go list`'s absolute Dir values become the same
-  # repo-relative paths buck2 names its source artifacts by.
+  "listing_path, declared_path, targets_path = sys.argv[1:4]",
   "root = os.getcwd()",
-  # Repo-root subtrees that are never declarable sources:
-  #  - vendor/ is the committed external closure, already a tracked input
-  #    wholesale via //:go_vendor.
-  #  - buck-out/ holds buck2's own outputs AND the shared GOCACHE (see this
-  #    module's docstring), where `go list -deps -test` reports the
-  #    synthesized _testmain package it generates for each test binary. Those
-  #    are toolchain-generated, have no repo source to declare, and would
-  #    otherwise be permanent false positives.
   "_IGNORED_ROOTS = ('vendor', 'buck-out')",
-  # `go list -json` emits a stream of concatenated objects, not an array,
-  # so decode it incrementally rather than json.load()-ing the whole file.
-  "decoder = json.JSONDecoder()",
-  "with open(listing_path) as f:",
-  "  text = f.read()",
-  "idx = 0",
-  "missing = []",
-  "seen = 0",
-  "while True:",
-  "  while idx < len(text) and text[idx].isspace():",
-  "    idx += 1",
-  "  if idx >= len(text):",
-  "    break",
-  "  pkg, idx = decoder.raw_decode(text, idx)",
-  "  if pkg.get('Standard'):",
-  "    continue",
-  "  pkg_dir = pkg.get('Dir')",
-  "  if not pkg_dir:",
-  "    continue",
-  # TestGoFiles/XTestGoFiles are exactly the files a package-pattern `go
-  # test` compiles but a `deps=`-derived input set misses.
-  "  for key in ('GoFiles', 'CgoFiles', 'TestGoFiles', 'XTestGoFiles'):",
-  "    for name in pkg.get(key) or []:",
-  # A file name is normally relative to its package Dir, but `go list`
-  # reports an ABSOLUTE path for toolchain-generated members (the
-  # _testmain.go it synthesizes per test binary, cgo output), which land in
-  # GOCACHE rather than the package directory - so the ignore filter has to
-  # be applied to the resolved FILE, not to Dir.
-  "      resolved = name if os.path.isabs(name) else os.path.join(pkg_dir, name)",
-  "      rel = os.path.relpath(resolved, root)",
-  "      if rel.startswith('..') or rel.split(os.sep)[0] in _IGNORED_ROOTS:",
-  "        continue",
-  "      seen += 1",
-  "      path = rel.replace(os.sep, '/')",
-  "      if path not in declared:",
-  "        missing.append(path)",
   "",
-  "if missing:",
+  "def resolved_files(text, include_tests):",
+  # `go list -json` emits concatenated objects, not an array. Decode the stream
+  # incrementally for both the lane-wide listing and each per-target listing.
+  "  decoder = json.JSONDecoder()",
+  "  idx = 0",
+  "  files = set()",
+  "  while True:",
+  "    while idx < len(text) and text[idx].isspace():",
+  "      idx += 1",
+  "    if idx >= len(text):",
+  "      return files",
+  "    pkg, idx = decoder.raw_decode(text, idx)",
+  "    if pkg.get('Standard'):",
+  "      continue",
+  "    pkg_dir = pkg.get('Dir')",
+  "    if not pkg_dir:",
+  "      continue",
+  "    keys = ('GoFiles', 'CgoFiles')",
+  # A test command compiles test files only for its selected packages. Package
+  # metadata for dependency-only packages still contains their test filenames.
+  "    if include_tests and not pkg.get('DepOnly'):",
+  "      keys += ('TestGoFiles', 'XTestGoFiles')",
+  "    for key in keys:",
+  "      for name in pkg.get(key) or []:",
+  # Toolchain-generated files can be absolute and live under buck-out. Ignore
+  # those files, vendored files, stdlib files, and files outside this module.
+  "        resolved = name if os.path.isabs(name) else os.path.join(pkg_dir, name)",
+  "        rel = os.path.relpath(resolved, root)",
+  "        if rel.startswith('..') or rel.split(os.sep)[0] in _IGNORED_ROOTS:",
+  "          continue",
+  "        files.add(rel.replace(os.sep, '/'))",
+  "",
+  "with open(listing_path) as f:",
+  "  lane_resolved = resolved_files(f.read(), True)",
+  "with open(declared_path) as f:",
+  "  lane_declared = set(json.load(f))",
+  "with open(targets_path) as f:",
+  "  targets = json.load(f)",
+  "",
+  "lane_missing = sorted(lane_resolved - lane_declared)",
+  "if lane_missing:",
   "  print('go_graph_check: in-module Go files resolved by the package pattern but missing from the declared srcs/deps graph:', file=sys.stderr)",
-  "  for m in sorted(set(missing)):",
-  "    print('  ' + m, file=sys.stderr)",
+  "  for path in lane_missing:",
+  "    print('  ' + path, file=sys.stderr)",
   "  print('add each file to a go_library/go_binary/go_test srcs=, then list that target in the deps= of this check, so buck2 invalidates the actions that compile it.', file=sys.stderr)",
   "  sys.exit(1)",
-  "print('go_graph_check: ok (%d resolved in-module files, %d declared)' % (seen, len(declared)))",
+  "",
+  "failed = False",
+  "go = os.path.join(os.environ['GOROOT'], 'bin', 'go')",
+  "for target in targets:",
+  "  command = [go, 'list', '-deps']",
+  "  if target['include_tests']:",
+  "    command.append('-test')",
+  "  command += ['-json'] + target['packages']",
+  "  listing = subprocess.run(command, check=True, stdout=subprocess.PIPE, text=True).stdout",
+  "  missing = sorted(resolved_files(listing, target['include_tests']) - set(target['declared']))",
+  "  if not missing:",
+  "    continue",
+  "  failed = True",
+  "  print('go_graph_check: %s resolves first-party Go files outside its declared srcs/deps graph:' % target['owner'], file=sys.stderr)",
+  "  for path in missing:",
+  "    print('  ' + path, file=sys.stderr)",
+  "  print('add the go_library/go_binary/go_test target that owns each file to this target deps=.', file=sys.stderr)",
+  "if failed:",
+  "  sys.exit(1)",
+  "print('go_graph_check: ok (%d resolved in-module files, %d declared, %d target closures)' % (len(lane_resolved), len(lane_declared), len(targets)))",
 ]
 
-def _go_graph_check_impl(ctx: AnalysisContext) -> list[Provider]:
-  tools = _toolchain_tools(ctx)
-  own_srcs, _tset = _go_srcs(ctx, ctx.attrs.srcs, ctx.attrs.deps)
-  all_srcs = _go_inputs(ctx, own_srcs)
-  # write_json serializes each Artifact as its repo-relative path, which is
-  # the same spelling the checker derives from `go list`'s Dir + file name.
-  declared = ctx.actions.write_json(ctx.attrs.name + "-declared.json", own_srcs)
+def _go_graph_check_action(ctx, tools, declared_srcs, targets):
+  all_srcs = _go_inputs(ctx, declared_srcs)
+  # write_json serializes Artifacts as repo-relative paths in both manifests.
+  declared = ctx.actions.write_json(ctx.attrs.name + "-declared.json", declared_srcs)
+  target_closures = ctx.actions.write_json(ctx.attrs.name + "-target-closures.json", targets)
   checker = ctx.actions.write(ctx.attrs.name + "-check.py", _GO_GRAPH_CHECK_PY)
   stamp = ctx.actions.declare_output(ctx.attrs.name + ".stamp")
   tail = [
     "LISTING=\"$SCRATCH/packages.json\"",
     # No `exec` - see go_binary's tail comment (EXIT trap must fire).
     "\"$GOROOT/bin/go\" list -deps -test -json " + " ".join(ctx.attrs.packages) + " >\"$LISTING\"",
-    "\"$1\" --library-path \"$2:$3\" \"$4\" \"$5\" \"$LISTING\" \"$6\"",
-    "echo ok >\"$7\"",
+    "\"$1\" --library-path \"$2:$3\" \"$4\" \"$5\" \"$LISTING\" \"$6\" \"$7\"",
+    "echo ok >\"$8\"",
   ]
   script, written = _write_go_script(ctx, ctx.attrs.name, tools, tail)
   ctx.actions.run(
     cmd_args(
-      ["/bin/sh", script, pinned_python_script_args(ctx), checker, declared, stamp.as_output()],
+      [
+        "/bin/sh",
+        script,
+        pinned_python_script_args(ctx),
+        checker,
+        declared,
+        target_closures,
+        stamp.as_output(),
+      ],
       hidden = all_srcs + written + [tools.go_dir],
     ),
     category = "go_graph_check",
     identifier = ctx.attrs.name,
     env = action_env(),
   )
+  return stamp
+
+
+def _go_graph_check_impl(ctx: AnalysisContext) -> list[Provider]:
+  tools = _toolchain_tools(ctx)
+  own_srcs, _tset = _go_srcs(ctx, ctx.attrs.srcs, ctx.attrs.deps)
+  targets = []
+  for dep in ctx.attrs.deps:
+    info = dep[GoInfo]
+    if info.packages:
+      targets.append({
+        "declared": _flatten_go_srcs(info.srcs),
+        "include_tests": info.include_tests,
+        "owner": info.owner,
+        "packages": info.packages,
+      })
+  stamp = _go_graph_check_action(ctx, tools, own_srcs, targets)
   command = cmd_args(["/bin/sh", "-c", "exit 0"], hidden = [stamp])
   return [
     DefaultInfo(default_output = stamp),

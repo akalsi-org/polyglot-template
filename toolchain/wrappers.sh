@@ -37,38 +37,36 @@ exec \"\$ROOT/$loader_rel\" --library-path \"\$ROOT/$loader_dir_rel:\$ROOT/$pyth
 "
 }
 
-write_clang_format_tool_wrapper() {
-  local local_dir=$1 output=$2 clang_format=$3 loader=$4 clang_rel loader_rel loader_dir_rel clang_lib_rel
-  clang_rel=$(wrapper_relative_path "$local_dir" "$clang_format")
-  loader_rel=$(wrapper_relative_path "$local_dir" "$loader")
-  loader_dir_rel=$(wrapper_relative_path "$local_dir" "$(dirname -- "$loader")")
-  clang_lib_rel=$(wrapper_relative_path "$local_dir" "$(dirname -- "$(dirname -- "$(dirname -- "$clang_format")")")/../clang_format.libs")
+write_go_tool_wrapper() {
+  local local_dir=$1 output=$2 go=$3 go_rel goroot_rel
+  go_rel=$(wrapper_relative_path "$local_dir" "$go")
+  goroot_rel=$(wrapper_relative_path "$local_dir" "$(dirname -- "$(dirname -- "$go")")")
   install_tool_wrapper "$output" "#!/bin/sh
 set -eu
 ROOT=\$(CDPATH= cd -- \"\$(dirname -- \"\$0\")/..\" && pwd -P)
-exec \"\$ROOT/$loader_rel\" --library-path \"\$ROOT/$loader_dir_rel:\$ROOT/$clang_lib_rel\" \"\$ROOT/$clang_rel\" \"\$@\"
+jobs=\${POLYGLOT_JOBS:-}
+if [ -z \"\$jobs\" ]; then jobs=\$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf '1\\n'); fi
+case \$jobs in ''|*[!0-9]*|0) printf 'error: POLYGLOT_JOBS must be a positive integer\\n' >&2; exit 2 ;; esac
+export GOROOT=\"\$ROOT/$goroot_rel\"
+export GOPATH=\"\$ROOT/cache/go/path\"
+export GOMODCACHE=\"\$ROOT/cache/go/mod\"
+export GOCACHE=\"\$ROOT/cache/go/build\"
+export GOBIN=\"\$ROOT/bin\"
+export GOENV=off GOTOOLCHAIN=local CGO_ENABLED=0
+export GOFLAGS=\"-p=\$jobs -mod=vendor -buildvcs=false\"
+export PATH=\"\$GOROOT/bin:\$PATH\"
+exec \"\$ROOT/$go_rel\" \"\$@\"
 "
 }
 
 write_repo_tool_wrappers() {
-  local local_dir=$1 cc=$2 cxx=$3 python=$4 loader=$5 deno=$6 go=$7 buck2=$8 clang_format=$9
-  local gcc_install=${10} target=${11} shellcheck=${12} env_bin binutil binutil_rel
+  local local_dir=$1 python=$2 loader=$3 deno=$4 go=$5 buck2=$6 shellcheck=$7 env_bin
   env_bin="$local_dir/bin"
   mkdir -p "$env_bin"
   write_python_tool_wrapper "$local_dir" "$env_bin/python" "$python" "$loader"
   write_python_tool_wrapper "$local_dir" "$env_bin/python3" "$python" "$loader"
-  write_direct_tool_wrapper "$local_dir" "$env_bin/gcc" "$cc"
-  write_direct_tool_wrapper "$local_dir" "$env_bin/g++" "$cxx"
-  write_direct_tool_wrapper "$local_dir" "$env_bin/go" "$go"
+  write_go_tool_wrapper "$local_dir" "$env_bin/go" "$go"
   write_direct_tool_wrapper "$local_dir" "$env_bin/deno" "$deno"
   write_direct_tool_wrapper "$local_dir" "$env_bin/buck2" "$buck2"
-  write_clang_format_tool_wrapper "$local_dir" "$env_bin/clang-format" "$clang_format" "$loader"
-  # Statically linked: no loader, no --library-path, so the direct wrapper
-  # applies. Written last so an older bootstrap that has every other tool but
-  # not this one still produces the wrappers it can.
   write_direct_tool_wrapper "$local_dir" "$env_bin/shellcheck" "$shellcheck"
-  for binutil in ar ranlib nm strip objcopy ld; do
-    binutil_rel=$(lock_value gcc-musl "$target" "$binutil")
-    write_direct_tool_wrapper "$local_dir" "$env_bin/$binutil" "$gcc_install/$binutil_rel"
-  done
 }

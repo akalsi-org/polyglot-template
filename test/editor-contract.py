@@ -18,9 +18,6 @@ def main() -> None:
   assert "[*]\n" in editorconfig
   assert "indent_style = space\nindent_size = 2\ntab_width = 2\n" in editorconfig
   assert "[*.go]\nindent_style = tab\nindent_size = tab\ntab_width = 2\n" in editorconfig
-  clang_format = (ROOT / ".clang-format").read_text()
-  assert "IndentWidth: 2\n" in clang_format
-  assert "ContinuationIndentWidth: 2\n" in clang_format
   assert settings["editor.detectIndentation"] is False
   assert settings["editor.insertSpaces"] is True
   assert settings["editor.tabSize"] == 2
@@ -30,7 +27,6 @@ def main() -> None:
     "editor.tabSize": 2,
   }
 
-  assert settings["clangd.arguments"] == ["--compile-commands-dir=${workspaceFolder}"]
   assert settings["deno.enable"] is True
   assert settings["deno.enablePaths"] == ["./ts", "./tsweb"]
   assert settings["deno.config"] == "./deno.json"
@@ -55,7 +51,8 @@ def main() -> None:
   assert settings["go.alternateTools"] == {"go": "${workspaceFolder}/.vscode/go"}
   assert settings["go.toolsEnvVars"] == {
     "CGO_ENABLED": "0",
-    "GOEXPERIMENT": "jsonv2",
+    "GOENV": "off",
+    "GOFLAGS": "-mod=vendor -buildvcs=false",
     "GOTOOLCHAIN": "local",
   }
   assert settings["python.analysis.extraPaths"] == [
@@ -63,8 +60,6 @@ def main() -> None:
     "${workspaceFolder}/python/app",
     "${workspaceFolder}/python/test",
   ]
-  assert (ROOT / "python/test/pyfast_test_ext/__init__.pyi").is_file()
-  assert (ROOT / "python/test/pyfast_test_ext/py.typed").is_file()
   assert settings["python.defaultInterpreterPath"] == "${workspaceFolder}/.local/bin/python"
   assert settings["python.envFile"] == "${workspaceFolder}/.vscode/python.env"
   assert settings["python.terminal.useEnvFile"] is True
@@ -78,7 +73,6 @@ def main() -> None:
 
   required = {
     "denoland.vscode-deno",
-    "llvm-vs-code-extensions.vscode-clangd",
     "ms-python.python",
     "ms-python.vscode-pylance",
     "golang.go",
@@ -112,9 +106,8 @@ def main() -> None:
     "program": "${file}",
   }]
   editor_guide = (ROOT / "docs" / "EDITOR.md").read_text()
-  assert "Pylance intentionally does not search `build/python/<target>/lib`" in editor_guide
-  assert "Python: run" in editor_guide
-  assert "active file with native extension" in editor_guide
+  assert "Pylance resolves the pure Python source roots" in editor_guide
+  assert "Python remains pure Python" in editor_guide
 
   print("editor contract: ok")
 

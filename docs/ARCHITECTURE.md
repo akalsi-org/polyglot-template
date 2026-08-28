@@ -3,8 +3,7 @@
 ## Scope And Status
 
 This document describes the implemented bootstrap slice in this repository.
-It is a Linux-only, CPU-native, offline-after-bootstrap workspace for C++,
-Python, Go, TypeScript, and a React static site. Linux x86-64 hosts build
+It is a Linux-only, CPU-native, offline-after-bootstrap workspace for pure Python, Go, TypeScript, and a React static site. Linux x86-64 hosts build
 `x86_64-linux-musl`; Linux ARM64 hosts build `aarch64-linux-musl`. Fleet, schema-generation, benchmark, and third-party-adapter designs in adjacent
 documents are proposals; they are not part of the current `repo.sh` interface.
 Deployment has only the read-only Buck plan/observation contract documented in
@@ -20,10 +19,9 @@ repo/
 |- tools.lock.toml                 # exact bootstrap artifacts
 |- packages/catalog.bzl            # canonical package and runtime catalog
 |- BUCK, rules/, config/, platforms/, toolchains/  # Buck2 build graph
-|- bxl/                            # BXL queries (compdb.bxl, coverage.bxl)
+|- bxl/                            # BXL coverage query
 |- toolchain/                      # bootstrap, target, lock, doctor helpers
-|- cpp/{lib,app,test}/             # C++ sources (BUCK-owned targets)
-|- python/{lib,app,test}/          # Python and native extension sources
+|- python/{lib,app,test}/          # pure Python sources
 |- go/{lib,app,test}/              # pure-Go lane
 |- ts/{lib,app,test}/              # Deno TypeScript lane
 |- tsweb/{lib,app,test}/           # React/Vite static application
@@ -58,8 +56,6 @@ lint
 build [dbg|opt]
 coverage
 test [dbg|opt]
-compile-commands [dbg|opt]
-cpp-build [dbg|opt] | cpp-run [dbg|opt] | cpp-test
 python [args...] | python-build | python-test
 deno [args...] | ts-build | ts-test | tsweb-build | tsweb-test
 go [args...] | go-build | go-test
@@ -100,12 +96,10 @@ doctor check. See [TOOLCHAIN-LIFECYCLE.md](TOOLCHAIN-LIFECYCLE.md) for the
 reviewed update, recovery, and rollback workflow.
 
 The current host CPU selects the target: x86-64 hosts produce
-`x86_64-linux-musl`, and ARM64 hosts produce `aarch64-linux-musl`. Native C++
-and Python-extension work uses the pinned GCC+musl toolchain. The Python
-interpreter and C++ executables run through that toolchain's matching musl
-loader on glibc hosts. Go runs with `CGO_ENABLED=0`, a repo-local Go toolchain,
-isolated caches, and the currently global `GOEXPERIMENT=jsonv2` setting. Deno,
-Buck2, and doctest are likewise pinned; every non-Buck2 tool above is
+`x86_64-linux-musl`, and ARM64 hosts produce `aarch64-linux-musl`. Packaged Python applications use the pinned CPython and musl runtime closure
+on glibc hosts. Go runs with `CGO_ENABLED=0`, `GOENV=off`,
+`GOTOOLCHAIN=local`, a repo-local Go toolchain, isolated caches, the committed
+vendor closure, and disabled VCS stamping. `go/lib/mpsc` owns the Linux SPSC and MPSC format version 4 implementation. [mpsc-queue.md](mpsc-queue.md) defines its API, format, ownership, recovery, ordering, and verification contracts. `go/bench/mpsc` owns its benchmark campaign. Deno and Buck2 are likewise pinned; every non-Buck2 tool above is
 also wired into the Buck2 graph as an in-graph toolchain (see
 `toolchains/lock.bzl`, generated from `tools.lock.toml`), so buck2-driven
 builds never depend on a host-installed compiler, interpreter, or runtime.
@@ -118,7 +112,7 @@ buck-out and rebuilding+testing inside a no-network namespace).
 ## Build And Test Graph
 
 `repo.sh` delegates aggregate `lint`, `build`, `test`, and `ci` work to the
-pinned Buck2 binary; every lane command (`cpp-build`, `python-test`,
+pinned Buck2 binary; every lane command (`python-test`,
 `go-build`, `ts-test`, `tsweb-build`, ...) is a thin wrapper that invokes the
 corresponding Buck2 target. There is one scheduler: Buck2 owns caching,
 incrementality, and cross-lane concurrency directly, rather than a coarse
@@ -153,13 +147,11 @@ task runner layered over a separate jobserver.
   source as an input to the merge just to annotate them.
 
 Every first-party Buck2 rule (there is no prelude in this repository) lives
-under `rules/`: `rules/cxx.bzl`, `rules/go.bzl`, `rules/python.bzl`,
+under `rules/`: `rules/go.bzl`, `rules/python.bzl`,
 `rules/deno.bzl`, `rules/package.bzl`, `rules/coverage.bzl`,
 `rules/toolchain.bzl`, plus small `constraint_setting`/`constraint_value`/
 `group`/`export_file` replacements for prelude rules this repository does not
-have. `./repo.sh compile-commands` materializes the root
-`compile_commands.json` from `bxl/compdb.bxl`'s BXL compilation-database
-query over the buck2-built cpp/python actions.
+have.
 
 ## Packages And Releases
 
@@ -192,8 +184,7 @@ creates a GitHub Release from the root changelog section. See
 
 ## Editor And Agent Guidance
 
-`.vscode/settings.json` points clangd at the generated root compilation
-database, configures Deno for `ts/` and `tsweb/`, exposes Python library and app
+`.vscode/settings.json` configures Deno for `ts/` and `tsweb/`, exposes Python library and app
 roots, and routes Go through the repository wrapper. Repository operating
 guidance is tracked in `.agents/md/overview.md` and exposed through the
 relative `AGENTS.md` symlink. Generated agent state, credentials, downloads,
@@ -201,12 +192,10 @@ caches, build products, and releases remain ignored.
 
 ## Deliberately Unimplemented
 
-This checkout does not currently provide schema generation, benchmark commands,
+This checkout does not currently provide schema generation, a public benchmark command,
 third-party dependency adapters, fleet management, a deploy command or remote
 mutation path, certificate automation, cross-compilation, macOS/Windows
-support, sanitizers, or Zstandard packaging. Sanitizers remain explicitly
-deferred to preserve the hermetic Linux-musl closure; they require a separately
-evaluated host-debug toolchain. Tagged package archives receive GitHub artifact
+support, or Zstandard packaging. Tagged package archives receive GitHub artifact
 attestations, and `tools/release_evidence.py` writes the deterministic
 `.sbom.json` and `.provenance.json` sidecars that the package-release workflow
 publishes alongside each archive and the release manifest. What remains

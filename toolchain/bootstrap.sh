@@ -105,36 +105,14 @@ probe_python() {
 }
 
 probe_gcc() {
-  local root=$1 expected=$2 mold dumpmachine binutil binutil_rel
-  mold=$(lock_value gcc-musl "$target" mold)
-  [[ -x $root/$mold ]] || { printf 'error: gcc-musl missing declared mold executable\n' >&2; return 1; }
-  for binutil in ar ranlib nm strip objcopy ld; do
-    binutil_rel=$(lock_value gcc-musl "$target" "$binutil")
-    [[ -x $root/$binutil_rel ]] || { printf 'error: gcc-musl missing declared %s executable\n' "$binutil" >&2; return 1; }
-  done
-  dumpmachine=$("$root/$expected" -dumpmachine)
-  [[ $dumpmachine == "$target" ]] || { printf 'error: compiler target mismatch: %s\n' "$dumpmachine" >&2; return 1; }
-  "$root/$mold" --version | grep -q '^mold 2\.41\.0' || { printf 'error: mold capability probe failed\n' >&2; return 1; }
-  "$root/$expected" -std=gnu++26 -freflection -fsyntax-only "$ROOT/cpp/test/reflection.cc" || {
-    printf 'error: GCC C++26 reflection capability probe failed\n' >&2; return 1;
-  }
+  local root=$1 expected=$2 loader
+  loader=$(lock_value gcc-musl "$target" loader)
+  [[ -x $root/$loader ]] || { printf 'error: gcc-musl missing declared musl loader\n' >&2; return 1; }
 }
 
 probe_go() {
   local root=$1 expected=$2 version=$3
   "$root/$expected" version | grep -q "go$version" || { printf 'error: Go capability probe failed\n' >&2; return 1; }
-}
-
-probe_clang_format() {
-  local root=$1 expected=$2 gcc_version loader gcc_install loader_dir clang_lib_dir
-  gcc_version=$(lock_value gcc-musl "$target" version)
-  loader=$(lock_value gcc-musl "$target" loader)
-  gcc_install="$LOCAL/toolchain/$target/gcc-musl-$gcc_version"
-  loader_dir=$(dirname -- "$gcc_install/$loader")
-  clang_lib_dir="$root/clang_format.libs"
-  "$gcc_install/$loader" --library-path "$loader_dir:$clang_lib_dir" "$root/$expected" --version >/dev/null || {
-    printf 'error: clang-format capability probe failed\n' >&2; return 1;
-  }
 }
 
 probe_executable() {
@@ -159,21 +137,12 @@ probe_buck2() {
   }
 }
 
-probe_doctest() {
-  local root=$1 expected=$2
-  grep -q '^#define DOCTEST_VERSION_MAJOR 2$' "$root/$expected" || {
-    printf 'error: doctest header capability probe failed\n' >&2; return 1;
-  }
-}
-
 probe_artifact() {
   local tool=$1 kind=$2 root=$3 expected=$4 version=$5
   case "$tool:$kind" in
     python:*) probe_python "$root" "$expected" ;;
     gcc-musl:*) probe_gcc "$root" "$expected" ;;
     go:*) probe_go "$root" "$expected" "$version" ;;
-    clang-format:*) probe_clang_format "$root" "$expected" ;;
-    doctest:*) probe_doctest "$root" "$expected" ;;
     buck2:*) probe_buck2 "$root" "$expected" ;;
     *:executable) probe_executable "$tool" "$root" "$expected" ;;
   esac
@@ -188,23 +157,20 @@ tool_install_path() {
 }
 
 write_bootstrap_wrappers() {
-  local cxx cc python deno go buck2 clang_format shellcheck loader gcc_version loader_path gcc_install
-  cxx=$(tool_install_path gcc-musl) || return 0
-  cc="${cxx%g++}gcc"
+  local python deno go buck2 shellcheck loader gcc_version loader_path gcc_install
   python=$(tool_install_path python) || return 0
   deno=$(tool_install_path deno) || return 0
   go=$(tool_install_path go) || return 0
   buck2=$(tool_install_path buck2) || return 0
-  clang_format=$(tool_install_path clang-format) || return 0
   shellcheck=$(tool_install_path shellcheck) || return 0
   gcc_version=$(lock_value gcc-musl "$target" version)
   loader=$(lock_value gcc-musl "$target" loader)
   gcc_install="$LOCAL/toolchain/$target/gcc-musl-$gcc_version"
   loader_path="$gcc_install/$loader"
-  for tool in "$cc" "$cxx" "$python" "$deno" "$go" "$buck2" "$clang_format" "$shellcheck" "$loader_path"; do
+  for tool in "$python" "$deno" "$go" "$buck2" "$shellcheck" "$loader_path"; do
     [[ -x $tool ]] || return 0
   done
-  write_repo_tool_wrappers "$LOCAL" "$cc" "$cxx" "$python" "$loader_path" "$deno" "$go" "$buck2" "$clang_format" "$gcc_install" "$target" "$shellcheck"
+  write_repo_tool_wrappers "$LOCAL" "$python" "$loader_path" "$deno" "$go" "$buck2" "$shellcheck"
   printf 'bootstrap: wrote self-contained tool wrappers\n'
 }
 

@@ -1,0 +1,73 @@
+load("//rules:go.bzl", "go_binary", "go_library", "go_test")
+
+go_library(
+  name = "schema",
+  srcs = ["schema/schema.go"],
+  visibility = ["PUBLIC"],
+)
+
+go_binary(
+  name = "bench_queue",
+  package = "./go/bench/mpsc/bench_queue",
+  srcs = ["bench_queue/main.go"],
+  deps = [
+    ":schema",
+    "//go/lib/hostcpu:hostcpu",
+    "//go/lib/mpsc:mpsc",
+  ],
+  pkg_name = "go-mpsc-bench-queue",
+  visibility = ["PUBLIC"],
+)
+
+go_test(
+  coverage = False,
+  name = "schema_test",
+  srcs = ["schema/schema_test.go"],
+  deps = [":schema"],
+  packages = ["./go/bench/mpsc/schema"],
+)
+
+go_test(
+  coverage = False,
+  name = "bench_queue_test",
+  srcs = ["bench_queue/main_test.go"],
+  deps = [":bench_queue"],
+  packages = ["./go/bench/mpsc/bench_queue"],
+)
+
+go_binary(
+  name = "run_campaign",
+  package = "./go/bench/mpsc/run_campaign",
+  srcs = ["run_campaign/main.go"],
+  deps = [
+    ":schema",
+    "//go/lib/hostcpu:hostcpu",
+  ],
+  pkg_name = "go-mpsc-run-campaign",
+  visibility = ["PUBLIC"],
+)
+
+go_test(
+  coverage = False,
+  name = "run_campaign_test",
+  srcs = ["run_campaign/main_test.go"],
+  deps = [":run_campaign"],
+  packages = ["./go/bench/mpsc/run_campaign"],
+)
+
+go_binary(
+  name = "summarize_campaign",
+  package = "./go/bench/mpsc/summarize_campaign",
+  srcs = ["summarize_campaign/main.go"],
+  deps = [":schema"],
+  pkg_name = "go-mpsc-summarize-campaign",
+  visibility = ["PUBLIC"],
+)
+
+go_test(
+  coverage = False,
+  name = "summarize_campaign_test",
+  srcs = ["summarize_campaign/main_test.go"],
+  deps = [":summarize_campaign"],
+  packages = ["./go/bench/mpsc/summarize_campaign"],
+)

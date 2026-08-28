@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Project Initializer / Renamer for Polyglot Template.
 
-Renames repository namespaces, Go module paths, package catalog entries, and
-docs when instantiating a new repository from polyglot-template, then walks
+Renames the project identity, Go module paths, package catalog entries, and
+docs when instantiating a new repository from polyglot-template. It then walks
 the maintainer through pruning two categories of template-only content:
 
 1. This template's OWN self-referential test files (TEST_STRIP_CANDIDATES) -
@@ -11,9 +11,8 @@ the maintainer through pruning two categories of template-only content:
    ships with. Those tests have no value in a fork and are guaranteed to
    start failing the moment a fork does what forking is for (rewrite the
    README, customize CI, replace the demo catalog).
-2. The leaf demo code itself (DEMO_STRIP_GROUPS) - the greeting/hello
-   example library and app in the C++ and Python lanes, whose only purpose
-   is to give a fresh clone something that builds. Removing a group also
+2. The leaf demo code itself (DEMO_STRIP_GROUPS) - the Python greeting/hello
+   example library and app, plus this template's design history. Removing a group also
    applies the exact edits its removal requires elsewhere in the graph
    (BUCK dep lists, packages/BUCK, packages/catalog.bzl), so the graph
    stays buildable rather than merely smaller.
@@ -53,24 +52,11 @@ fork's own editing job, not a scripted one.
 
 KEEP-LIST - reusable infrastructure that is NEVER a prune candidate, listed
 here because some of it does not look like infrastructure at a glance:
-  cpp/lib/pyfast/**                 the CPython fast-call header library
-  python/test/pyfast_test_ext.c     pyfast's ONLY test fixture; it lives in
-  python/test/extension_init.py     python/test/ and reads like demo code,
-  python/test/pyfast_test_ext/**    but //cpp/lib/pyfast:leak_check and
-  python/test/test_pyfast_extension.py  test_pyfast_extension.py are what
-                                    prove pyfast.h works at all
-  python/lib/testlib.py             the test framework, plus its self-test
-  python/test/test_testlib.py       and the runner that imports TestContext
-  tools/py_test_runner.py           (testlib is inert without it)
+  python/lib/testlib.py             the pure Python test framework
+  python/test/test_testlib.py       the framework's self-test
+  tools/py_test_runner.py           the runner that imports TestContext
   tools/py_cover.py, tools/coverage_*.py
-  python/lib/fastbytes/**           the worked py_extension example (C++
-                                    srcs + stubs + py.typed) a fork copies
-                                    when adding its own extension
-  cpp/test/doctest_runner.cc        shared per-configuration test runner
-  cpp/test/reflection.cc            rules/toolchain.bzl's C++26 reflection
-                                    capability probe - deleting cpp/test/
-                                    breaks the TOOLCHAIN, not just tests
-  cpp/lib/pgt/core/**               generic fixed-width/platform headers
+  go/, ts/, tsweb/                  retained language and web lanes
   rules/, tools/, toolchain/, config/, platforms/, bxl/
 """
 
@@ -88,6 +74,8 @@ OLD_PROJECT = "polyglot-template"
 OLD_ORG = "akalsi-org"
 OLD_MODULE = f"github.com/{OLD_ORG}/{OLD_PROJECT}"
 
+# rename_targets() adds every Go source file. Keep this list for non-Go files
+# whose project identity must change.
 RENAME_TARGETS = [
   "README.md",
   "CHANGELOG.md",
@@ -95,17 +83,10 @@ RENAME_TARGETS = [
   "deno.json",
   "packages/catalog.bzl",
   "packages/BUCK",
-  "bxl/compdb.bxl",
-  "rules/cxx.bzl",
   "rules/go.bzl",
   "rules/python.bzl",
   "rules/deno.bzl",
   "rules/package.bzl",
-  "cpp/lib/example/example.cc",
-  "cpp/test/example_test.cc",
-  "go/app/hello/main.go",
-  "go/app/hello/main_test.go",
-  "go/test/greeting_test.go",
   "tsweb/app/site/index.html",
   "tsweb/lib/app/app.tsx",
   "tsweb/lib/title/title.ts",
@@ -116,7 +97,7 @@ RENAME_TARGETS = [
 ]
 
 # LICENSE is deliberately NOT renamed: "Copyright (c) <year> akalsi-org" is a
-# statement about who holds copyright in this template's code, not a namespace.
+# statement about who holds copyright in this template's code, not project identity.
 # A fork changing it is asserting authorship, which is the fork's call to make
 # by hand.
 
@@ -166,32 +147,6 @@ SCHEMA_RENAME_TARGETS = [
   "rules/deploy.bzl",
 ]
 OLD_SCHEMA_PREFIX = "polyglot.deployment-"
-
-# The C++ namespace, its include root, and its Buck target are all named after
-# this template ("namespace pgt", `#include "pgt/core/types.hh"`,
-# //cpp/lib/pgt/core:pgt_core). Nothing here contains "polyglot-template"
-# either, so every fork kept a pgt:: namespace. cpp/lib/pgt is renamed to the
-# project's own slug and these files rewritten to match.
-OLD_NAMESPACE = "pgt"
-NAMESPACE_RENAME_TARGETS = [
-  "cpp/lib/pgt/core/BUCK",
-  "cpp/lib/pgt/core/platform.hh",
-  "cpp/lib/pgt/core/types.hh",
-  "cpp/test/BUCK",
-  "cpp/test/core_test.cc",
-  "rules/cxx.bzl",
-  "docs/LANGUAGE-GUIDE.md",
-]
-
-def namespace_slug(new_project: str) -> str:
-  """A C++-identifier-safe namespace derived from the project name."""
-  slug = re.sub(r"[^a-z0-9]+", "_", new_project.lower()).strip("_")
-  if not slug:
-    return OLD_NAMESPACE
-  if slug[0].isdigit():
-    slug = "ns_" + slug
-  return slug
-
 
 @dataclass
 class TestStripCandidate:
@@ -263,10 +218,9 @@ TEST_STRIP_CANDIDATES = [
     path="test/editor-contract.py",
     invocation_snippet="test/editor-contract.py",
     rationale=(
-      "Asserts this template's own chosen editor settings (2-space indent,\n"
-      "  clang-format width, Deno fmt config) match .vscode/.editorconfig/\n"
-      "  .clang-format. Keep it if you keep those conventions; low value\n"
-      "  otherwise."
+      "Asserts this template's own chosen editor settings (2-space indent and\n"
+      "  Deno formatting) match .vscode, .editorconfig, and deno.json. Keep it\n"
+      "  if you keep those conventions; it has low value otherwise."
     ),
   ),
 ]
@@ -281,9 +235,6 @@ class Edit:
                      `values`. Stripped equality, not substring: prose in a
                      BUCK header comment that happens to name the same
                      target must survive.
-    "drop_target"  - remove the whole top-level rule invocation whose body
-                     declares `name = "<value>",`, plus the contiguous
-                     comment block immediately above it.
     "drop_range"   - remove the lines from the first one containing
                      values[0] up to (not including) the next one containing
                      values[1]. Used for whole prose sections, which are
@@ -335,9 +286,8 @@ class DemoStripGroup:
   edits: tuple[Edit, ...]
   rationale: str
   # Things this removal leaves stale that the script deliberately does NOT
-  # rewrite - repo.sh's own per-lane convenience verbs. Printed at the end so
-  # a fork is told exactly what it now owns rather than discovering it at the
-  # next `./repo.sh cpp-run`.
+  # rewrite, such as repo.sh's per-lane convenience verbs. The script prints
+  # these items so a fork knows what it must update.
   warnings: tuple[str, ...] = ()
 
 
@@ -346,42 +296,6 @@ class DemoStripGroup:
 # leave the Buck2 graph buildable on its own, so groups can be chosen in any
 # combination.
 DEMO_STRIP_GROUPS = [
-  DemoStripGroup(
-    key="cpp-demo",
-    title="C++ demo library and hello app",
-    paths=(
-      "cpp/lib/example",
-      "cpp/app/hello",
-      "cpp/test/example_test.cc",
-      "cpp/test/example_edge_test.cc",
-    ),
-    edits=(
-      Edit("cpp/test/BUCK", "drop_target", ("example_test", "example_edge_test")),
-      Edit("packages/BUCK", "drop_lines", ('"//cpp/app/hello:hello",', '"bin/cpp-hello": [],')),
-      Edit("packages/catalog.bzl", "drop_item", ("cpp-hello",), anchor='"name": "polyglot-demo"'),
-      # graph-compdb-contract.sh asserts the BXL compdb covers real graph
-      # compile actions by naming four of them. The two C++ demo sources go
-      # with the demo; fastbytes.cc and pyfast_test_ext.c remain, so the
-      # contract still asserts something real.
-      Edit(
-        "test/graph-compdb-contract.sh", "drop_lines",
-        ('"cpp/app/hello/main.cc",', '"cpp/lib/example/example.cc",'),
-      ),
-    ),
-    rationale=(
-      "`example_message()` and the binary that prints it exist only so a\n"
-      "  fresh clone has something in the C++ lane that builds. Removing this\n"
-      "  also drops the two cxx_test targets that test it, //cpp/app/hello\n"
-      "  from the polyglot-demo package, and 'cpp-hello' from the catalog.\n"
-      "  KEPT: cpp/lib/pgt/core (generic headers), cpp/test/doctest_runner.cc,\n"
-      "  and cpp/test/reflection.cc - the last is rules/toolchain.bzl's\n"
-      "  reflection capability probe, so cpp/test/ itself must survive."
-    ),
-    warnings=(
-      "repo.sh's cpp-build, cpp-run, and cpp-test verbs still name "
-      "//cpp/app/hello:hello; point them at your own C++ binary or drop them.",
-    ),
-  ),
   DemoStripGroup(
     key="python-demo",
     title="Python demo library and hello app",
@@ -417,9 +331,7 @@ DEMO_STRIP_GROUPS = [
       "  py_binary, and rules/package.bzl stages the shared bin/python +\n"
       "  bin/python3 launchers only when a py-app-launcher entry is present -\n"
       "  so those two smoke commands are dropped with it.\n"
-      "  KEPT: python/lib/fastbytes (the worked py_extension example),\n"
-      "  python/lib/testlib.py and its self-test, and the whole pyfast test\n"
-      "  fixture under python/test - that fixture is pyfast.h's only test."
+      "  KEPT: python/lib/testlib.py and its self-test."
     ),
     warnings=(
       "repo.sh's python-build verb still names //python/app/hello:hello; "
@@ -486,10 +398,28 @@ DEMO_STRIP_GROUPS = [
 ]
 
 
+def rename_targets(root: str) -> list[str]:
+  """Return identity-bearing files, including every current Go source file."""
+  targets = list(RENAME_TARGETS)
+  known = set(targets)
+  go_root = os.path.join(root, "go")
+  if os.path.isdir(go_root):
+    for directory, directories, files in os.walk(go_root):
+      directories.sort()
+      for filename in sorted(files):
+        if not filename.endswith(".go"):
+          continue
+        relative_path = os.path.relpath(os.path.join(directory, filename), root)
+        if relative_path not in known:
+          targets.append(relative_path)
+          known.add(relative_path)
+  return targets
+
+
 def rename_project(root: str, new_project: str, new_org: str) -> None:
   new_module = f"github.com/{new_org}/{new_project}"
   print(f"Initializing new project '{new_project}' (org: '{new_org}')...")
-  for relative_path in RENAME_TARGETS:
+  for relative_path in rename_targets(root):
     full_path = os.path.join(root, relative_path)
     if not os.path.isfile(full_path):
       continue
@@ -530,32 +460,6 @@ def rename_packages(root: str, new_project: str) -> None:
         with open(full_path, "w", encoding = "utf-8") as f:
           f.write(updated)
         print(f"  packages: {relative_path}")
-
-
-def rename_namespace(root: str, new_project: str) -> None:
-  """Rename the pgt C++ namespace, include root, and Buck target to the project."""
-  slug = namespace_slug(new_project)
-  if slug == OLD_NAMESPACE:
-    return
-  for relative_path in NAMESPACE_RENAME_TARGETS:
-    full_path = os.path.join(root, relative_path)
-    if not os.path.isfile(full_path):
-      continue
-    with open(full_path, "r", encoding = "utf-8") as f:
-      content = f.read()
-    # "pgt" appears only as the namespace, the include root, and the target
-    # name in these files - all of which move together.
-    updated = content.replace(OLD_NAMESPACE, slug)
-    if updated != content:
-      with open(full_path, "w", encoding = "utf-8") as f:
-        f.write(updated)
-      print(f"  namespace: {relative_path}")
-  # Last, because every path above is relative to the pre-move location.
-  old_dir = os.path.join(root, "cpp", "lib", OLD_NAMESPACE)
-  new_dir = os.path.join(root, "cpp", "lib", slug)
-  if os.path.isdir(old_dir) and not os.path.exists(new_dir):
-    shutil.move(old_dir, new_dir)
-    print(f"  namespace: cpp/lib/{OLD_NAMESPACE}/ -> cpp/lib/{slug}/")
 
 
 def prompt_yes_no(question: str) -> bool:
@@ -690,37 +594,6 @@ def _apply_drop_lines(lines: list[str], values: tuple[str, ...]) -> list[str]:
   return [line for line in lines if line.strip() not in wanted]
 
 
-def _apply_drop_target(lines: list[str], values: tuple[str, ...], path: str) -> list[str]:
-  for target in values:
-    declaration = 'name = "{}",'.format(target)
-    start = None
-    for index, line in enumerate(lines):
-      if line[:1].isspace() or not line.rstrip("\n").endswith("("):
-        continue
-      end = index
-      while end < len(lines) and lines[end].rstrip("\n") != ")":
-        end += 1
-      if end == len(lines):
-        continue
-      if any(body.strip() == declaration for body in lines[index:end]):
-        start = index
-        break
-    if start is None:
-      sys.exit(
-        "init_project.py: {}: no top-level rule named {!r} to remove - this "
-        "file has drifted from DEMO_STRIP_GROUPS".format(path, target)
-      )
-    # Absorb the contiguous comment block documenting the target, and one
-    # blank separator line after it, so the file reads as if it never existed.
-    while start > 0 and lines[start - 1].lstrip().startswith("#"):
-      start -= 1
-    end += 1
-    if end < len(lines) and not lines[end].strip():
-      end += 1
-    lines = lines[:start] + lines[end:]
-  return lines
-
-
 def _apply_drop_item(lines: list[str], values: tuple[str, ...], anchor: str, path: str) -> list[str]:
   for item in values:
     quoted = '"{}"'.format(item)
@@ -774,8 +647,6 @@ def apply_edits(root: str, edits: tuple[Edit, ...]) -> None:
     lines = _read_lines(full_path)
     if edit.kind == "drop_lines":
       updated = _apply_drop_lines(lines, edit.values)
-    elif edit.kind == "drop_target":
-      updated = _apply_drop_target(list(lines), edit.values, edit.path)
     elif edit.kind == "drop_item":
       updated = _apply_drop_item(list(lines), edit.values, edit.anchor, edit.path)
     elif edit.kind == "drop_range":
@@ -803,10 +674,9 @@ def remove_path(root: str, relative_path: str) -> None:
 
 def choose_demo_groups_interactively(root: str) -> list[DemoStripGroup]:
   print(
-    "\nThis template also ships leaf demo code - the greeting/hello example\n"
-    "library and app in the C++ and Python lanes - purely so a fresh clone\n"
-    "builds and tests out of the box. Removing a group also applies the\n"
-    "BUCK/catalog edits that removal requires, so the graph stays buildable:\n"
+    "\nThis template also ships a Python greeting/hello demo and its own\n"
+    "design history. Removing a group also applies the BUCK, catalog, and\n"
+    "documentation edits that removal requires:\n"
   )
   chosen: list[DemoStripGroup] = []
   for group in DEMO_STRIP_GROUPS:
@@ -836,7 +706,10 @@ def strip_demo_groups(root: str, groups: list[DemoStripGroup]) -> None:
 def main() -> None:
   parser = argparse.ArgumentParser(
     prog="init_project.py",
-    description="Rename this template into a new project and prune its self-referential tests.",
+    description=(
+      "Rename this template while retaining its pure Python, Go, Deno, web, "
+      "package, release, offline, and musl loader lanes."
+    ),
   )
   parser.add_argument("new_project", help="New project/repository name")
   parser.add_argument("new_org", nargs="?", default=OLD_ORG, help="New org/owner (default: unchanged)")
@@ -925,9 +798,8 @@ def main() -> None:
   # packages' original names ("name": "polyglot-demo"), so renaming package
   # identity first would leave those anchors unmatchable and the run would
   # fail closed partway through.
-  print("\nRenaming package identity, C++ namespace, and template prose:")
+  print("\nRenaming package identity and template prose:")
   rename_packages(root, new_project)
-  rename_namespace(root, new_project)
   apply_edits(root, template_prose_edits(new_project))
 
   if args.keep_history:

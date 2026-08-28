@@ -1,16 +1,11 @@
-# repo.sh's `python python/app/hello/main.py` equivalent: the hello app,
-# loader-wrapped around the pinned interpreter with fastbytes + example on
-# PYTHONPATH (see rules/python.bzl's py_binary).
+# Loader-wrapped Python hello application.
 
 load("//rules:python.bzl", "py_binary")
 
 py_binary(
   name = "hello",
   main = "main.py",
-  deps = [
-    "//python/lib/fastbytes:fastbytes",
-    "//python/lib/example:example",
-  ],
+  deps = ["//python/lib/example:example"],
   pkg_name = "python-hello",
   visibility = ["PUBLIC"],
 )

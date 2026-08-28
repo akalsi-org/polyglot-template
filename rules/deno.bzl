@@ -613,7 +613,7 @@ def _deno_test_impl(ctx: AnalysisContext) -> list[Provider]:
       name_suffix = "-cov",
       check_paths = entries,
     )
-    providers.append(CoverageInfo(kind = "deno", primary = out_dir, tool = None, gcnos = None, headers = None, toolchain_dir = None))
+    providers.append(CoverageInfo(kind = "deno", primary = out_dir))
   return providers
 
 _deno_test_rule = rule(

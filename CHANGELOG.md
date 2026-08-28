@@ -2,7 +2,7 @@
 
 ## packages/polyglot-demo/v0.1.0
 
-- Packages real C++, Go, Python/C++, and React 19 outputs with one bundled CPython runtime per target.
+- Packages real Go, pure Python, and React 19 outputs with one bundled CPython runtime per target.
 - Runs every executable and validates the static web bundle from an isolated extraction.
 
 ## packages/polyglot-server/v0.1.0

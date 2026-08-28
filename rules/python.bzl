@@ -1,17 +1,6 @@
-"""First-party py_extension / py_library / py_binary / py_test rules for the
-python lane.
+"""First-party py_library / py_binary / py_test rules for the Python lane.
 
-Mirrors tools/python_build.py + repo.sh's python/python-build/python-test
-semantics: py_extension compiles python/lib/fastbytes/*.cc with the in-graph
-gcc-musl toolchain against the pinned interpreter's sysconfig include path
-(snapshotted in tools.lock.toml / toolchains/lock.bzl rather than probed at
-build time - see py_lock_consistency_test below, which makes drift between
-the snapshot and the real interpreter a hard build/test failure instead of a
-silent staleness), links a `_native<EXT_SUFFIX>` extension with mold, and
-stages it next to a copy of `__init__.py` exactly like
-tools/python_build.py's `package = root / f"build/python/{target}/lib/..."`
-staging directory. py_binary/py_test wrap the pinned musl loader around the
-pinned CPython interpreter (mirroring repo.sh's `python` case:
+py_binary and py_test wrap the pinned musl loader around the pinned CPython interpreter (mirroring repo.sh's `python` case:
 `"$gcc_install/$loader" --library-path "$loader_dir:$python_install/python/lib"
 "$python_install/$python_expected" "$@"`), with PYTHONPATH assembled from
 each target's `deps` in the order given (mirroring repo.sh's
@@ -20,11 +9,10 @@ each target's `deps` in the order given (mirroring repo.sh's
 
 There is no prelude in this project, so py_test builds its own
 ExternalRunnerTestInfo rather than relying on a prelude-provided python_test,
-following the same pattern as rules/cxx.bzl's cxx_test and rules/go.bzl's
-go_test.
+following the same pattern as rules/go.bzl's go_test.
 
 Toolchain artifact tracking (fixed bug, mirroring rules/go.bzl's own fix):
-py_binary/py_test/py_compileall_check/py_lock_consistency_test each write a
+py_binary/py_test/py_compileall_check each write a
 loader-wrapped launcher script via ctx.actions.write() that embeds the gcc
 loader / python3 interpreter paths as literal TEXT (via _loader_exec_prefix
  cmd_args(..., delimiter=" ")), for a naturally readable emitted script.
@@ -40,20 +28,11 @@ _python_tools() below therefore also return the raw extracted-toolchain
 Artifacts (gcc_dir, py_dir); every consuming action's/command's `hidden`
 list must include both directly, not just `written`.
 
-The same law applies to `roots` (a py_extension's built `pkg_dir` package
-directory, threaded through PyInfo.roots and embedded into the launcher
-script's PYTHONPATH via _pythonpath_env_lines()): a py_extension's staged
-package directory is itself a build output, not a repo source, so it is
-exactly the same kind of "reached transitively under a different
-configuration" hazard as gcc_dir/py_dir above. Every consuming action's/
-command's `hidden` list that calls _pythonpath_env_lines(roots) must
-therefore also include `roots` directly, alongside gcc_dir/py_dir.
 """
 
 load("//config:defs.bzl", "fail_if_cross_arch", "target_arch_attr")
-load("//config:flags.bzl", "COVERAGE_FLAG", "STANDARD", "check_flags", "coverage_enabled_flag", "profile_compile_flags", "profile_link_flags")
+load("//config:flags.bzl", "coverage_enabled_flag")
 load("//rules:coverage.bzl", "CoverageInfo")
-load("//rules:cxx.bzl", "CxxInfo", "cxx_include_tree_args")
 load("//rules:env.bzl", "action_env")
 load("//rules:host.bzl", "native_target")
 load("//rules:pkg.bzl", "PACKAGE_LABELS_ATTR", "PackageEntry", "check_pkg_name", "package_info")
@@ -64,7 +43,6 @@ _GCC = TOOLCHAINS["gcc-musl"][_NATIVE_TARGET]
 _PYTHON = TOOLCHAINS["python"][_NATIVE_TARGET]
 _DENO_TOOLCHAIN = "//toolchains:deno-" + _NATIVE_TARGET
 _GCC_BIN_DIR = _GCC["expected"].rsplit("/", 1)[0]
-_GCC_CC = _GCC["expected"][:-3] + "gcc"
 _LOADER_DIR = _GCC["loader"].rsplit("/", 1)[0]
 
 # _PYTHON["expected"] is "python/bin/python3"; the interpreter's own install
@@ -72,9 +50,6 @@ _LOADER_DIR = _GCC["loader"].rsplit("/", 1)[0]
 # --library-path python/lib argument in repo.sh are both relative to.
 _PY_ROOT_REL = _PYTHON["expected"].rsplit("/", 2)[0]
 _PY_LIB_REL = _PY_ROOT_REL + "/lib"
-_PY_INCLUDE_SUBPATH = _PYTHON["include_subpath"]
-_PY_INCLUDE_REL = _PY_ROOT_REL + "/" + _PY_INCLUDE_SUBPATH
-_EXT_SUFFIX = _PYTHON["ext_suffix"]
 
 # PySourceSet: a transitive_set of Artifact lists. Every sibling lane
 # already converted its own equivalent with written rationale (rules/go.bzl's
@@ -112,9 +87,6 @@ def _gcc_tools(ctx):
   # working fine).
   return struct(
     gcc_dir = gcc_dir,
-    gcc = gcc_dir.project(_GCC_CC),
-    gxx = gcc_dir.project(_GCC["expected"]),
-    bin_dir = gcc_dir.project(_GCC_BIN_DIR),
     loader = gcc_dir.project(_GCC["loader"]),
     loader_dir = gcc_dir.project(_LOADER_DIR),
   )
@@ -127,7 +99,6 @@ def _python_tools(ctx):
   return struct(
     py_dir = py_dir,
     python3 = py_dir.project(_PYTHON["expected"]),
-    include_dir = py_dir.project(_PY_INCLUDE_REL),
     lib_dir = py_dir.project(_PY_LIB_REL),
   )
 
@@ -140,10 +111,6 @@ _TOOLCHAIN_ATTRS = {
 # select() is only resolved as an attrs default (see rules/cxx.bzl's
 # _PROFILE_ATTRS for the full explanation); every profile-dependent flag
 # list here is threaded through as an attr for the same reason.
-_PROFILE_ATTRS = {
-  "compile_flags": attrs.list(attrs.string(), default = profile_compile_flags()),
-  "link_flags": attrs.list(attrs.string(), default = profile_link_flags()),
-}
 
 def _py_srcs(ctx: AnalysisContext, own_srcs: list, deps: list):
   """Mirrors rules/go.bzl's _go_srcs: builds this target's own PySourceSet
@@ -230,128 +197,6 @@ _py_library_rule = rule(
   } | PACKAGE_LABELS_ATTR,
 )
 
-# --- py_extension: compiles python/lib/fastbytes/*.cc against the
-# snapshotted sysconfig include path, links a `_native<EXT_SUFFIX>` shared
-# object with mold, and stages it alongside a copy of `__init__.py` under a
-# declared `<package>/` directory - exactly the shape
-# tools/python_build.py builds under build/python/<target>/lib/fastbytes/,
-# so the resulting root behaves as a drop-in replacement package directory
-# on PYTHONPATH (a copy of __init__.py is required alongside the .so: a
-# regular package with an __init__.py cannot span two PYTHONPATH roots the
-# way an implicit namespace package could).
-
-def _py_extension_impl(ctx: AnalysisContext) -> list[Provider]:
-  gcc = _gcc_tools(ctx)
-  py = _python_tools(ctx)
-  # fastbytes' C++ side is deliberately out of scope for the coverage lane
-  # (see rules/coverage.bzl's module docstring: only python/lib + python/app
-  # .py files are measured, via tools/py_cover.py - not the compiled
-  # extension). COVERAGE_FLAG still arrives here via config/flags.bzl's
-  # shared profile_compile_flags()/profile_link_flags() (the same select()
-  # cxx_test/cxx_binary use), so it has to be stripped explicitly: applying
-  # --coverage to a -shared link pulls in the toolchain's non-PIC static
-  # libgcov.a/libstdc++.a objects, which mold then refuses to link into a
-  # shared object ("relocation ... can not be used; recompile with -fPIC") -
-  # empirically confirmed against the pinned toolchain.
-  compile_flags = [f for f in ctx.attrs.compile_flags if f != COVERAGE_FLAG]
-  link_flags = [f for f in ctx.attrs.link_flags if f != COVERAGE_FLAG]
-  check_flags(compile_flags)
-  check_flags(link_flags)
-
-  if ctx.attrs.language not in ("c", "cxx"):
-    fail("{}: language must be 'c' or 'cxx', got {!r}".format(ctx.label.raw_target(), ctx.attrs.language))
-  compiler = gcc.gcc if ctx.attrs.language == "c" else gcc.gxx
-  standard = "gnu2x" if ctx.attrs.language == "c" else STANDARD
-  cxx_include_args = cxx_include_tree_args(ctx, ctx.attrs.cxx_deps)
-
-  objects = []
-  for src in ctx.attrs.srcs:
-    obj = ctx.actions.declare_output("__objects__/{}/{}.o".format(ctx.attrs.name, src.short_path))
-    args = [
-      compiler,
-      "-std={}".format(standard),
-      cmd_args(gcc.bin_dir, format = "-B{}"),
-      cmd_args(py.include_dir, format = "-I{}"),
-    ] + cxx_include_args + [cmd_args(d, format = "-I{}") for d in ctx.attrs.include_dirs]
-    args += ["-fPIC"] + compile_flags
-    args += ["-c", src, "-o", obj.as_output()]
-    ctx.actions.run(
-      cmd_args(args),
-      category = "cxx_compile",
-      # Match rules/cxx.bzl's structured identifier contract so compdb can
-      # obtain its source field without parsing rendered action commands.
-      identifier = "source={}/{};{}/{}".format(ctx.label.package, src.short_path, ctx.attrs.name, src.short_path),
-      env = action_env(),
-    )
-    objects.append(obj)
-
-  native_name = ctx.attrs.extension_name + _EXT_SUFFIX
-  shared_obj = ctx.actions.declare_output(ctx.attrs.name + "-" + native_name)
-  link_args = [compiler] + objects + [cmd_args(gcc.bin_dir, format = "-B{}"), "-shared"] + link_flags + ctx.attrs.extra_link_flags
-  link_args += ["-o", shared_obj.as_output()]
-  ctx.actions.run(cmd_args(link_args), category = "cxx_link", identifier = ctx.attrs.name, env = action_env())
-
-  pkg_dir = ctx.actions.declare_output(ctx.attrs.name + "-pkg", dir = True)
-  # stubs (.pyi files, the PEP 561 py.typed marker) stage beside
-  # __init__.py under their own basenames, so editors and type checkers
-  # resolving the staged package (or the source tree, where the same files
-  # live) see the extension module's typed surface without importing it.
-  stage_lines = [
-    "#!/bin/sh",
-    "set -eu",
-    "mkdir -p \"$1/%s\"" % ctx.attrs.package,
-    "cp \"$2\" \"$1/%s/__init__.py\"" % ctx.attrs.package,
-    "cp \"$3\" \"$1/%s/%s\"" % (ctx.attrs.package, native_name),
-  ]
-  stage_args = ["/bin/sh", None, pkg_dir.as_output(), ctx.attrs.init_src, shared_obj]
-  for i, stub in enumerate(ctx.attrs.stubs):
-    stage_lines.append("cp \"$%d\" \"$1/%s/%s\"" % (4 + i, ctx.attrs.package, stub.basename))
-    stage_args.append(stub)
-  stage_script = ctx.actions.write(
-    ctx.attrs.name + "-stage.sh",
-    stage_lines,
-    is_executable = True,
-  )
-  stage_args[1] = stage_script
-  ctx.actions.run(
-    cmd_args(stage_args),
-    category = "py_extension_stage",
-    identifier = ctx.attrs.name,
-    env = action_env(),
-  )
-
-  # Packaging: pkg_dir's OWN top level already contains a "<package>/"
-  # subdirectory (this rule's own stage_script above: `mkdir -p
-  # "$1/%s"`), so the entry's dest is the PARENT python/lib, not
-  # python/lib/<package> - staging copies pkg_dir's contents (the
-  # "<package>/" folder itself) straight into it. A py_extension always
-  # needs the pinned interpreter present at runtime.
-  info = package_info(
-    ctx,
-    entries = [PackageEntry(dest = "python/lib", artifact = pkg_dir, kind = "tree", owner = str(ctx.label.raw_target()))],
-    needs = ["python-runtime"],
-  )
-  return [
-    DefaultInfo(default_outputs = [pkg_dir]),
-    PyInfo(srcs = ctx.actions.tset(PySourceSet, value = list(ctx.attrs.srcs) + [ctx.attrs.init_src] + list(ctx.attrs.stubs)), roots = [pkg_dir]),
-    info,
-  ]
-
-_py_extension_rule = rule(
-  impl = _py_extension_impl,
-  attrs = {
-    "cxx_deps": attrs.list(attrs.dep(providers = [CxxInfo]), default = []),
-    "extension_name": attrs.string(default = "_native"),
-    "extra_link_flags": attrs.list(attrs.string(), default = []),
-    "include_dirs": attrs.list(attrs.string(), default = []),
-    "init_src": attrs.source(),
-    "language": attrs.string(default = "cxx"),
-    "package": attrs.string(),
-    "srcs": attrs.list(attrs.source()),
-    "stubs": attrs.list(attrs.source(), default = []),
-  } | _TOOLCHAIN_ATTRS | _PROFILE_ATTRS | PACKAGE_LABELS_ATTR,
-)
-
 # --- py_binary: loader-wrapped launcher script running the pinned
 # interpreter directly on `main`, mirroring repo.sh's `python` case.
 
@@ -431,16 +276,6 @@ _py_binary_rule = rule(
 # lcov directly, so no further conversion is needed at merge time.
 def _py_test_coverage_action(ctx, gcc, py, srcs, roots, start):
   lcov = ctx.actions.declare_output(ctx.attrs.name + ".lcov")
-  # Every py_extension dep (e.g. python/lib/fastbytes) contributes a build
-  # -output package dir as its PYTHONPATH root (a COPY of __init__.py
-  # staged next to the compiled extension - see rules/python.bzl's
-  # py_extension rule) rather than the original source dir; at runtime
-  # that's the file py_cover.py actually observes executing. Map each such
-  # root back to "python/lib" (this repo's actual source dir for every
-  # py_extension) via --rewrite so the emitted lcov still names the real
-  # repo-relative source path - see tools/py_cover.py's docstring. Plain
-  # py_library roots are already repo-relative strings (e.g. "python/lib"
-  # itself) and need no rewriting.
   rewrite_args = []
   for root in roots:
     if type(root) == "Artifact":
@@ -506,7 +341,7 @@ def _py_test_impl(ctx: AnalysisContext) -> list[Provider]:
   ]
   if ctx.attrs._coverage_enabled:
     lcov = _py_test_coverage_action(ctx, gcc, py, srcs, roots, start)
-    providers.append(CoverageInfo(kind = "python_lcov", primary = lcov, tool = None, gcnos = None, headers = None, toolchain_dir = None))
+    providers.append(CoverageInfo(kind = "python_lcov", primary = lcov))
   return providers
 
 _py_test_rule = rule(
@@ -527,7 +362,7 @@ _py_test_rule = rule(
 # for lint parity with the rest of the python lane.
 #
 # It ALSO enforces the declared-vs-resolved contract for the whole python
-# lane, which is this rule's more important job. Every other python rule
+# lane, which is this rule's more important job. Every Python rule
 # here resolves imports off the LIVE tree: PyInfo.roots are repo-relative
 # directory STRINGS handed to the interpreter via PYTHONPATH, so the
 # interpreter reads whatever is on disk under them while buck2 only tracks
@@ -569,7 +404,7 @@ _COMPILEALL_DECLARED_PY = [
   "  print('py_compileall_check: .py files present under the checked dirs but missing from the declared srcs/deps closure:', file=sys.stderr)",
   "  for m in sorted(missing):",
   "    print('  ' + m, file=sys.stderr)",
-  "  print('buck2 tracks only files some target names in srcs=; an undeclared module still imports at run time off PYTHONPATH, so nothing invalidates when you edit it. Add each to a py_library/py_binary/py_extension srcs=, then list that target in the deps= of this check.', file=sys.stderr)",
+  "  print('buck2 tracks only files some target names in srcs=; an undeclared module still imports at run time off PYTHONPATH, so nothing invalidates when you edit it. Add each to a py_library/py_binary srcs=, then list that target in the deps= of this check.', file=sys.stderr)",
   "  sys.exit(1)",
   "print('py_compileall_check: ok (%d .py files under %s, all declared)' % (seen, ', '.join(dirs)))",
 ]
@@ -681,66 +516,6 @@ _pyright_check_rule = rule(
   },
 )
 
-# --- py_lock_consistency_test: runs the in-graph pinned interpreter and
-# asserts sysconfig's real EXT_SUFFIX / include path still match the
-# ext_suffix / include_subpath values snapshotted into tools.lock.toml (see
-# rules/python.bzl's module docstring for why this is a snapshot rather than
-# a build-time probe). Native-arch only, like every other capability probe
-# in this project (rules/toolchain.bzl's `probe` gating): python.bzl only
-# ever wires up the host's own _NATIVE_TARGET toolchain, so this is
-# inherently native-only without any extra gating.
-
-def _py_lock_consistency_test_impl(ctx: AnalysisContext) -> list[Provider]:
-  gcc = _gcc_tools(ctx)
-  py = _python_tools(ctx)
-  checker = ctx.actions.write(
-    ctx.attrs.name + "-check.py",
-    [
-      "import sys",
-      "import sysconfig",
-      "",
-      "expected_ext_suffix = {!r}".format(_EXT_SUFFIX),
-      "expected_include_subpath = {!r}".format(_PY_INCLUDE_SUBPATH),
-      "",
-      "actual_ext_suffix = sysconfig.get_config_var('EXT_SUFFIX')",
-      "actual_include = sysconfig.get_path('include').replace('\\\\', '/')",
-      "",
-      "errors = []",
-      "if actual_ext_suffix != expected_ext_suffix:",
-      "  errors.append('EXT_SUFFIX drift: tools.lock.toml=%r sysconfig=%r' % (expected_ext_suffix, actual_ext_suffix))",
-      "if not actual_include.endswith(expected_include_subpath):",
-      "  errors.append('include path drift: tools.lock.toml subpath=%r sysconfig include=%r' % (expected_include_subpath, actual_include))",
-      "",
-      "if errors:",
-      "  for error in errors:",
-      "    print(error, file=sys.stderr)",
-      "  print('run: update tools.lock.toml [[artifact]] python entries, then tools/gen_toolchain_lock.py', file=sys.stderr)",
-      "  sys.exit(1)",
-      "print('tools.lock.toml python ext_suffix/include_subpath snapshot matches sysconfig')",
-    ],
-  )
-  lines = ["#!/bin/sh", "set -eu", cmd_args(
-    ["exec"] + _loader_exec_prefix(gcc, py) + ["-I", checker],
-    delimiter = " ",
-  )]
-  script, written = ctx.actions.write(ctx.attrs.name + ".sh", lines, is_executable = True, allow_args = True)
-  command = cmd_args(script, hidden = written + [checker, gcc.gcc_dir, py.py_dir])
-  return [
-    DefaultInfo(default_output = script, other_outputs = written),
-    RunInfo(args = command),
-    ExternalRunnerTestInfo(
-      type = "python_lock_consistency",
-      command = [command],
-      run_from_project_root = True,
-      labels = ["lint"],
-    ),
-  ]
-
-_py_lock_consistency_test_rule = rule(
-  impl = _py_lock_consistency_test_impl,
-  attrs = _TOOLCHAIN_ATTRS,
-)
-
 # --- py_script_test: runs ONE repo-local Python script under the pinned
 # interpreter, with PYTHONPATH assembled from `deps` exactly the way py_test
 # does, and reports pass/fail straight from its exit status.
@@ -765,11 +540,6 @@ def _py_script_test_impl(ctx: AnalysisContext) -> list[Provider]:
     ),
   ]
   script, written = ctx.actions.write(ctx.attrs.name + ".sh", lines, is_executable = True, allow_args = True)
-  # `roots` in hidden for the same reason py_test does it: a py_extension
-  # dep's PYTHONPATH root is a BUILD OUTPUT, not a repo source, so a
-  # text-only reference inside the script is not enough for buck2 to
-  # materialize it under a non-default configuration (see this file's module
-  # docstring).
   command = cmd_args(script, hidden = srcs + written + roots + [gcc.gcc_dir, py.py_dir])
   return [
     DefaultInfo(default_output = script, other_outputs = written),
@@ -791,14 +561,8 @@ _py_script_test_rule = rule(
   } | _TOOLCHAIN_ATTRS,
 )
 
-# See rules/cxx.bzl's identical rationale for these macros: gives BUCK files
-# a resolved (dbg, native arch) configuration for free and don't need to
-# repeat `default_target_platform` on every target.
+# Give BUCK files a resolved debug platform without repeated declarations.
 _DEFAULT_PLATFORM = "//config:{}-dbg".format(_NATIVE_TARGET)
-
-def py_extension(**kwargs):
-  kwargs.setdefault("default_target_platform", _DEFAULT_PLATFORM)
-  _py_extension_rule(**kwargs)
 
 def py_library(**kwargs):
   kwargs.setdefault("default_target_platform", _DEFAULT_PLATFORM)
@@ -810,9 +574,6 @@ def py_binary(**kwargs):
 
 def py_test(**kwargs):
   kwargs.setdefault("default_target_platform", _DEFAULT_PLATFORM)
-  # See rules/cxx.bzl's cxx_test macro for why: the coverage bxl now depends on
-  # py_test targets directly, which need to be reachable from the root
-  # package without editing every existing python/test/BUCK call site.
   kwargs.setdefault("visibility", ["PUBLIC"])
   _py_test_rule(**kwargs)
 
@@ -828,7 +589,3 @@ def py_compileall_check(**kwargs):
 def pyright_check(**kwargs):
   kwargs.setdefault("default_target_platform", _DEFAULT_PLATFORM)
   _pyright_check_rule(**kwargs)
-
-def py_lock_consistency_test(**kwargs):
-  kwargs.setdefault("default_target_platform", _DEFAULT_PLATFORM)
-  _py_lock_consistency_test_rule(**kwargs)

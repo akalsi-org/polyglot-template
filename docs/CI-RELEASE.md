@@ -1,9 +1,9 @@
 # CI Packaging And Releases
 
-There are three checked-in workflows, and all of them call `./repo.sh`; none
+There are four checked-in workflows, and all of them call `./repo.sh`; none
 implements a separate build or packaging path.
 
-- [verify.yml](../.github/workflows/verify.yml) holds every verification job.
+- [verify.yml](../.github/workflows/verify.yml) holds every required verification job.
   It is a reusable `workflow_call` workflow and is never triggered directly.
 - [ci-release.yml](../.github/workflows/ci-release.yml) is the entrypoint for
   pull requests, pushes to `main`, and manual dispatch. It contains no logic of
@@ -11,6 +11,8 @@ implements a separate build or packaging path.
 - [package-release.yml](../.github/workflows/package-release.yml) is the
   entrypoint for `packages/<name>/v*` tags. It calls the same `verify.yml` and
   then publishes the GitHub Release from the verified assets.
+- [ordering-campaign.yml](../.github/workflows/ordering-campaign.yml) is a
+  manual native ARM64 campaign for the Go MPSC memory-ordering mutants.
 
 ## Verification Contract
 
@@ -33,10 +35,9 @@ The `lint` job then:
    a cold `buck-out`; and
 4. runs the repository quality gates and infra tests — `./repo.sh lint`,
    `./repo.sh package-validate`, and `./repo.sh infra-test`, which itself runs
-   the graph/compdb and Deno manifest contracts.
+   the documentation, workflow, and Deno manifest contracts.
 
-The `test-dbg` job runs `./repo.sh test dbg`, builds and runs the C++ `dbg`
-profile, then regenerates the merged coverage report from a cold Buck output
+The `test-dbg` job runs `./repo.sh test dbg`, then regenerates the merged coverage report from a cold Buck output
 tree (`buck2 clean` followed by `./repo.sh coverage`) and uploads it.
 
 That upload carries three artifacts: the merged `lcov`, the plain-text
@@ -97,15 +98,32 @@ a public URL. It would also need `pages: write` and `id-token: write`, which
 cannot live in `verify.yml` at all (see the token scope note below) and would
 have to be a separate job in `ci-release.yml`.
 
-The `test-opt` job runs `./repo.sh test opt`, builds and runs the C++ `opt`
-profile, runs the opt `pyfast` extension test directly against
-`//config:<target>-opt`, exercises the pinned Python runtime, and owns the
+The `test-opt` job runs `./repo.sh test opt`, exercises the pinned Python
+runtime, and owns the
 release path below. On non-tag refs it rehearses a full release for
 `polyglot-demo` without publishing.
 
 The cache keys include the target, relevant lock files, and bootstrap or
 Buck2-graph inputs. A cache hit remains untrusted until bootstrap and doctor
 revalidate it.
+
+## Manual ARM64 Ordering Campaign
+
+`ordering-campaign.yml` runs only through manual dispatch on
+`ubuntu-24.04-arm`. It verifies the native `aarch64-linux-musl` target,
+bootstraps the pinned repository, and runs `./repo.sh doctor --deep` before the
+campaign.
+
+The workflow runs `go/lib/mpsc/ordering_mutants.sh` with strict adjudication.
+It defaults to 100 repetitions per mutant and rejects values below 20. Strict
+mode fails if the runner is not native ARM64 or any valid mutant survives.
+The workflow publishes verdicts in the job summary. It also uploads the doctor,
+runner, and campaign logs for diagnostics.
+
+This campaign is manual because weak-memory failures are probabilistic and the
+run is slower than the required verification matrix. Run it when the MPSC
+ordering implementation or its publication tests change. An amd64 runner and
+QEMU user mode cannot adjudicate these mutants.
 
 ## Release Tags
 

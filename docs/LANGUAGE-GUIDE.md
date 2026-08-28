@@ -2,38 +2,15 @@
 
 Use this guide to enter a language lane without rediscovering its build and
 runtime contract. `./repo.sh` is the only supported command surface: it selects
-the pinned toolchain, runtime, caches, and target ABI. Do not call host
-compilers, interpreters, package managers, or generated build files directly.
+the pinned toolchain, runtime, caches, and target ABI. Do not call host interpreters, package managers, or generated build files directly.
 
 Run `./repo.sh` without arguments for an interactive shell with that
 environment, or `./repo.sh exec <command> [args...]` for one command. In either
-case, `python`/`python3`, `go`, `deno`, and the binutils
-`ar`/`ranlib`/`nm`/`strip`/`objcopy`/`ld` resolve to the pinned wrappers.
+case, `python`/`python3`, `go`, `deno`, resolve to pinned wrappers.
 
 Before making a change, inspect the owning `lib/`, `app/`, and `test/` paths.
 Afterward, run the lane's test command. Run `./repo.sh lint` when changing more
 than a narrowly isolated lane or before handing off a multi-file change.
-
-## C++
-
-| Item | Contract |
-| --- | --- |
-| Source layout | `cpp/lib/<name>/`, `cpp/app/<name>/`, `cpp/test/` |
-| Public includes | Use logical paths rooted at `cpp/lib`, for example `#include "pgt/core/types.hh"`. |
-| Build metadata | `BUCK` files own targets; `config/flags.bzl` owns profile (`dbg`/`opt`) flag policy. |
-| Build | `./repo.sh cpp-build [dbg|opt]` |
-| Test | `./repo.sh cpp-test` |
-| Run | `./repo.sh cpp-run [dbg|opt]` |
-
-The lane uses pinned GCC+musl, mold, and `-std=gnu++26`, built by first-party
-`cxx_library`/`cxx_binary`/`cxx_test` Buck2 rules (`rules/cxx.bzl`). The root
-compilation database is refreshed automatically by `./repo.sh build [dbg|opt]`
-or `./repo.sh test [dbg|opt]` for their selected profile. Use
-`./repo.sh compile-commands [dbg|opt]` for an editor-only refresh after a clean;
-edit source or `BUCK` files, never `build/` or `compile_commands.json` directly.
-Add each new C++ test executable as a `cxx_test` target in the nearest `BUCK` file;
-doctest's runner is shared automatically. Use the existing two-space
-indentation and project naming conventions.
 
 ## Python
 
@@ -41,16 +18,12 @@ indentation and project naming conventions.
 | --- | --- |
 | Source layout | `python/lib/<name>/`, `python/app/<name>/`, `python/test/` |
 | Imports | `python/lib` and `python/app` are available through `./repo.sh python`. |
-| Native extensions | Build against the exact pinned CPython ABI with the pinned GCC+musl toolchain. |
-| Build extension | `./repo.sh python-build` |
+| Build | `./repo.sh python-build` |
 | Test | `./repo.sh python-test` |
 | Run Python | `./repo.sh python <args...>` |
 
 Do not use host `python`, `pip`, or a virtual environment for repository work.
-`build` and `python-build` stage every declared native extension under
-`build/python/<target>/lib`; `python-build` also updates the canonical compilation
-database. Keep each extension's `.pyi` stub and `py.typed` marker in a checked-in
-source root so editor typing stays independent of the host target. Keep pure Python tests under
+The Python lane contains pure Python only. Keep tests under
 `python/test/` as top-level `test_*` functions; `py_test()` discovers them
 with the repository's readable stdlib-only runner. Use `@parametrize`, `@skip`,
 `@skip_if`, and `@xfail` from `testlib` for function-test annotations.
@@ -101,17 +74,38 @@ component behavior, while `tsweb-test` also checks emitted asset integrity.
 | Test | `./repo.sh go-test` |
 | Run Go | `./repo.sh go <args...>` |
 
-The wrapper pins Go, isolates all Go caches under `.local/`, sets
-`GOTOOLCHAIN=local`, and enforces `CGO_ENABLED=0`. Go dependencies are locked
-in `go.sum` and committed under `vendor/`; update both with the pinned Go
-command before changing an external import. Named `go-build` and `go-test`
-commands use the vendored closure with module services disabled, so they remain
-offline after bootstrap. Do not use the system `go` command or add CGO
+The wrapper pins Go and isolates all Go caches under `.local/`. It sets
+`GOENV=off`, `GOTOOLCHAIN=local`, and `CGO_ENABLED=0`. It also enforces
+`-mod=vendor` and `-buildvcs=false`. User `go env -w` state and Git status cannot
+change repository builds. Go dependencies are locked in `go.sum` and committed
+under `vendor/`; update both with the pinned Go command before changing an
+external import. Named `go-build` and `go-test` commands use the vendored closure
+with module services disabled, so they remain offline after bootstrap. Do not
+use the system `go` command or add CGO
 dependencies without revisiting the native toolchain contract. `./repo.sh go
 <args...>` intentionally passes its arguments to Go, so commands such as module
 download or installation can use the network; it is not part of the offline
 guarantee. Keep Go formatting canonical with `gofmt`; `./repo.sh lint` runs it
 and `go vet` through the pinned setup.
+
+### Shared-memory queues and benchmark campaign
+
+`go/lib/mpsc` is the current Linux shared-memory queue implementation. It
+provides SPSC and MPSC queues on amd64 and arm64 with CGO disabled. The package
+creates and attaches shared-memory format version 4 only. See
+[mpsc-queue.md](mpsc-queue.md) for its API, format, ownership, recovery,
+ordering, benchmark, and verification contracts.
+
+Run the queue tests and ordering checks through Go targets:
+
+```bash
+./repo.sh buck2 test //go/lib/mpsc:mpsc_test
+./repo.sh exec go/lib/mpsc/ordering_mutants.sh
+```
+
+The Go benchmark campaign lives under `go/bench/mpsc`. Buck targets build and
+test `bench_queue`, `run_campaign`, and `summarize_campaign`. Run the campaign
+through these targets. Do not use the retired C++ benchmark commands or paths.
 
 ## Cross-Lane Work
 

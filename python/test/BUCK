@@ -1,42 +1,16 @@
-# repo.sh's python-test lane equivalent: repository test discovery over
-# python/test, a `python -m compileall` lint-parity check across the whole
-# lane, and a lock-consistency check that the tools.lock.toml python
-# ext_suffix/include_subpath snapshot still matches the pinned interpreter's
-# own sysconfig (see rules/python.bzl's py_lock_consistency_test).
+# Repository tests, compile checks, and type checks for the Python lane.
 
-load("//rules:python.bzl", "py_compileall_check", "py_extension", "py_lock_consistency_test", "py_test", "pyright_check")
-
-py_extension(
-  name = "pyfast_test_extension",
-  language = "c",
-  cxx_deps = ["//cpp/lib/pyfast:pyfast"],
-  package = "pyfast_test_ext",
-  init_src = "extension_init.py",
-  srcs = ["pyfast_test_ext.c"],
-  stubs = [
-    "pyfast_test_ext/__init__.pyi",
-    "pyfast_test_ext/py.typed",
-  ],
-  # //cpp/lib/pyfast:leak_check runs against this staged package (it is the
-  # fixture that exercises pyfast.h's vectorcall/cleanup-attr scaffolding),
-  # so it has to be reachable from that package.
-  visibility = ["PUBLIC"],
-)
+load("//rules:python.bzl", "py_compileall_check", "py_test", "pyright_check")
 
 py_test(
   name = "test",
   srcs = [
     "test_example.py",
-    "test_fastbytes.py",
     "test_testlib.py",
-    "test_pyfast_extension.py",
-    "test_stubs.py",
   ],
   deps = [
-    "//python/lib/fastbytes:fastbytes",
     "//python/lib/example:example",
     "//python/lib:testlib",
-    ":pyfast_test_extension",
   ],
 )
 
@@ -49,20 +23,12 @@ py_compileall_check(
   ],
   srcs = [
     "test_example.py",
-    "test_fastbytes.py",
     "test_testlib.py",
-    "test_pyfast_extension.py",
-    "test_stubs.py",
   ],
   deps = [
     "//python/lib/example:example",
-    "//python/lib/fastbytes:fastbytes",
     "//python/lib:testlib",
     "//python/app/hello:hello",
-    # Contributes extension_init.py (this package's own py_extension
-    # init_src), which is a real .py under python/test and therefore has to
-    # be declared for the closure assertion above to pass.
-    ":pyfast_test_extension",
   ],
 )
 
@@ -70,12 +36,7 @@ pyright_check(
   name = "pyright",
   deps = [
     "//python/lib/example:example",
-    "//python/lib/fastbytes:fastbytes",
     "//python/lib:testlib",
     "//python/app/hello:hello",
   ],
-)
-
-py_lock_consistency_test(
-  name = "lock_consistency",
 )

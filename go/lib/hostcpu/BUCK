@@ -1,0 +1,23 @@
+load("//rules:go.bzl", "go_library", "go_test")
+
+go_library(
+  name = "hostcpu",
+  srcs = [
+    "affinity_linux.go",
+    "cgroup.go",
+    "cpuset.go",
+    "snapshot.go",
+    "threadid_go127_amd64.s",
+    "threadid_go127_arm64.s",
+    "threadid_linux.go",
+    "threadid_unsupported.go",
+  ],
+  visibility = ["PUBLIC"],
+)
+
+go_test(
+  name = "hostcpu_test",
+  srcs = ["hostcpu_test.go"],
+  packages = ["./go/lib/hostcpu"],
+  deps = [":hostcpu"],
+)

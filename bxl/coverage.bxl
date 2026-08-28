@@ -1,7 +1,6 @@
 """Discovery-driven coverage merge for the whole graph.
 
-Queries every instrumented-lane test by rule kind (cxx_test, go_test,
-py_test, deno_test - the four CoverageInfo producers, see
+Queries every instrumented-lane test by rule kind (go_test, py_test, and deno_test CoverageInfo producers, see
 rules/coverage.bzl's module docstring), analyzes each under its own
 default target platform (dbg, where coverage is default-on), skips any
 without a CoverageInfo provider (lint-as-test targets never carry one;
@@ -29,7 +28,7 @@ def _impl(ctx: bxl.Context):
   # configures each test under its own default target platform (dbg, where
   # coverage collection is on).
   tests = ctx.cquery().eval(
-    "kind('^_(cxx_test|go_test|py_test|deno_test)_rule$', '//...')",
+    "kind('^_(go_test|py_test|deno_test)_rule$', '//...')",
   )
   infos = []
   for node in tests:

@@ -49,7 +49,6 @@ expect_usage_failure "$ROOT/repo.sh" bootstrap --offline --dry-run --repair extr
 expect_usage_failure "$ROOT/repo.sh" toolchain-lock unexpected
 expect_usage_failure "$ROOT/repo.sh" toolchain-qualify unexpected
 expect_usage_failure "$ROOT/repo.sh" compile-commands dbg extra
-expect_usage_failure "$ROOT/repo.sh" cpp-build dbg extra
 
 help_output=$("$ROOT/repo.sh" help)
 [[ $help_output == *bootstrap* ]]

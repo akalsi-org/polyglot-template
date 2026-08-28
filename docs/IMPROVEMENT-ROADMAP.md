@@ -9,8 +9,7 @@ delivery risk, and dependency.
 
 - Every declared application package either builds, smokes, and releases through
   the documented command, or fails before a release tag can be accepted.
-- Editor commands use the pinned tools and diagnose a missing bootstrap or
-  native-extension build directly.
+- Editor commands use the pinned tools and diagnose a missing bootstrap or language-tool bootstrap directly.
 - The target graph, not duplicated inventories or rendered command strings,
   owns dependency closure and editor metadata.
 - Deployment commands remain unavailable until their planning, receipt,
@@ -18,14 +17,10 @@ delivery risk, and dependency.
 
 ## Phase 0 — Correctness and user feedback
 
-Status: partly complete. The profile contract is complete; the remaining editor
-and pyfast work continues independently before calling the repository slice
-fully release-ready.
+Status: complete for the retained language lanes and profile contract.
 
 | Item | Outcome | Evidence |
 | --- | --- | --- |
-| Keyword-only pyfast APIs | `xor_kwb`, `xor_kwb_buf`, and `greet` reject positional arguments with `TypeError`, not silent argument loss. | Targeted native-extension tests. |
-| Native Python editor path | The editor sees only the current host's staged extension root, after a build, and explains missing state. | Editor/environment smoke. |
 | Deno editor cache | The language server uses the frozen repository cache and resolves locked npm types. | Pinned `deno check` plus editor contract. |
 | Profile contract | Complete: docs, wrappers, and package builds use `--target-platforms` for `opt`. | Opt artifact/configuration test. |
 
@@ -62,17 +57,15 @@ proceed independently after Phase 0's editor-path contract settles.
 1. Complete: README has a bootstrap-first Quick Start and points to the current
    capability matrix, including Linux host scope and raw Go/Deno network bounds.
 2. Partial: `.vscode/tasks.json` covers bootstrap, editor-prerequisite
-   verification, compdb refresh, Python native-extension build, running the
-   active Python file, Deno type check, React site build, and Go test. Still
-   missing tasks for `doctor`, the C++ build/test lane, `ts-test`, and
+   verification, running the active Python file, Deno type check, React site build, and Go test. Still
+   missing tasks for `doctor`, `ts-test`, and
    `tsweb-test`, and there are no launch configurations.
 3. Not started: `editor-sync` and `doctor --editor` do not exist in `repo.sh`.
-   Provide them with actionable diagnostics for tool wrappers, compdb age, Deno
-   cache, interpreter path, and native imports.
+   Provide them with actionable diagnostics for tool wrappers, Deno cache, and interpreter path.
 4. Complete: `./repo.sh package-list` and `./repo.sh package-explain <name>`
    provide package discovery and explanation, and
    [TROUBLESHOOTING.md](TROUBLESHOOTING.md) covers bootstrap, Buck daemon,
-   caches, compdb, and native modules.
+   caches, and language tools.
 5. Generate command reference material from `repo.sh help` rather than
    duplicating it across prose documents.
 
@@ -85,8 +78,6 @@ These require design review because they change internal build-model ownership.
 2. Make the locked Deno closure a tracked build input rather than ambient cache
    state, preserving offline execution while improving remote-execution and
    developer-host portability.
-3. Emit structured compilation-database fragments from C++ and Python-extension
-   rules; merge them without parsing rendered command lines.
 4. Split rule internals by toolchain resolution, launcher creation, staging,
    coverage, and package-kind handling. Keep public macros small and move
    historical workaround narratives into ADRs and regression tests.
@@ -123,13 +114,13 @@ an executable gate and fault-injection coverage.
 ## Parallelism map
 
 ```text
-Phase 0: pyfast coverage ─────────┐
-         editor workflow ─────────┼──> Phase 2 workflow hardening
+Phase 0: editor workflow ─────────┐
+                                  ├──> Phase 2 workflow hardening
          package/release truth ───┼──> Phase 1 release integrity
          profile normalization ───┘
 
 Phase 1 package contract ─────────┐
-Phase 3 Deno/compdb internals ────┼──> Phase 4 deployment schemas and gates
+Phase 3 Deno internals ────┼──> Phase 4 deployment schemas and gates
 Phase 2 diagnostics ──────────────┘
 ```
 
