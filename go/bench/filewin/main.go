@@ -560,7 +560,9 @@ var aheadKB = 4096
 
 var noReaderDrop, noWriteback, noEvict, populate bool
 
-var popChunkKB int
+var readerMinor, readerMajor int64
+
+var popChunkKB, retainMB, dropKB int
 
 var epoch = time.Now()
 
@@ -624,6 +626,8 @@ func run(dir, fstype string, payload int, warmup, seconds float64, readerCPU, wr
 		DisableWriteback:   noWriteback,
 		DisableEvict:       noEvict,
 		PopulateAhead:      populate,
+		RetainBytes:        uint64(retainMB) << 20,
+		DropChunkBytes:     uint64(dropKB) << 10,
 		PopulateChunkBytes: uint64(popChunkKB) << 10,
 	})
 	if err != nil {
@@ -724,6 +728,13 @@ func run(dir, fstype string, payload int, warmup, seconds float64, readerCPU, wr
 	}()
 	go func() {
 		defer wg.Done()
+		var ruA, ruB syscall.Rusage
+		_ = syscall.Getrusage(1, &ruA)
+		defer func() {
+			_ = syscall.Getrusage(1, &ruB)
+			readerMinor = ruB.Minflt - ruA.Minflt
+			readerMajor = ruB.Majflt - ruA.Majflt
+		}()
 		if err := pin(readerCPU); err != nil {
 			report(err)
 			ready.Add(1)
@@ -897,6 +908,7 @@ func printResult(row result) {
 		row.CoreSpeedMIterS, row.ClockCostNS, row.ClockSource)
 	fmt.Printf("  writer_gap  p50=%.0f p90=%.0f p95=%.0f p99=%.0f p99.99=%.0f max=%.0f\n",
 		row.GapP50NS, row.GapP90NS, row.GapP95NS, row.GapP99NS, row.GapP9999NS, row.GapMaxNS)
+	fmt.Printf("  reader_faults minor=%d major=%d\n", readerMinor, readerMajor)
 	fmt.Printf("  gc=%d gc_pause_us=%d mallocs=%d\n", row.NumGC, row.GCPauseUS, row.Mallocs)
 	fmt.Printf("  stalled_us cpu_some=%d io_some=%d io_full=%d mem_some=%d cgroup_throttled=%d/%dus\n",
 		row.CPUSomeUS, row.IOSomeUS, row.IOFullUS, row.MemSomeUS, row.NRThrottled, row.ThrottledUS)
@@ -915,6 +927,8 @@ func main() {
 	warmup := flag.Float64("warmup", 1, "warmup seconds")
 	payloadsFlag := flag.String("payload", "64,256,4096", "comma-separated record sizes in bytes")
 	dir := flag.String("dir", "build/filewin-bench", "directory for the disk-backed log")
+	retainFlag := flag.Int("retain-mb", 0, "writer retention window in MiB; zero selects the default")
+	dropFlag := flag.Int("drop-kb", 0, "writer drop chunk in KiB; zero selects the default")
 	popFlag := flag.Int("populate-kb", 0, "populate chunk in KiB; zero selects the default")
 	noWbFlag := flag.Bool("no-writeback", false, "writer does not start writeback")
 	noEvFlag := flag.Bool("no-evict", false, "writer does not drop page cache")
@@ -928,6 +942,7 @@ func main() {
 	noReaderDrop = *noDropFlag
 	noWriteback, noEvict, populate = *noWbFlag, *noEvFlag, *popAheadFlag
 	popChunkKB = *popFlag
+	retainMB, dropKB = *retainFlag, *dropFlag
 	if *seconds <= 0 || *warmup < 0 {
 		fmt.Fprintln(os.Stderr, "seconds must be positive and warmup must be nonnegative")
 		os.Exit(2)

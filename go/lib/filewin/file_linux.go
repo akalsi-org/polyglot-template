@@ -111,7 +111,8 @@ type Config struct {
 	// Zero selects a default. DisableEvict keeps every page cached.
 	KeepCachedBytes uint64
 	DisableEvict    bool
-	// PopulateChunkBytes bounds one MADV_POPULATE_WRITE call.
+	// PopulateChunkBytes bounds one MADV_POPULATE_WRITE call, when
+	// PopulateAhead is set.
 	//
 	// A short call holds the address-space lock briefly, so a reader fault in
 	// the same process waits for one chunk and not the whole window. The
@@ -123,23 +124,23 @@ type Config struct {
 	// PopulateAhead establishes page-table entries in front of the writer
 	// instead of letting it fault them in as it arrives.
 	//
-	// It is off, and that is the important default in this file. The kernel
-	// allocates and zeroes a page either way; this only decides whether that
-	// happens in a batch ahead of the writer or one page at a time under it.
-	// The batch holds the address-space lock, and anything else in the
-	// process that faults waits behind it. A reader is exactly that. With a
-	// reader attached, at 64 byte records:
+	// It is off. The kernel allocates and zeroes a page either way, and this
+	// only decides whether that work happens in the submitting call or under
+	// the writer. In the submitting call it holds the address-space lock,
+	// and anything else in the process that faults queues behind it. A
+	// reader is exactly that.
 	//
-	//   populate  12.1 Mrec/s  writer p50 21ns  e2e p90 24.4us  p95 48.1us
-	//   fault      8.9 Mrec/s  writer p50 21ns  e2e p90  255ns  p95  490ns
+	// The size of the batch does not rescue it. One page per call appeared
+	// to, at a ninety fifth percentile of 461ns against 50us for two pages,
+	// but that measurement was an artifact: the submission ring was too
+	// small to hold a round's worth of single-page operations, so most were
+	// being dropped and the writer was faulting after all. Sized to hold
+	// them, one page per call gives the same 48us as any other size. What
+	// costs the latency is the work happening in the submitting call at all,
+	// not how it is divided up.
 	//
-	// The writer's own cost does not change and end to end improves ninety
-	// six times, for a quarter of the throughput. At 4 KiB records faulting
-	// is faster on both counts. Populating only looks good measured without
-	// a reader, which is not what this library is for.
-	//
-	// Set it when there is no reader in the process and throughput is
-	// everything.
+	// Set it where no reader shares the process and throughput is
+	// everything: it is worth about a quarter more.
 	PopulateAhead bool
 	// DropChunkBytes bounds one MADV_DONTNEED call the writer makes behind
 	// the consumers.

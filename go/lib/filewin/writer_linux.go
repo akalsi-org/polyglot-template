@@ -13,9 +13,14 @@ import (
 )
 
 const (
-	// ringEntries sizes the submission queue. It only has to hold the few
-	// operations one housekeeping round stages.
-	ringEntries = 256
+	// ringEntries sizes the submission queue, for a writer and for a reader.
+	//
+	// It has to hold everything a round stages with room to spare, because a
+	// full ring drops the staged work silently, and what goes first is
+	// whatever was staged last: the drop and the writeback rather than the
+	// populate. A ring costs about 1.3 MiB of kernel memory, which is worth
+	// noting for a process holding many readers.
+	ringEntries = 16384
 	// growTag identifies a staged file growth in a ring completion.
 	growTag = 1
 	// populateCatchUp is how many rounds' worth of page-table work one round
