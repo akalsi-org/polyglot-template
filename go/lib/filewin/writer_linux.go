@@ -147,12 +147,10 @@ func (w *Writer) growTo(need uint64) error {
 		want = w.file.reserve
 	}
 	t0 := time.Now()
-	if err := w.allocate(w.committed, want-w.committed, true); err != nil {
+	if err := w.allocate(w.committed, want-w.committed); err != nil {
 		return err
 	}
-	w.committed = want
-	atmc.StoreReleaseU64(w.file.committed(), want)
-	w.Grows.Add(1)
+	w.publishCommitted(want)
 	w.GrowNs.Add(uint64(time.Since(t0).Nanoseconds()))
 	w.Waits.Add(1)
 	w.WaitNs.Add(uint64(time.Since(t0).Nanoseconds()))
@@ -163,18 +161,18 @@ func (w *Writer) growTo(need uint64) error {
 // allocates the blocks and extends the file, so no truncate is needed.
 // Allocating is the point: a store into an unwritten extent would fault on
 // the writer instead of here.
-func (w *Writer) allocate(off, length uint64, wait bool) error {
+func (w *Writer) allocate(off, length uint64) error {
 	if length == 0 {
 		return nil
 	}
-	if w.ring != nil && wait {
-		if w.ring.Fallocate(w.file.fd, 0, int64(off), int64(length)) {
-			if err := w.ring.Submit(); err == nil {
-				w.ring.Drain()
-				return nil
-			}
-		}
-	}
+	// Deliberately the plain syscall, not the ring.
+	//
+	// Draining the ring to wait for a staged allocation waits for every
+	// other operation in it too, and those include the eviction chain, which
+	// waits on the device. One growth would then stop the whole housekeeping
+	// pipeline rather than just itself. The ring also reports a completion
+	// result the caller must inspect, and this path needs an error return,
+	// which the syscall already gives.
 	err := fallocate(w.file.fd, int64(off), int64(length))
 	if errors.Is(err, syscall.ENOSYS) || errors.Is(err, syscall.EOPNOTSUPP) {
 		err = syscall.Ftruncate(w.file.fd, int64(off+length))
@@ -230,7 +228,7 @@ func (w *Writer) growAhead() {
 		return
 	}
 	if w.ring == nil {
-		if err := w.allocate(w.committed, want-w.committed, false); err == nil {
+		if err := w.allocate(w.committed, want-w.committed); err == nil {
 			w.publishCommitted(want)
 		}
 		return

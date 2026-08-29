@@ -264,6 +264,9 @@ func pin(cpu int) error {
 	return nil
 }
 
+// aheadKB is the populate window, in KiB, set from the command line.
+var aheadKB = 4096
+
 var epoch = time.Now()
 
 // useTSC records whether the processor timestamp counter is a usable clock.
@@ -320,7 +323,7 @@ func run(dir, fstype string, payload int, warmup, seconds float64, readerCPU, wr
 		Path:               path,
 		Reserve:            32 << 30,
 		Extent:             64 << 20,
-		Ahead:              4 << 20,
+		Ahead:              uint64(aheadKB) << 10,
 		MaxReserve:         1 << 20,
 		HeadInSharedMemory: true,
 	})
@@ -558,8 +561,10 @@ func main() {
 	warmup := flag.Float64("warmup", 1, "warmup seconds")
 	payloadsFlag := flag.String("payload", "64,256,4096", "comma-separated record sizes in bytes")
 	dir := flag.String("dir", "build/filewin-bench", "directory for the disk-backed log")
+	aheadFlag := flag.Int("ahead-kb", 4096, "populate window in KiB; runway for the staged populate")
 	jsonOut := flag.Bool("json", false, "write one JSON object per payload to stdout")
 	flag.Parse()
+	aheadKB = *aheadFlag
 	if *seconds <= 0 || *warmup < 0 {
 		fmt.Fprintln(os.Stderr, "seconds must be positive and warmup must be nonnegative")
 		os.Exit(2)
