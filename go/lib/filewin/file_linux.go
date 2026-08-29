@@ -68,6 +68,13 @@ const (
 	// fadviseDontneed drops clean page-cache pages for a range.
 	// Dropping them keeps the page cache from filling memory.
 	fadviseDontneed = 4
+
+	// mapFixedNoreplace demands an address and fails when it is taken.
+	// MAP_FIXED would take it, unmapping whatever was there without a word.
+	mapFixedNoreplace = 0x100000
+	// mapAttempts bounds the retries when another thread takes the address
+	// between the reservation being released and the file being mapped.
+	mapAttempts = 8
 )
 
 var (
@@ -493,25 +500,61 @@ func mapRange(fd int, off uint64, length int, prot int) ([]byte, error) {
 	return syscall.Mmap(fd, int64(off), length, prot, syscall.MAP_SHARED)
 }
 
-// mapReserve maps one file range over a private address reservation.
-// The reservation gives the slice, so no integer becomes a pointer here.
-// Mapping past the end of the file is allowed. Growth then needs no remap.
+// mapReserve maps one file range at an address the kernel chose for us.
+//
+// Mapping past the end of the file is allowed, which is why growth needs no
+// remap later.
+//
+// The address comes from an anonymous reservation, whose slice is what this
+// returns: taking the slice from a real mapping is what keeps an integer from
+// becoming a pointer here, and go vet from needing an exception.
+//
+// The reservation is then released and the file mapped in its place with
+// MAP_FIXED_NOREPLACE. MAP_FIXED would be shorter, and is what this did
+// before: it takes the address whatever is there, unmapping it without a
+// word. That is safe only for as long as the reasoning about who owns the
+// range stays true, and it fails silently and catastrophically when it stops
+// being true. MAP_FIXED_NOREPLACE cannot do that. It refuses an address that
+// is taken, which is also why the reservation has to go first: the flag will
+// not map over our own reservation either.
+//
+// Releasing the reservation opens a window where another thread in this
+// process could take the address. That is what the flag is for. The mapping
+// fails with EEXIST, and we start again somewhere else.
 func mapReserve(fd int, length uint64) ([]byte, error) {
-	hole, err := syscall.Mmap(-1, 0, int(length), syscall.PROT_NONE,
-		syscall.MAP_PRIVATE|syscall.MAP_ANON|syscall.MAP_NORESERVE)
-	if err != nil {
-		return nil, err
+	var err error
+	for attempt := 0; attempt < mapAttempts; attempt++ {
+		var hole []byte
+		hole, err = syscall.Mmap(-1, 0, int(length), syscall.PROT_NONE,
+			syscall.MAP_PRIVATE|syscall.MAP_ANON|syscall.MAP_NORESERVE)
+		if err != nil {
+			return nil, err
+		}
+		base := uintptr(unsafe.Pointer(&hole[0]))
+		if _, _, errno := syscall.Syscall(syscall.SYS_MUNMAP, base, uintptr(length), 0); errno != 0 {
+			return nil, errno
+		}
+		got, _, errno := syscall.Syscall6(
+			syscall.SYS_MMAP, base, uintptr(length),
+			uintptr(syscall.PROT_READ|syscall.PROT_WRITE),
+			uintptr(syscall.MAP_SHARED|mapFixedNoreplace), uintptr(fd), 0)
+		if errno != 0 {
+			// Somebody took the address in the window above, or this kernel
+			// refused for another reason. Either way, try a different one.
+			err = errno
+			continue
+		}
+		if got != base {
+			// A kernel older than 4.17 does not know the flag and ignores
+			// it, which leaves the address a hint. The file landed somewhere
+			// else, so the slice would describe the wrong memory.
+			_, _, _ = syscall.Syscall(syscall.SYS_MUNMAP, got, uintptr(length), 0)
+			err = ErrMisuse
+			continue
+		}
+		return hole, nil
 	}
-	base := uintptr(unsafe.Pointer(&hole[0]))
-	_, _, errno := syscall.Syscall6(
-		syscall.SYS_MMAP, base, uintptr(length),
-		uintptr(syscall.PROT_READ|syscall.PROT_WRITE),
-		uintptr(syscall.MAP_SHARED|syscall.MAP_FIXED), uintptr(fd), 0)
-	if errno != 0 {
-		_ = syscall.Munmap(hole)
-		return nil, errno
-	}
-	return hole, nil
+	return nil, err
 }
 
 // fadvise applies one advice to a file range.

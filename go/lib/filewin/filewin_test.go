@@ -7,9 +7,11 @@ import (
 	"encoding/binary"
 	"os"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/akalsi-org/polyglot-template/go/lib/atmc"
 )
@@ -522,5 +524,73 @@ func TestConcurrentWriterAndReader(t *testing.T) {
 	}
 	if writeErr := <-errCh; writeErr != nil {
 		t.Fatal(writeErr)
+	}
+}
+
+// The reservation must never take an address that is already in use. Many
+// windows have to coexist in one process, and the mapping is large enough
+// that a mistake would destroy something else rather than fail.
+func TestManyWindowsCoexist(t *testing.T) {
+	dir := t.TempDir()
+	const windows = 100
+	files := make([]*File, 0, windows)
+	spans := make([][]byte, 0, windows)
+	for i := 0; i < windows; i++ {
+		cfg := testConfig(filepath.Join(dir, "log-"+strconv.Itoa(i)))
+		cfg.Reserve = 128 << 30
+		f, err := Create(cfg)
+		if err != nil {
+			t.Fatalf("window %d of %d: %v", i, windows, err)
+		}
+		files = append(files, f)
+		spans = append(spans, f.data)
+	}
+	t.Cleanup(func() {
+		for _, f := range files {
+			_ = f.Close()
+		}
+	})
+	// No two reservations may overlap.
+	for i := range spans {
+		lo := uintptr(unsafe.Pointer(&spans[i][0]))
+		hi := lo + uintptr(len(spans[i]))
+		for j := i + 1; j < len(spans); j++ {
+			olo := uintptr(unsafe.Pointer(&spans[j][0]))
+			ohi := olo + uintptr(len(spans[j]))
+			if lo < ohi && olo < hi {
+				t.Fatalf("window %d [%x,%x) overlaps window %d [%x,%x)",
+					i, lo, hi, j, olo, ohi)
+			}
+		}
+	}
+	// Each window must still hold its own bytes, which a clobbered mapping
+	// would not.
+	for i, f := range files {
+		w, err := f.AttachWriter()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Write([]byte{byte(i), byte(i >> 8)}); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, f := range files {
+		r, err := f.AttachReader()
+		if err != nil {
+			t.Fatal(err)
+		}
+		span, err := r.Peek(2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(span) != 2 || span[0] != byte(i) || span[1] != byte(i>>8) {
+			t.Fatalf("window %d read back %v", i, span)
+		}
+		if err := r.Close(); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
