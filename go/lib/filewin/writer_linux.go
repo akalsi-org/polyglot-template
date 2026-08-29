@@ -366,7 +366,7 @@ func (w *Writer) work() {
 // so the writer does not fault on first touch. A missed populate costs a
 // fault, never correctness, so it is staged and never waited on.
 func (w *Writer) populateAhead() {
-	if w.file.noPopulate {
+	if !w.file.populateAhead {
 		return
 	}
 	pos := w.pos

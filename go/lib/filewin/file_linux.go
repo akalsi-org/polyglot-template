@@ -120,24 +120,27 @@ type Config struct {
 	// 1 MiB, so past 64 KiB the work is all per-page and a smaller chunk
 	// buys smoothness for almost nothing.
 	PopulateChunkBytes uint64
-	// DisablePopulate leaves the writer to fault pages in as it reaches them.
+	// PopulateAhead establishes page-table entries in front of the writer
+	// instead of letting it fault them in as it arrives.
 	//
-	// The kernel allocates and zeroes a page either way. This only decides
-	// whether that happens ahead of the writer, in a batch, or under it, one
-	// page at a time. Neither is free and the choice is a real trade, which
-	// is why it is a knob and not a default. Measured at 4 KiB records with
-	// writeback off:
+	// It is off, and that is the important default in this file. The kernel
+	// allocates and zeroes a page either way; this only decides whether that
+	// happens in a batch ahead of the writer or one page at a time under it.
+	// The batch holds the address-space lock, and anything else in the
+	// process that faults waits behind it. A reader is exactly that. With a
+	// reader attached, at 64 byte records:
 	//
-	//   populate ahead   2.80 GB/s   p50   175ns   p99 13.9us   max 14.8us
-	//   fault under      2.83 GB/s   p50  1385ns   p99  2.3us   max  5.3us
+	//   populate  12.1 Mrec/s  writer p50 21ns  e2e p90 24.4us  p95 48.1us
+	//   fault      8.9 Mrec/s  writer p50 21ns  e2e p90  255ns  p95  490ns
 	//
-	// Populating wins the median eight times over, because the writer never
-	// takes the fault. Faulting wins the tail six times over, because the
-	// work arrives one page at a time instead of in a batch that can collide
-	// with the writer over the address-space lock. Throughput is the same.
+	// The writer's own cost does not change and end to end improves ninety
+	// six times, for a quarter of the throughput. At 4 KiB records faulting
+	// is faster on both counts. Populating only looks good measured without
+	// a reader, which is not what this library is for.
 	//
-	// Populate ahead for a low median. Fault for a low tail.
-	DisablePopulate bool
+	// Set it when there is no reader in the process and throughput is
+	// everything.
+	PopulateAhead bool
 	// DropChunkBytes bounds one MADV_DONTNEED call the writer makes behind
 	// the consumers.
 	//
@@ -199,7 +202,7 @@ type File struct {
 	workBytes        uint64
 	growAhead        uint64
 	noReaderDrop     bool
-	noPopulate       bool
+	populateAhead    bool
 	populateChunk    uint64
 	dropChunk        uint64
 	readerDropChunk  uint64
@@ -207,6 +210,15 @@ type File struct {
 	page             uint64
 	closed           bool
 	localWriters     atomic.Int32
+}
+
+// SetReaderDropDisabled controls whether readers release their own history.
+// It exists for benchmarks that need to attribute cost; a caller sets
+// DisableReaderDrop at creation instead.
+func (f *File) SetReaderDropDisabled(v bool) {
+	if f != nil {
+		f.noReaderDrop = v
+	}
 }
 
 func pageSize() uint64 { return uint64(os.Getpagesize()) }
@@ -340,7 +352,7 @@ func Create(cfg Config) (*File, error) {
 		populateChunk: cfg.PopulateChunkBytes, dropChunk: cfg.DropChunkBytes,
 		readerDropChunk: cfg.ReaderDropChunkBytes,
 		evictChunk:      cfg.EvictChunkBytes, retain: cfg.RetainBytes, workBytes: cfg.WorkBytes, growAhead: cfg.GrowAheadBytes,
-		noReaderDrop: cfg.DisableReaderDrop, noPopulate: cfg.DisablePopulate,
+		noReaderDrop: cfg.DisableReaderDrop, populateAhead: cfg.PopulateAhead,
 		page: pageSize(),
 	}, nil
 }
@@ -407,7 +419,7 @@ func Open(path string, cfg Config) (*File, error) {
 		populateChunk: cfg.PopulateChunkBytes, dropChunk: cfg.DropChunkBytes,
 		readerDropChunk: cfg.ReaderDropChunkBytes,
 		evictChunk:      cfg.EvictChunkBytes, retain: cfg.RetainBytes, workBytes: cfg.WorkBytes, growAhead: cfg.GrowAheadBytes,
-		noReaderDrop: cfg.DisableReaderDrop, noPopulate: cfg.DisablePopulate,
+		noReaderDrop: cfg.DisableReaderDrop, populateAhead: cfg.PopulateAhead,
 		page: pageSize(),
 	}, nil
 }

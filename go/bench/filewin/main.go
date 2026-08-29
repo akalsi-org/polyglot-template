@@ -558,6 +558,10 @@ var (
 // aheadKB is the populate window, in KiB, set from the command line.
 var aheadKB = 4096
 
+var noReaderDrop, noWriteback, noEvict, populate bool
+
+var popChunkKB int
+
 var epoch = time.Now()
 
 // useTSC records whether the processor timestamp counter is a usable clock.
@@ -617,6 +621,10 @@ func run(dir, fstype string, payload int, warmup, seconds float64, readerCPU, wr
 		Ahead:              uint64(aheadKB) << 10,
 		MaxReserve:         1 << 20,
 		HeadInSharedMemory: true,
+		DisableWriteback:   noWriteback,
+		DisableEvict:       noEvict,
+		PopulateAhead:      populate,
+		PopulateChunkBytes: uint64(popChunkKB) << 10,
 	})
 	if err != nil {
 		return result{}, err
@@ -630,6 +638,7 @@ func run(dir, fstype string, payload int, warmup, seconds float64, readerCPU, wr
 		return result{}, err
 	}
 	defer writer.Close()
+	file.SetReaderDropDisabled(noReaderDrop)
 	reader, err := file.AttachReader()
 	if err != nil {
 		return result{}, err
@@ -906,11 +915,19 @@ func main() {
 	warmup := flag.Float64("warmup", 1, "warmup seconds")
 	payloadsFlag := flag.String("payload", "64,256,4096", "comma-separated record sizes in bytes")
 	dir := flag.String("dir", "build/filewin-bench", "directory for the disk-backed log")
+	popFlag := flag.Int("populate-kb", 0, "populate chunk in KiB; zero selects the default")
+	noWbFlag := flag.Bool("no-writeback", false, "writer does not start writeback")
+	noEvFlag := flag.Bool("no-evict", false, "writer does not drop page cache")
+	popAheadFlag := flag.Bool("populate", false, "writer populates ahead instead of faulting")
+	noDropFlag := flag.Bool("no-reader-drop", false, "leave the reader's history mapped")
 	probeFlag := flag.Float64("probe", 0, "seconds to probe the writer CPU for lost wall time, then exit")
 	aheadFlag := flag.Int("ahead-kb", 4096, "populate window in KiB; runway for the staged populate")
 	jsonOut := flag.Bool("json", false, "write one JSON object per payload to stdout")
 	flag.Parse()
 	aheadKB = *aheadFlag
+	noReaderDrop = *noDropFlag
+	noWriteback, noEvict, populate = *noWbFlag, *noEvFlag, *popAheadFlag
+	popChunkKB = *popFlag
 	if *seconds <= 0 || *warmup < 0 {
 		fmt.Fprintln(os.Stderr, "seconds must be positive and warmup must be nonnegative")
 		os.Exit(2)
