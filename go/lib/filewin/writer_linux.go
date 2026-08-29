@@ -203,7 +203,19 @@ func (w *Writer) work() {
 
 // growAhead keeps the file ahead of the cursor so Reserve rarely waits.
 func (w *Writer) growAhead() {
-	want := w.pos + w.file.ahead + w.file.maxReserve
+	// Keep a whole extent allocated in front of the cursor, not merely the
+	// populate window. The staged allocation only hides its cost if it
+	// finishes before the writer arrives, and fallocate is not always quick:
+	// on a busy filesystem it waits behind writeback and journal commits,
+	// where it has been measured at hundreds of microseconds against a
+	// populate window worth a few milliseconds of runway. An extent of
+	// runway is an order of magnitude more, and costs nothing extra, since
+	// the file grows in extents either way.
+	runway := w.file.extent
+	if least := w.file.ahead + w.file.maxReserve; least > runway {
+		runway = least
+	}
+	want := w.pos + runway
 	if want <= w.committed {
 		return
 	}
