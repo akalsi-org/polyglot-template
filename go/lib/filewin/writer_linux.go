@@ -230,13 +230,18 @@ func (w *Writer) crossInto(need uint64) error {
 	// will give up on a growth that was about to land.
 	t0 := time.Now()
 	deadline := t0.Add(crossPatience)
-	for {
+	for spun := false; ; spun = true {
 		if w.growDone.Load() >= w.growSeq && w.growTarget >= need {
 			w.committed = w.growTarget
 			atmc.StoreReleaseU64(w.file.committed(), w.committed)
 			w.Grows.Add(1)
-			w.Waits.Add(1)
-			w.WaitNs.Add(uint64(time.Since(t0).Nanoseconds()))
+			// Count a wait only when there actually was one. Crossing a
+			// growth that already completed is the expected case, and
+			// counting it makes the metric say the opposite of the truth.
+			if spun {
+				w.Waits.Add(1)
+				w.WaitNs.Add(uint64(time.Since(t0).Nanoseconds()))
+			}
 			return nil
 		}
 		if time.Now().After(deadline) {
