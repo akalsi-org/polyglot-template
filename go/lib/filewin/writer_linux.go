@@ -21,13 +21,13 @@ const (
 	// populateCatchUp is how many rounds' worth of page-table work one round
 	// may stage. One round's worth keeps pace; the rest closes a gap.
 	populateCatchUp = 2
-	// commitSpins is how long a producer waits for the helper to lengthen
-	// the file before growing it itself.
-	commitSpins = 4096
+	// crossPatience is how long a producer waits for a staged growth before
+	// doing it itself. It must exceed helperIdleNs by a wide margin.
+	crossPatience = 2 * time.Millisecond
 	// helperIdleNs is how long the helper sleeps with nothing to do. The
 	// runway is an extent, so this only has to be far below the time the
 	// producer takes to cross one.
-	helperIdleNs = 50 * time.Microsecond
+	helperIdleNs = 20 * time.Microsecond
 )
 
 // Writer appends into the mapped log.
@@ -45,16 +45,28 @@ type Writer struct {
 	committed uint64 // cached file length; the shared one is authoritative
 	closed    bool
 
-	// Helper state. Only runHelper touches these, including the ring.
-	ring       *uring.Ring
-	helperPos  uint64
-	helperLen  uint64
-	populated  uint64
-	dropped    uint64
-	synced     uint64
-	evicted    uint64
-	nextWork   uint64
-	growing    uint64
+	// Growth crosses between the two, and is the only thing that does.
+	//
+	// The producer stages a growth long before it needs the space and
+	// numbers it. The submitting goroutine reaps the completion and records
+	// the number it has reached. Neither writes the other's word: growSeq
+	// and growTarget belong to the producer, growDone to the submitter. The
+	// producer waits only when it reaches the end of the length it has
+	// published, which with an extent staged ahead it should not.
+	growSeq    uint64
+	growTarget uint64
+	growDone   atomic.Uint64
+
+	// Staged by the producer, submitted by the other goroutine.
+	ring     *uring.Ring
+	nextWork uint64
+
+	// Housekeeping cursors. Producer only; it stages, it does not submit.
+	populated uint64
+	dropped   uint64
+	synced    uint64
+	evicted   uint64
+
 	stop       atomic.Bool
 	helperDone chan struct{}
 
@@ -70,6 +82,8 @@ type Writer struct {
 	Dropped    atomic.Uint64
 	SyncErrors atomic.Uint64
 	GrowErrors atomic.Uint64
+	// SelfGrows counts growths the producer had to perform itself.
+	SelfGrows atomic.Uint64
 	// WorkNs is time the producer itself spent staging housekeeping.
 	WorkNs                                                      atomic.Uint64
 	Works                                                       atomic.Uint64
@@ -85,8 +99,7 @@ func (f *File) AttachWriter() (*Writer, error) {
 	w := &Writer{file: f}
 	w.pos = atmc.LoadAcquireU64(f.writePos())
 	w.committed = atmc.LoadAcquireU64(f.committed())
-	w.helperLen = w.committed
-	w.helperPos = w.pos
+	w.growTarget = w.committed
 	w.populated = w.pos
 	w.dropped = 0
 	w.synced = w.pos
@@ -97,6 +110,7 @@ func (f *File) AttachWriter() (*Writer, error) {
 	// the tens of microseconds each call takes.
 	if r, err := uring.New(ringEntries); err == nil {
 		r.Async = true
+		r.OnComplete = w.onComplete
 		w.ring = r
 	}
 	f.addLocalWriter()
@@ -118,10 +132,20 @@ func (w *Writer) Reserve(n uint64) ([]byte, error) {
 	if w.pos+n > w.file.reserve {
 		return nil, ErrFull
 	}
-	if w.pos+n+w.file.extent > w.committed {
-		if err := w.growTo(w.pos + n); err != nil {
+	// Two separate things happen here, and only the first can block.
+	//
+	// Crossing the end of the published length needs the growth covering it
+	// to have finished, so wait for that. With the next extent staged half an
+	// extent ago this is already true and the wait is a load.
+	if w.pos+n > w.committed {
+		if err := w.crossInto(w.pos + n); err != nil {
 			return nil, err
 		}
+	}
+	// Then stage the next growth, early, so the crossing after this one is
+	// also already done when it arrives. This never waits.
+	if w.pos+w.file.growAhead > w.growTarget {
+		w.stageGrowth()
 	}
 	return w.file.data[w.pos : w.pos+n], nil
 }
@@ -161,28 +185,81 @@ func (w *Writer) Pos() uint64 {
 	return w.pos
 }
 
-// growTo extends the file so a reservation ending at need fits.
-// It waits, because the writer cannot store into a page the file does not
-// have. Every other operation this writer stages is advisory and does not.
-func (w *Writer) growTo(need uint64) error {
-	want := need + w.file.ahead + w.file.maxReserve
+// stageGrowth asks for the next extent. It never waits for the answer.
+func (w *Writer) stageGrowth() {
+	if w.growSeq != w.growDone.Load() {
+		// One outstanding at a time, so a completion number means exactly
+		// one length and the producer never has to match them up.
+		return
+	}
+	want := alignUp(w.growTarget+w.file.growAhead, w.file.extent)
 	if want > w.file.reserve {
 		want = w.file.reserve
 	}
-	want = alignUp(want, w.file.extent)
-	if want > w.file.reserve {
-		want = w.file.reserve
+	if want <= w.growTarget {
+		return
 	}
+	if w.ring == nil {
+		if err := w.allocate(w.growTarget, want-w.growTarget); err != nil {
+			return
+		}
+		w.growTarget = want
+		w.growSeq++
+		w.growDone.Store(w.growSeq)
+		return
+	}
+	if !w.ring.Fallocate(w.file.fd, 0, int64(w.growTarget), int64(want-w.growTarget)) {
+		return
+	}
+	w.growSeq++
+	w.ring.Tag(w.growSeq)
+	w.growTarget = want
+}
+
+// crossInto waits for the growth that covers need, then publishes the length.
+//
+// The publish is the producer's, not the helper's. A length the producer has
+// not seen completed is a length it must not write into, and a length written
+// by anyone else is a word with two writers.
+func (w *Writer) crossInto(need uint64) error {
+	if w.growTarget < need {
+		w.stageGrowth()
+	}
+	// Wait in time, not in iterations. The other goroutine sleeps when idle,
+	// so the producer has to be willing to wait longer than that sleep or it
+	// will give up on a growth that was about to land.
 	t0 := time.Now()
+	deadline := t0.Add(crossPatience)
+	for {
+		if w.growDone.Load() >= w.growSeq && w.growTarget >= need {
+			w.committed = w.growTarget
+			atmc.StoreReleaseU64(w.file.committed(), w.committed)
+			w.Grows.Add(1)
+			w.Waits.Add(1)
+			w.WaitNs.Add(uint64(time.Since(t0).Nanoseconds()))
+			return nil
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		atmc.Relax()
+	}
+	// The submitting goroutine is not keeping up. Grow here rather than
+	// stall without bound, and count it: this is not an error, it is the
+	// producer doing work it meant to hand off.
+	want := alignUp(need+w.file.growAhead, w.file.extent)
+	if want > w.file.reserve {
+		want = w.file.reserve
+	}
 	if err := w.allocate(w.committed, want-w.committed); err != nil {
 		return err
 	}
+	w.growTarget = want
 	w.committed = want
+	w.growDone.Store(w.growSeq)
 	atmc.StoreReleaseU64(w.file.committed(), want)
 	w.Grows.Add(1)
-	w.GrowNs.Add(uint64(time.Since(t0).Nanoseconds()))
-	w.Waits.Add(1)
-	w.WaitNs.Add(uint64(time.Since(t0).Nanoseconds()))
+	w.SelfGrows.Add(1)
 	return nil
 }
 
@@ -246,12 +323,25 @@ func (w *Writer) runSubmitter() {
 
 // work stages one round of housekeeping and reports whether it found any.
 // It never waits for the kernel.
+// onComplete runs on the submitting goroutine for every completion it reaps.
+func (w *Writer) onComplete(tag uint64, res int32) {
+	if tag == 0 {
+		return
+	}
+	if res < 0 {
+		// The allocation failed. Leave the watermark where it is, so the
+		// producer waits and then grows the file itself.
+		w.GrowErrors.Add(1)
+		return
+	}
+	w.growDone.Store(tag)
+}
+
 func (w *Writer) work() {
 	t0 := time.Now()
 	defer func() { w.WorkNs.Add(uint64(time.Since(t0).Nanoseconds())) }()
 	w.nextWork = w.pos + w.file.workBytes
 	w.Works.Add(1)
-	w.helperPos = w.pos
 	s := time.Now()
 	w.populateAhead()
 	w.PopStageNs.Add(uint64(time.Since(s).Nanoseconds()))
@@ -274,10 +364,10 @@ func (w *Writer) populateAhead() {
 	if w.file.noPopulate {
 		return
 	}
-	pos := w.helperPos
+	pos := w.pos
 	target := alignDown(pos+w.file.ahead, w.file.page)
-	if target > w.helperLen {
-		target = alignDown(w.helperLen, w.file.page)
+	if target > w.growTarget {
+		target = alignDown(w.growTarget, w.file.page)
 	}
 	if target <= w.populated || target-w.populated < w.file.populateChunk {
 		return
@@ -345,7 +435,7 @@ func (w *Writer) syncBehind() {
 	if w.file.disableWriteback {
 		return
 	}
-	target := alignDown(w.helperPos, w.file.page)
+	target := alignDown(w.pos, w.file.page)
 	if target <= w.synced || target-w.synced < w.file.syncBytes {
 		return
 	}

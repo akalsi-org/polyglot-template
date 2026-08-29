@@ -155,6 +155,11 @@ type Config struct {
 	// process. It trades resident memory for a smoother read path, because
 	// the drop helper and the reader contend for the address-space lock.
 	DisableReaderDrop bool
+	// GrowAheadBytes is how much allocated file the producer keeps in front
+	// of itself. It stages the next growth this far out and waits only if it
+	// arrives before the growth completes, so it sets how much slack the
+	// submitting goroutine has. Zero selects one extent.
+	GrowAheadBytes uint64
 	// WorkBytes is how often the writer runs one housekeeping round: reap
 	// completions, then stage whatever preallocation, page-table, writeback,
 	// and eviction work has become due. One round costs one submission, so
@@ -192,6 +197,7 @@ type File struct {
 	disableEvict     bool
 	retain           uint64
 	workBytes        uint64
+	growAhead        uint64
 	noReaderDrop     bool
 	noPopulate       bool
 	populateChunk    uint64
@@ -243,6 +249,10 @@ func (c Config) normalize() (Config, error) {
 	if c.EvictChunkBytes == 0 {
 		c.EvictChunkBytes = 8 << 20
 	}
+	if c.GrowAheadBytes == 0 {
+		c.GrowAheadBytes = c.Extent
+	}
+	c.GrowAheadBytes = alignUp(c.GrowAheadBytes, page)
 	if c.WorkBytes == 0 {
 		c.WorkBytes = 1 << 20
 	}
@@ -329,7 +339,7 @@ func Create(cfg Config) (*File, error) {
 		keepCached: cfg.KeepCachedBytes, disableEvict: cfg.DisableEvict,
 		populateChunk: cfg.PopulateChunkBytes, dropChunk: cfg.DropChunkBytes,
 		readerDropChunk: cfg.ReaderDropChunkBytes,
-		evictChunk:      cfg.EvictChunkBytes, retain: cfg.RetainBytes, workBytes: cfg.WorkBytes,
+		evictChunk:      cfg.EvictChunkBytes, retain: cfg.RetainBytes, workBytes: cfg.WorkBytes, growAhead: cfg.GrowAheadBytes,
 		noReaderDrop: cfg.DisableReaderDrop, noPopulate: cfg.DisablePopulate,
 		page: pageSize(),
 	}, nil
@@ -396,7 +406,7 @@ func Open(path string, cfg Config) (*File, error) {
 		keepCached: cfg.KeepCachedBytes, disableEvict: cfg.DisableEvict,
 		populateChunk: cfg.PopulateChunkBytes, dropChunk: cfg.DropChunkBytes,
 		readerDropChunk: cfg.ReaderDropChunkBytes,
-		evictChunk:      cfg.EvictChunkBytes, retain: cfg.RetainBytes, workBytes: cfg.WorkBytes,
+		evictChunk:      cfg.EvictChunkBytes, retain: cfg.RetainBytes, workBytes: cfg.WorkBytes, growAhead: cfg.GrowAheadBytes,
 		noReaderDrop: cfg.DisableReaderDrop, noPopulate: cfg.DisablePopulate,
 		page: pageSize(),
 	}, nil
