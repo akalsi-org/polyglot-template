@@ -6,6 +6,7 @@ go_library(
     "affinity_linux.go",
     "cgroup.go",
     "cpuset.go",
+    "process_linux.go",
     "snapshot.go",
     "threadid_go127_amd64.s",
     "threadid_go127_arm64.s",

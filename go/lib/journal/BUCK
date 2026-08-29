@@ -1,0 +1,44 @@
+load("//rules:go.bzl", "go_library", "go_test")
+
+go_library(
+  name = "journal",
+  srcs = [
+    "archive_format_linux.go",
+    "archive_io_linux.go",
+    "archive_linux.go",
+    "capacity.go",
+    "doc.go",
+    "errors.go",
+    "format.go",
+    "producer_linux.go",
+    "ring_linux.go",
+    "ring_record_linux.go",
+    "ring_recovery_linux.go",
+    "types.go",
+  ],
+  deps = [
+    "//go/lib/hostcpu:hostcpu",
+    "//go/lib/internal/orderedatomic:orderedatomic",
+    "//go/lib/internal/shmregion:shmregion",
+  ],
+  visibility = ["PUBLIC"],
+)
+
+go_test(
+  name = "journal_test",
+  srcs = [
+    "archive_test.go",
+    "capacity_test.go",
+    "fault_test.go",
+    "format_test.go",
+    "namespace_test.go",
+    "ordering_test.go",
+    "producer_benchmark_test.go",
+    "producer_test.go",
+    "recovery_test.go",
+    "ring_record_test.go",
+    "shared_recovery_test.go",
+  ],
+  deps = [":journal"],
+  packages = ["./go/lib/journal"],
+)

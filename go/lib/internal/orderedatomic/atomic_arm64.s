@@ -2,35 +2,56 @@
 
 #include "textflag.h"
 
-TEXT ·cpuRelax(SB), NOSPLIT, $0-0
+TEXT ·Relax(SB), NOSPLIT, $0-0
 	YIELD
 	RET
 
-TEXT ·loadRelaxed32(SB), NOSPLIT, $0-12
+TEXT ·StoreBarrier(SB), NOSPLIT, $0-0
+	DMB $0xa
+	RET
+
+TEXT ·LoadBarrier(SB), NOSPLIT, $0-0
+	DMB $0x9
+	RET
+
+TEXT ·FillRelaxed64(SB), NOSPLIT, $0-24
+	MOVD ptr+0(FP), R0
+	MOVD count+8(FP), R1
+	MOVD value+16(FP), R2
+	CBZ R1, fill_relaxed64_done
+fill_relaxed64_loop:
+	MOVD R2, (R0)
+	ADD $8, R0
+	SUB $1, R1
+	CBNZ R1, fill_relaxed64_loop
+fill_relaxed64_done:
+	RET
+
+TEXT ·LoadRelaxed32(SB), NOSPLIT, $0-12
 	MOVD ptr+0(FP), R0
 	MOVWU (R0), R1
 	MOVW R1, ret+8(FP)
 	RET
 
-TEXT ·loadAcquire32(SB), NOSPLIT, $0-12
+TEXT ·LoadAcquire32(SB), NOSPLIT, $0-12
 	MOVD ptr+0(FP), R0
 	LDARW (R0), R1
 	MOVW R1, ret+8(FP)
 	RET
 
-TEXT ·storeRelaxed32(SB), NOSPLIT, $0-12
+TEXT ·StoreRelaxed32(SB), NOSPLIT, $0-12
 	MOVD ptr+0(FP), R0
 	MOVW value+8(FP), R1
 	MOVW R1, (R0)
 	RET
 
-TEXT ·storeRelease32(SB), NOSPLIT, $0-12
+TEXT ·StoreRelease32(SB), NOSPLIT, $0-12
 	MOVD ptr+0(FP), R0
 	MOVW value+8(FP), R1
 	STLRW R1, (R0)
 	RET
 
-TEXT ·compareAndSwap32(SB), NOSPLIT, $0-17
+TEXT ·CompareAndSwap32(SB), NOSPLIT, $0-17
 	MOVD ptr+0(FP), R0
 	MOVW old+8(FP), R1
 	MOVW new+12(FP), R2
@@ -45,31 +66,31 @@ cas32_done:
 	MOVB R0, ret+16(FP)
 	RET
 
-TEXT ·loadRelaxed64(SB), NOSPLIT, $0-16
+TEXT ·LoadRelaxed64(SB), NOSPLIT, $0-16
 	MOVD ptr+0(FP), R0
 	MOVD (R0), R1
 	MOVD R1, ret+8(FP)
 	RET
 
-TEXT ·loadAcquire64(SB), NOSPLIT, $0-16
+TEXT ·LoadAcquire64(SB), NOSPLIT, $0-16
 	MOVD ptr+0(FP), R0
 	LDAR (R0), R1
 	MOVD R1, ret+8(FP)
 	RET
 
-TEXT ·storeRelaxed64(SB), NOSPLIT, $0-16
+TEXT ·StoreRelaxed64(SB), NOSPLIT, $0-16
 	MOVD ptr+0(FP), R0
 	MOVD value+8(FP), R1
 	MOVD R1, (R0)
 	RET
 
-TEXT ·storeRelease64(SB), NOSPLIT, $0-16
+TEXT ·StoreRelease64(SB), NOSPLIT, $0-16
 	MOVD ptr+0(FP), R0
 	MOVD value+8(FP), R1
 	STLR R1, (R0)
 	RET
 
-TEXT ·compareAndSwap64(SB), NOSPLIT, $0-25
+TEXT ·CompareAndSwap64(SB), NOSPLIT, $0-25
 	MOVD ptr+0(FP), R0
 	MOVD old+8(FP), R1
 	MOVD new+16(FP), R2
@@ -84,7 +105,7 @@ cas64_done:
 	MOVB R0, ret+24(FP)
 	RET
 
-TEXT ·compareAndSwapAcquire64(SB), NOSPLIT, $0-25
+TEXT ·CompareAndSwapAcquire64(SB), NOSPLIT, $0-25
 	MOVD ptr+0(FP), R0
 	MOVD old+8(FP), R1
 	MOVD new+16(FP), R2
@@ -104,7 +125,7 @@ cas_acquire64_fail:
 	MOVB R0, ret+24(FP)
 	RET
 
-TEXT ·fetchOrAcqRel64(SB), NOSPLIT, $0-24
+TEXT ·FetchOrAcqRel64(SB), NOSPLIT, $0-24
 	MOVD ptr+0(FP), R0
 	MOVD value+8(FP), R1
 fetch_or_loop:
@@ -115,7 +136,7 @@ fetch_or_loop:
 	MOVD R2, ret+16(FP)
 	RET
 
-TEXT ·fetchAndRelease64(SB), NOSPLIT, $0-24
+TEXT ·FetchAndRelease64(SB), NOSPLIT, $0-24
 	MOVD ptr+0(FP), R0
 	MOVD value+8(FP), R1
 fetch_and_loop:
@@ -126,7 +147,7 @@ fetch_and_loop:
 	MOVD R2, ret+16(FP)
 	RET
 
-TEXT ·fetchAddAcqRel32(SB), NOSPLIT, $0-20
+TEXT ·FetchAddAcqRel32(SB), NOSPLIT, $0-20
 	MOVD ptr+0(FP), R0
 	MOVW value+8(FP), R1
 fetch_add32_loop:

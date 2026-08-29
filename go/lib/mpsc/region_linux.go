@@ -10,6 +10,9 @@ import (
 	"strings"
 	"syscall"
 	"unsafe"
+
+	"github.com/akalsi-org/polyglot-template/go/lib/hostcpu"
+	"github.com/akalsi-org/polyglot-template/go/lib/internal/shmregion"
 )
 
 const (
@@ -122,18 +125,17 @@ type Config struct {
 }
 
 type region struct {
-	fd           int
-	base         uintptr
-	reservation  uintptr
-	memory       []byte
-	capacity     uint64
-	controlLen   uintptr
-	claimStride  uint32
-	resultStride uint32
-	planeGrain   uint32
-	planeShift   uint
-	planeMask    uint64
-	closed       bool
+	mapping       *shmregion.Mapping
+	control       []byte
+	mirroredArena []byte
+	capacity      uint64
+	controlLen    uintptr
+	claimStride   uint32
+	resultStride  uint32
+	planeGrain    uint32
+	planeShift    uint
+	planeMask     uint64
+	closed        bool
 }
 
 type planeGeometry struct {
@@ -227,11 +229,6 @@ func normalizeCapacity(n, page uint64) (uint64, error) {
 	return n, nil
 }
 
-type pidNamespaceIdentity struct {
-	dev uint64
-	ino uint64
-}
-
 func (r *region) setGeometry(capacity uint64, claimStride, resultStride, grain uint32) {
 	r.capacity = capacity
 	r.claimStride = claimStride
@@ -240,6 +237,45 @@ func (r *region) setGeometry(capacity uint64, claimStride, resultStride, grain u
 	if grain != 0 {
 		r.planeShift = uint(bits.TrailingZeros32(grain))
 		r.planeMask = capacity/uint64(grain) - 1
+	}
+}
+
+func mappingOptions(cfg Config, layout shmregion.Layout) (shmregion.CreateOptions, error) {
+	var backend shmregion.Backend
+	switch cfg.Backend {
+	case BackendMemfd:
+		backend = shmregion.BackendMemfd
+	case BackendSHM:
+		if cfg.Name == "" {
+			return shmregion.CreateOptions{}, fmt.Errorf("%w: empty name", ErrFormat)
+		}
+		if strings.Contains(cfg.Name, "..") || strings.ContainsAny(cfg.Name, "/\\") {
+			return shmregion.CreateOptions{}, fmt.Errorf("%w: invalid shared memory name", ErrFormat)
+		}
+		backend = shmregion.BackendSHM
+	case BackendFile:
+		if cfg.Name == "" {
+			return shmregion.CreateOptions{}, fmt.Errorf("%w: empty path", ErrFormat)
+		}
+		backend = shmregion.BackendFile
+	default:
+		return shmregion.CreateOptions{}, fmt.Errorf("%w: backend", ErrFormat)
+	}
+	return shmregion.CreateOptions{
+		Backend:            backend,
+		Name:               cfg.Name,
+		Layout:             layout,
+		MemfdName:          "pgt-mpsc",
+		DisablePreallocate: cfg.DisablePreallocate,
+		AllowOverwrite:     cfg.AllowOverwrite,
+	}, nil
+}
+
+func newRegion(mapping *shmregion.Mapping) *region {
+	return &region{
+		mapping:       mapping,
+		control:       mapping.Control(),
+		mirroredArena: mapping.Arena(),
 	}
 }
 
@@ -262,33 +298,32 @@ func createRegion(cfg Config, claimStride, resultStride, grain uint32) (*region,
 		}
 	}
 	ctrl := controlBytes(cap, 1, claimStride, resultStride, grain, page)
-	fileSize := ctrl + cap
-	fd, err := openBacking(cfg, fileSize)
+	options, err := mappingOptions(cfg, shmregion.Layout{ControlBytes: ctrl, ArenaBytes: cap})
 	if err != nil {
 		return nil, err
 	}
-	r, err := mapRegion(fd, ctrl, cap)
+	mapping, err := shmregion.Create(options)
 	if err != nil {
-		syscall.Close(fd)
 		return nil, err
 	}
-	namespace, err := currentPIDNamespace()
+	r := newRegion(mapping)
+	namespace, err := hostcpu.CurrentPIDNamespaceIdentity()
 	if err != nil {
 		r.close()
 		return nil, err
 	}
 	r.controlLen = uintptr(ctrl)
 	r.setGeometry(cap, claimStride, resultStride, grain)
-	put64(r.memory, 0, formatMagic)
-	put32(r.memory, 8, FormatVersion)
-	put32(r.memory, 12, 1)
-	put64(r.memory, 16, cap)
-	put32(r.memory, 24, uint32(os.Getpid()))
-	put32(r.memory, 32, claimStride)
-	put32(r.memory, 36, resultStride)
-	put32(r.memory, 40, grain)
-	put64(r.memory, pidNamespaceDevOffset, namespace.dev)
-	put64(r.memory, pidNamespaceInoOffset, namespace.ino)
+	put64(r.control, 0, formatMagic)
+	put32(r.control, 8, FormatVersion)
+	put32(r.control, 12, 1)
+	put64(r.control, 16, cap)
+	put32(r.control, 24, uint32(os.Getpid()))
+	put32(r.control, 32, claimStride)
+	put32(r.control, 36, resultStride)
+	put32(r.control, 40, grain)
+	put64(r.control, pidNamespaceDevOffset, namespace.Dev)
+	put64(r.control, pidNamespaceInoOffset, namespace.Ino)
 	return r, nil
 }
 
@@ -296,63 +331,58 @@ func attachRegion(fd int) (*region, error) {
 	if err := procfsValidationProbe(); err != nil {
 		return nil, err
 	}
-	dup, err := dupCloexec(fd)
+	page := uint64(os.Getpagesize())
+	probe := make([]byte, int(page))
+	fileSize, err := shmregion.Probe(fd, probe)
+	if errors.Is(err, shmregion.ErrProbeTooSmall) {
+		return nil, ErrFormat
+	}
 	if err != nil {
 		return nil, err
-	}
-	fail := func(e error) (*region, error) { syscall.Close(dup); return nil, e }
-	st := syscall.Stat_t{}
-	if err := syscall.Fstat(dup, &st); err != nil {
-		return fail(err)
-	}
-	page := uint64(os.Getpagesize())
-	if st.Size < int64(page) {
-		return fail(ErrFormat)
-	}
-	probe, err := syscall.Mmap(dup, 0, int(page), syscall.PROT_READ, syscall.MAP_SHARED)
-	if err != nil {
-		return fail(err)
 	}
 	magic, version := get64(probe, 0), get32(probe, 8)
 	shards, cap := get32(probe, 12), get64(probe, 16)
 	claimStride, resultStride, grain := get32(probe, 32), get32(probe, 36), get32(probe, 40)
-	creatorNamespace := pidNamespaceIdentity{
-		dev: get64(probe, pidNamespaceDevOffset),
-		ino: get64(probe, pidNamespaceInoOffset),
+	creatorNamespace := hostcpu.PIDNamespaceIdentity{
+		Dev: get64(probe, pidNamespaceDevOffset),
+		Ino: get64(probe, pidNamespaceInoOffset),
 	}
-	syscall.Munmap(probe)
 	if magic != formatMagic {
-		return fail(ErrFormat)
+		return nil, ErrFormat
 	}
 	if version != FormatVersion {
-		return fail(fmt.Errorf("%w: got %d", ErrFormatVersion, version))
+		return nil, fmt.Errorf("%w: got %d", ErrFormatVersion, version)
 	}
-	currentNamespace, err := currentPIDNamespace()
+	currentNamespace, err := hostcpu.CurrentPIDNamespaceIdentity()
 	if err != nil {
-		return fail(err)
+		return nil, err
 	}
 	if creatorNamespace != currentNamespace {
-		return fail(&PIDNamespaceError{
-			CreatorDev: creatorNamespace.dev,
-			CreatorIno: creatorNamespace.ino,
-			CurrentDev: currentNamespace.dev,
-			CurrentIno: currentNamespace.ino,
-		})
+		return nil, &PIDNamespaceError{
+			CreatorDev: creatorNamespace.Dev,
+			CreatorIno: creatorNamespace.Ino,
+			CurrentDev: currentNamespace.Dev,
+			CurrentIno: currentNamespace.Ino,
+		}
 	}
 	if shards != 1 || cap == 0 || cap&(cap-1) != 0 || cap%page != 0 || cap > maxExtent {
-		return fail(ErrFormat)
+		return nil, ErrFormat
 	}
 	if !validPlaneGeometry(cap, claimStride, resultStride, grain) {
-		return fail(ErrFormat)
+		return nil, ErrFormat
 	}
 	ctrl := controlBytes(cap, shards, claimStride, resultStride, grain, page)
-	if uint64(st.Size) != ctrl+cap {
-		return fail(ErrFormat)
+	if fileSize != ctrl+cap {
+		return nil, ErrFormat
 	}
-	r, err := mapRegion(dup, ctrl, cap)
+	mapping, err := shmregion.Attach(fd, shmregion.Layout{ControlBytes: ctrl, ArenaBytes: cap})
+	if errors.Is(err, syscall.EINVAL) {
+		return nil, ErrFormat
+	}
 	if err != nil {
-		return fail(err)
+		return nil, err
 	}
+	r := newRegion(mapping)
 	r.controlLen = uintptr(ctrl)
 	r.setGeometry(cap, claimStride, resultStride, grain)
 	return r, nil
@@ -369,135 +399,23 @@ func validPlaneGeometry(cap uint64, claimStride, resultStride, grain uint32) boo
 	return g <= cap && cap%g == 0
 }
 
-func currentPIDNamespace() (pidNamespaceIdentity, error) {
-	var st syscall.Stat_t
-	if err := syscall.Stat("/proc/self/ns/pid", &st); err != nil {
-		return pidNamespaceIdentity{}, err
-	}
-	return pidNamespaceIdentity{dev: uint64(st.Dev), ino: st.Ino}, nil
-}
-
-func dupCloexec(fd int) (int, error) {
-	const fDupfdCloexec = 1030
-	r0, _, errno := syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), fDupfdCloexec, 0)
-	if errno != 0 {
-		return -1, errno
-	}
-	return int(r0), nil
-}
-
-func openBacking(cfg Config, size uint64) (int, error) {
-	var fd int
-	var err error
-	switch cfg.Backend {
-	case BackendMemfd:
-		r0, _, errno := syscall.Syscall(sysMemfdCreate, uintptr(unsafe.Pointer(unsafe.StringData("pgt-mpsc\x00"))), 0x0001|0x0002, 0)
-		if errno != 0 {
-			return -1, errno
-		}
-		fd = int(r0)
-	case BackendSHM:
-		if cfg.Name == "" {
-			return -1, fmt.Errorf("%w: empty name", ErrFormat)
-		}
-		if strings.Contains(cfg.Name, "..") || strings.ContainsAny(cfg.Name, "/\\") {
-			return -1, fmt.Errorf("%w: invalid shared memory name", ErrFormat)
-		}
-		fd, err = syscall.Open("/dev/shm/"+cfg.Name, syscall.O_RDWR|syscall.O_CREAT|syscall.O_EXCL|syscall.O_CLOEXEC, 0600)
-		if err != nil {
-			return -1, err
-		}
-	case BackendFile:
-		if cfg.Name == "" {
-			return -1, fmt.Errorf("%w: empty path", ErrFormat)
-		}
-		flags := syscall.O_RDWR | syscall.O_CREAT | syscall.O_CLOEXEC
-		if cfg.AllowOverwrite {
-			flags |= syscall.O_TRUNC
-		} else {
-			flags |= syscall.O_EXCL
-		}
-		fd, err = syscall.Open(cfg.Name, flags, 0600)
-		if err != nil {
-			return -1, err
-		}
-	default:
-		return -1, fmt.Errorf("%w: backend", ErrFormat)
-	}
-	if err = syscall.Ftruncate(fd, int64(size)); err != nil {
-		syscall.Close(fd)
-		return -1, err
-	}
-	if !cfg.DisablePreallocate {
-		if err = syscall.Fallocate(fd, 0, 0, int64(size)); err != nil {
-			syscall.Close(fd)
-			return -1, err
-		}
-	}
-	if cfg.Backend == BackendMemfd {
-		const fAddSeals = 1033
-		const seals = 0x0002 | 0x0004 | 0x0001
-		if _, _, errno := syscall.Syscall(syscall.SYS_FCNTL, uintptr(fd), fAddSeals, seals); errno != 0 {
-			syscall.Close(fd)
-			return -1, errno
-		}
-	}
-	return fd, nil
-}
-
-func mapRegion(fd int, ctrl, cap uint64) (*region, error) {
-	span := uintptr(ctrl + 2*cap)
-	hole, err := syscall.Mmap(-1, 0, int(span), syscall.PROT_NONE, syscall.MAP_PRIVATE|syscall.MAP_ANON|0x4000)
-	if err != nil {
-		return nil, err
-	}
-	base := uintptr(unsafe.Pointer(&hole[0]))
-	unmap := func() { _ = syscall.Munmap(hole) }
-	fixed := func(at, length, off uintptr) error {
-		p, _, e := syscall.Syscall6(syscall.SYS_MMAP, base+at, length, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED|syscall.MAP_FIXED, uintptr(fd), off)
-		if e != 0 {
-			return e
-		}
-		if p != base+at {
-			return syscall.EFAULT
-		}
-		return nil
-	}
-	if err := fixed(0, uintptr(ctrl), 0); err != nil {
-		unmap()
-		return nil, err
-	}
-	if err := fixed(uintptr(ctrl), uintptr(cap), uintptr(ctrl)); err != nil {
-		unmap()
-		return nil, err
-	}
-	if err := fixed(uintptr(ctrl+cap), uintptr(cap), uintptr(ctrl)); err != nil {
-		unmap()
-		return nil, err
-	}
-	return &region{fd: fd, base: base, reservation: span, memory: hole}, nil
-}
-
 func (r *region) close() error {
 	if r == nil || r.closed {
 		return nil
 	}
 	r.closed = true
-	e1 := syscall.Munmap(r.memory)
-	e2 := syscall.Close(r.fd)
-	r.memory = nil
-	if e1 != nil {
-		return e1
-	}
-	return e2
+	err := r.mapping.Close()
+	r.control = nil
+	r.mirroredArena = nil
+	return err
 }
 
-func (r *region) arena() []byte      { return r.memory[r.controlLen : r.controlLen+uintptr(2*r.capacity)] }
+func (r *region) arena() []byte      { return r.mirroredArena }
 func (r *region) claimBase() uintptr { return uintptr(align(planeBase(1), cacheLine)) }
 func (r *region) resultBase() uintptr {
 	return r.claimBase() + uintptr(align((r.capacity/uint64(r.planeGrain))*uint64(r.claimStride), cacheLine))
 }
-func (r *region) fdDup() (int, error) { return dupCloexec(r.fd) }
+func (r *region) fdDup() (int, error) { return r.mapping.DupFD() }
 
 func get32(b []byte, off uintptr) uint32    { return *(*uint32)(unsafe.Pointer(&b[off])) }
 func get64(b []byte, off uintptr) uint64    { return *(*uint64)(unsafe.Pointer(&b[off])) }

@@ -5,10 +5,8 @@ package mpsc
 import (
 	"errors"
 	"runtime"
-	"strconv"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"unsafe"
 
 	"github.com/akalsi-org/polyglot-template/go/lib/hostcpu"
@@ -70,58 +68,10 @@ func extentFor(n uint64, grain uint64) (uint64, bool) {
 	return e, e <= maxExtent
 }
 
-func schedulerReportsDead(tid hostcpu.ThreadId) bool {
-	_, _, errno := syscall.Syscall(syscall.SYS_SCHED_GETSCHEDULER, uintptr(tid), 0, 0)
-	return errno == syscall.ESRCH
-}
-
 var (
-	schedulerDeadProbe    = schedulerReportsDead
-	openThreadStat        = syscall.Open
-	threadAliveProbe      = threadAlive
+	threadAliveProbe      = hostcpu.ThreadAlive
 	procfsValidationProbe = hostcpu.ValidateProcfsPIDNamespace
 )
-
-func threadAlive(tid hostcpu.ThreadId) bool {
-	if tid == 0 {
-		return false
-	}
-	if schedulerDeadProbe(tid) {
-		return false
-	}
-	b, err := syscall.ByteSliceFromString("/proc/" + strconv.FormatUint(uint64(tid), 10) + "/stat")
-	if err != nil {
-		return true
-	}
-	fd, err := openThreadStat(string(b[:len(b)-1]), syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
-	if err != nil {
-		if err == syscall.ENOENT {
-			return false
-		}
-		return true
-	}
-	var buf [256]byte
-	n, err := syscall.Read(fd, buf[:])
-	syscall.Close(fd)
-	if err != nil || n <= 0 {
-		return !schedulerDeadProbe(tid)
-	}
-	last := -1
-	for i := n - 1; i >= 0; i-- {
-		if buf[i] == ')' {
-			last = i
-			break
-		}
-	}
-	if last < 0 {
-		return true
-	}
-	i := last + 1
-	for i < n && buf[i] == ' ' {
-		i++
-	}
-	return i >= n || (buf[i] != 'Z' && buf[i] != 'X')
-}
 
 type reservation struct {
 	bytes []byte
@@ -152,14 +102,14 @@ type mpscHot struct {
 }
 
 func bindMPSCHot(r *region) mpscHot {
-	base := unsafe.Pointer(&r.memory[0])
+	base := unsafe.Pointer(&r.control[0])
 	return mpscHot{
 		hint:         (*uint64)(unsafe.Add(base, controlSize)),
 		readPos:      (*uint64)(unsafe.Add(base, controlSize+128)),
 		readerTid:    (*uint32)(unsafe.Add(base, 28)),
 		claimBase:    unsafe.Add(base, r.claimBase()),
 		resultBase:   unsafe.Add(base, r.resultBase()),
-		arenaBase:    unsafe.Add(base, r.controlLen),
+		arenaBase:    unsafe.Pointer(&r.mirroredArena[0]),
 		capacity:     r.capacity,
 		planeMask:    r.planeMask,
 		grainMask:    uint64(r.planeGrain - 1),
@@ -329,8 +279,8 @@ func (q *MPSC) newReader() (*mpscReader, error) {
 	return &mpscReader{q: q, hot: q.hot, identity: identity, tid: self, rd: loadAcquire64(q.hot.readPos), busyPos: invalidPos, busyThreshold: 128}, nil
 }
 
-func (q *MPSC) ptr32(off uintptr) *uint32   { return (*uint32)(unsafe.Pointer(&q.r.memory[off])) }
-func (q *MPSC) ptr64(off uintptr) *uint64   { return (*uint64)(unsafe.Pointer(&q.r.memory[off])) }
+func (q *MPSC) ptr32(off uintptr) *uint32   { return (*uint32)(unsafe.Pointer(&q.r.control[off])) }
+func (q *MPSC) ptr64(off uintptr) *uint64   { return (*uint64)(unsafe.Pointer(&q.r.control[off])) }
 func (q *MPSC) planeCell(pos uint64) uint64 { return uint64(q.hot.cell(pos)) }
 func (q *MPSC) claim(pos uint64) *uint64    { return q.hot.claim(pos) }
 func (q *MPSC) result(pos uint64) (*uint64, *uint64) {

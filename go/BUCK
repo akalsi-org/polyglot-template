@@ -1,89 +1,50 @@
-# go/BUCK now holds only lane-wide lint targets (gofmt_check/go_vet scan the
-# whole lane); the buildable/testable targets moved to per-component BUCK
-# files - go/lib/greeting/BUCK, go/app/hello/BUCK, go/test/BUCK - mirroring
-# the cpp lane's existing per-component shape. gofmt_check/go_vet reach every
-# source across those package boundaries via `deps=` (go_binary/go_test now
-# also emit GoInfo - see rules/go.bzl), since glob(["**/*.go"]) from this
-# package can no longer see files that moved into a nested package's own
-# BUCK-file boundary.
+# This package owns lane-wide Go formatting, vet, and graph checks.
+# Component BUCK files own buildable and testable targets.
 load("//rules:go.bzl", "go_graph_check", "go_lint")
+
+_GO_LANE_DEPS = [
+  "//go/app/hello:hello",
+  "//go/app/hello:main_test",
+  "//go/bench/mpsc:bench_queue",
+  "//go/bench/mpsc:bench_queue_test",
+  "//go/bench/mpsc:run_campaign",
+  "//go/bench/mpsc:run_campaign_test",
+  "//go/bench/mpsc:schema_test",
+  "//go/bench/mpsc:summarize_campaign",
+  "//go/bench/mpsc:summarize_campaign_test",
+  "//go/lib/greeting:greeting",
+  "//go/lib/hostcpu:hostcpu",
+  "//go/lib/hostcpu:hostcpu_test",
+  "//go/lib/internal/orderedatomic:orderedatomic",
+  "//go/lib/internal/orderedatomic:orderedatomic_test",
+  "//go/lib/internal/shmregion:shmregion",
+  "//go/lib/internal/shmregion:shmregion_test",
+  "//go/lib/journal:journal",
+  "//go/lib/journal:journal_test",
+  "//go/lib/mpsc:mpsc",
+  "//go/lib/mpsc:mpsc_test",
+  "//go/lib/unsafeborrow:unsafeborrow",
+  "//go/lib/unsafeborrow:unsafeborrow_test",
+  "//go/test:greeting_test",
+]
 
 go_lint(
   name = "gofmt_check",
   mode = "fmt",
-  deps = [
-    "//go/app/hello:hello",
-    "//go/app/hello:main_test",
-    "//go/bench/mpsc:bench_queue",
-    "//go/bench/mpsc:bench_queue_test",
-    "//go/bench/mpsc:run_campaign",
-    "//go/bench/mpsc:run_campaign_test",
-    "//go/bench/mpsc:schema_test",
-    "//go/bench/mpsc:summarize_campaign",
-    "//go/bench/mpsc:summarize_campaign_test",
-    "//go/lib/greeting:greeting",
-    "//go/lib/hostcpu:hostcpu",
-    "//go/lib/hostcpu:hostcpu_test",
-    "//go/lib/mpsc:mpsc",
-    "//go/lib/mpsc:mpsc_test",
-    "//go/lib/unsafeborrow:unsafeborrow",
-    "//go/lib/unsafeborrow:unsafeborrow_test",
-    "//go/test:greeting_test",
-  ],
+  deps = _GO_LANE_DEPS,
 )
 
 go_lint(
   name = "go_vet",
   mode = "vet",
   packages = ["./go/..."],
-  deps = [
-    "//go/app/hello:hello",
-    "//go/app/hello:main_test",
-    "//go/bench/mpsc:bench_queue",
-    "//go/bench/mpsc:bench_queue_test",
-    "//go/bench/mpsc:run_campaign",
-    "//go/bench/mpsc:run_campaign_test",
-    "//go/bench/mpsc:schema_test",
-    "//go/bench/mpsc:summarize_campaign",
-    "//go/bench/mpsc:summarize_campaign_test",
-    "//go/lib/greeting:greeting",
-    "//go/lib/hostcpu:hostcpu",
-    "//go/lib/hostcpu:hostcpu_test",
-    "//go/lib/mpsc:mpsc",
-    "//go/lib/mpsc:mpsc_test",
-    "//go/lib/unsafeborrow:unsafeborrow",
-    "//go/lib/unsafeborrow:unsafeborrow_test",
-    "//go/test:greeting_test",
-  ],
+  deps = _GO_LANE_DEPS,
 )
 
-# Drift check: every in-module .go file that `go list -deps -test ./go/...`
-# resolves must already be declared by one of the lane's go_* targets. This
-# is the Go counterpart of the ts/tsweb lanes' deno_graph_check - see
-# rules/go.bzl's go_graph_check for why a package-pattern toolchain makes
-# this check load-bearing rather than merely tidy. Scoped lane-wide (not
-# per-component) precisely because the pattern is: a file undeclared by
-# EVERY target is the failure being caught.
+# This check compares each resolved package graph with its declared GoInfo closure.
+# It also rejects in-module Go files that no target declares.
 go_graph_check(
   name = "graph_check",
   packages = ["./go/..."],
-  deps = [
-    "//go/app/hello:hello",
-    "//go/app/hello:main_test",
-    "//go/bench/mpsc:bench_queue",
-    "//go/bench/mpsc:bench_queue_test",
-    "//go/bench/mpsc:run_campaign",
-    "//go/bench/mpsc:run_campaign_test",
-    "//go/bench/mpsc:schema_test",
-    "//go/bench/mpsc:summarize_campaign",
-    "//go/bench/mpsc:summarize_campaign_test",
-    "//go/lib/greeting:greeting",
-    "//go/lib/hostcpu:hostcpu",
-    "//go/lib/hostcpu:hostcpu_test",
-    "//go/lib/mpsc:mpsc",
-    "//go/lib/mpsc:mpsc_test",
-    "//go/lib/unsafeborrow:unsafeborrow",
-    "//go/lib/unsafeborrow:unsafeborrow_test",
-    "//go/test:greeting_test",
-  ],
+  deps = _GO_LANE_DEPS,
 )

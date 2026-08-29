@@ -1,0 +1,18 @@
+load("//rules:go.bzl", "go_library", "go_test")
+
+go_library(
+  name = "shmregion",
+  srcs = [
+    "shmregion_linux.go",
+    "sysnum_amd64.go",
+    "sysnum_arm64.go",
+  ],
+  visibility = ["PUBLIC"],
+)
+
+go_test(
+  name = "shmregion_test",
+  srcs = ["shmregion_test.go"],
+  deps = [":shmregion"],
+  packages = ["./go/lib/internal/shmregion"],
+)

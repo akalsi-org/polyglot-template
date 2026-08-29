@@ -429,6 +429,79 @@ func assertProcfsPIDNamespaceError(t *testing.T, err error, expected ThreadId, n
 	}
 }
 
+func TestCurrentPIDNamespaceIdentityMatchesProcfsStat(t *testing.T) {
+	first, err := CurrentPIDNamespaceIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := CurrentPIDNamespaceIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second || first == (PIDNamespaceIdentity{}) {
+		t.Fatalf("PID namespace identities = %+v and %+v", first, second)
+	}
+	var stat syscall.Stat_t
+	if err := syscall.Stat("/proc/self/ns/pid", &stat); err != nil {
+		t.Fatal(err)
+	}
+	want := PIDNamespaceIdentity{Dev: uint64(stat.Dev), Ino: stat.Ino}
+	if first != want {
+		t.Fatalf("PID namespace identity = %+v, want %+v", first, want)
+	}
+}
+
+func TestCurrentPIDNamespaceIdentityPropagatesStatError(t *testing.T) {
+	_, err := pidNamespaceIdentityAt(filepath.Join(t.TempDir(), "missing"))
+	if !errors.Is(err, syscall.ENOENT) {
+		t.Fatalf("namespace stat error = %v, want ENOENT", err)
+	}
+}
+
+func TestThreadAliveTreatsProcStatENOENTAsDeathBeforeTIDReuse(t *testing.T) {
+	oldScheduler := schedulerDeadProbe
+	oldOpen := openThreadStat
+	defer func() {
+		schedulerDeadProbe = oldScheduler
+		openThreadStat = oldOpen
+	}()
+
+	calls := 0
+	schedulerDeadProbe = func(ThreadId) bool {
+		calls++
+		return false
+	}
+	openThreadStat = func(string, int, uint32) (int, error) {
+		return -1, syscall.ENOENT
+	}
+	if ThreadAlive(123) {
+		t.Fatal("ENOENT remained live after the recorded owner disappeared")
+	}
+	if calls != 1 {
+		t.Fatalf("scheduler probes = %d, want 1", calls)
+	}
+}
+
+func TestThreadAliveReportsReapedProcessDead(t *testing.T) {
+	cmd := exec.Command("/bin/true")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	tid := ThreadId(cmd.Process.Pid)
+	if err := cmd.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if ThreadAlive(tid) {
+		t.Fatalf("reaped thread %d is alive", tid)
+	}
+}
+
+func TestThreadAliveRejectsZero(t *testing.T) {
+	if ThreadAlive(0) {
+		t.Fatal("zero thread ID is alive")
+	}
+}
+
 func TestCurrentThreadIdMatchesSyscallAcrossLockedThreads(t *testing.T) {
 	const threadCount = 64
 	const checksPerThread = 256

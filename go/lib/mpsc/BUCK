@@ -5,18 +5,16 @@ go_library(
   srcs = [
     "api_linux.go",
     "atomic_ordered.go",
-    "atomic_ordered_amd64.go",
-    "atomic_ordered_amd64.s",
-    "atomic_ordered_arm64.go",
-    "atomic_ordered_arm64.s",
     "doc.go",
     "queue_linux.go",
     "region_linux.go",
     "spsc_linux.go",
-    "sysnum_amd64.go",
-    "sysnum_arm64.go",
   ],
-  deps = ["//go/lib/hostcpu:hostcpu"],
+  deps = [
+    "//go/lib/hostcpu:hostcpu",
+    "//go/lib/internal/orderedatomic:orderedatomic",
+    "//go/lib/internal/shmregion:shmregion",
+  ],
   visibility = ["PUBLIC"],
 )
 

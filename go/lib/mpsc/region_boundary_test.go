@@ -9,6 +9,8 @@ import (
 	"syscall"
 	"testing"
 	"unsafe"
+
+	"github.com/akalsi-org/polyglot-template/go/lib/hostcpu"
 )
 
 func TestAttachChecksMagicBeforeVersion(t *testing.T) {
@@ -113,7 +115,14 @@ func TestDuplicatedDescriptorsAreCloseOnExec(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireCloseOnExec(t, peer.r.fd)
+	peerFD, err := peer.DupFD()
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireCloseOnExec(t, peerFD)
+	if err := syscall.Close(peerFD); err != nil {
+		t.Fatal(err)
+	}
 	if err := peer.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +192,7 @@ func TestBoundPointersAreAlignedAndEquivalent(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		base := unsafe.Pointer(&q.r.memory[0])
+		base := unsafe.Pointer(&q.r.control[0])
 		checks := []struct {
 			name  string
 			got   unsafe.Pointer
@@ -231,7 +240,7 @@ func TestBoundPointersAreAlignedAndEquivalent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	base := unsafe.Pointer(&q.r.memory[0])
+	base := unsafe.Pointer(&q.r.control[0])
 	checks := []struct {
 		name  string
 		got   unsafe.Pointer
@@ -283,7 +292,7 @@ func TestPIDNamespaceMetadataValidation(t *testing.T) {
 	}
 	defer syscall.Close(fd)
 
-	current, err := currentPIDNamespace()
+	current, err := hostcpu.CurrentPIDNamespaceIdentity()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -291,11 +300,11 @@ func TestPIDNamespaceMetadataValidation(t *testing.T) {
 	if _, err := syscall.Pread(fd, header, 0); err != nil {
 		t.Fatal(err)
 	}
-	if got := get64(header, pidNamespaceDevOffset); got != current.dev {
-		t.Fatalf("creator namespace device: got %d, want %d", got, current.dev)
+	if got := get64(header, pidNamespaceDevOffset); got != current.Dev {
+		t.Fatalf("creator namespace device: got %d, want %d", got, current.Dev)
 	}
-	if got := get64(header, pidNamespaceInoOffset); got != current.ino {
-		t.Fatalf("creator namespace inode: got %d, want %d", got, current.ino)
+	if got := get64(header, pidNamespaceInoOffset); got != current.Ino {
+		t.Fatalf("creator namespace inode: got %d, want %d", got, current.Ino)
 	}
 
 	for _, tc := range []struct {
@@ -304,8 +313,8 @@ func TestPIDNamespaceMetadataValidation(t *testing.T) {
 		foreignDev uint64
 		foreignIno uint64
 	}{
-		{name: "device", offset: pidNamespaceDevOffset, foreignDev: current.dev + 1, foreignIno: current.ino},
-		{name: "inode", offset: pidNamespaceInoOffset, foreignDev: current.dev, foreignIno: current.ino + 1},
+		{name: "device", offset: pidNamespaceDevOffset, foreignDev: current.Dev + 1, foreignIno: current.Ino},
+		{name: "inode", offset: pidNamespaceInoOffset, foreignDev: current.Dev, foreignIno: current.Ino + 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			foreign := get64(header, tc.offset) + 1
@@ -323,7 +332,7 @@ func TestPIDNamespaceMetadataValidation(t *testing.T) {
 				t.Fatalf("attach error type: %T", err)
 			}
 			if namespaceError.CreatorDev != tc.foreignDev || namespaceError.CreatorIno != tc.foreignIno ||
-				namespaceError.CurrentDev != current.dev || namespaceError.CurrentIno != current.ino {
+				namespaceError.CurrentDev != current.Dev || namespaceError.CurrentIno != current.Ino {
 				t.Fatalf("namespace error: %+v", namespaceError)
 			}
 			put64(encoded[:], 0, get64(header, tc.offset))

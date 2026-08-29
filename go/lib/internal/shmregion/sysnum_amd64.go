@@ -1,5 +1,5 @@
 //go:build linux && amd64
 
-package mpsc
+package shmregion
 
 const sysMemfdCreate = 319

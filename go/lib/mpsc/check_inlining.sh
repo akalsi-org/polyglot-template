@@ -14,6 +14,17 @@ require_inline() {
 }
 
 require_inline 'SpinWait'
+require_inline 'loadAcquire32'
+require_inline 'compareAndSwap32'
+require_inline 'loadAcquire64'
+require_inline 'loadRelaxed64'
+require_inline 'storeRelaxed64'
+require_inline 'storeRelease64'
+require_inline 'compareAndSwap64'
+require_inline 'compareAndSwapAcquire64'
+require_inline 'fetchOrAcqRel64'
+require_inline 'fetchAndRelease64'
+require_inline 'fetchAddAcqRel32'
 require_inline '(*MPSCProducer).Write'
 require_inline '(*MPSCConsumer).Peek'
 require_inline '(*MPSCConsumer).Pop'

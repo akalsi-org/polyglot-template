@@ -172,30 +172,6 @@ func TestStoppedWriterProcessIsNotRecovered(t *testing.T) {
 	}
 }
 
-func TestThreadAliveTreatsProcStatENOENTAsDeathBeforeTIDReuse(t *testing.T) {
-	oldScheduler := schedulerDeadProbe
-	oldOpen := openThreadStat
-	defer func() {
-		schedulerDeadProbe = oldScheduler
-		openThreadStat = oldOpen
-	}()
-
-	calls := 0
-	schedulerDeadProbe = func(hostcpu.ThreadId) bool {
-		calls++
-		return false
-	}
-	openThreadStat = func(string, int, uint32) (int, error) {
-		return -1, syscall.ENOENT
-	}
-	if threadAlive(123) {
-		t.Fatal("ENOENT remained live after the recorded owner disappeared")
-	}
-	if calls != 1 {
-		t.Fatalf("scheduler probes: got %d want 1", calls)
-	}
-}
-
 func deadTid(t *testing.T) uint32 {
 	cmd := exec.Command("/bin/true")
 	if err := cmd.Start(); err != nil {
@@ -205,7 +181,7 @@ func deadTid(t *testing.T) uint32 {
 	if err := cmd.Wait(); err != nil {
 		t.Fatal(err)
 	}
-	if threadAlive(hostcpu.ThreadId(tid)) {
+	if hostcpu.ThreadAlive(hostcpu.ThreadId(tid)) {
 		t.Fatalf("reaped Tid %d is alive", tid)
 	}
 	return tid

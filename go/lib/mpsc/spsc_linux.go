@@ -23,7 +23,7 @@ type spscHot struct {
 }
 
 func bindSPSCHot(r *region) spscHot {
-	base := unsafe.Pointer(&r.memory[0])
+	base := unsafe.Pointer(&r.control[0])
 	return spscHot{
 		tail:         (*uint64)(unsafe.Add(base, controlSize)),
 		readPos:      (*uint64)(unsafe.Add(base, controlSize+128)),
@@ -32,7 +32,7 @@ func bindSPSCHot(r *region) spscHot {
 		writerOwner:  (*uint32)(unsafe.Add(base, controlSize+shardSize+8)),
 		generation:   (*uint32)(unsafe.Add(base, controlSize+shardSize+12)),
 		slotBase:     unsafe.Add(base, r.claimBase()),
-		arenaBase:    unsafe.Add(base, r.controlLen),
+		arenaBase:    unsafe.Pointer(&r.mirroredArena[0]),
 		capacity:     r.capacity,
 		planeMask:    r.planeMask,
 		planeShift:   r.planeShift,
@@ -145,8 +145,8 @@ func (q *SPSC) Close() error {
 	q.closing = true
 	return q.r.close()
 }
-func (q *SPSC) ptr32(off uintptr) *uint32    { return (*uint32)(unsafe.Pointer(&q.r.memory[off])) }
-func (q *SPSC) ptr64(off uintptr) *uint64    { return (*uint64)(unsafe.Pointer(&q.r.memory[off])) }
+func (q *SPSC) ptr32(off uintptr) *uint32    { return (*uint32)(unsafe.Pointer(&q.r.control[off])) }
+func (q *SPSC) ptr64(off uintptr) *uint64    { return (*uint64)(unsafe.Pointer(&q.r.control[off])) }
 func (q *SPSC) slot(pos uint64) *uint64      { return q.hot.slot(pos) }
 func (q *SPSC) payload(pos, n uint64) []byte { return q.hot.payload(pos, n) }
 
