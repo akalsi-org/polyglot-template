@@ -10,7 +10,10 @@ go_library(
     "sysnum_arm64.go",
     "writer_linux.go",
   ],
-  deps = ["//go/lib/internal/orderedatomic:orderedatomic"],
+  deps = [
+    "//go/lib/atmc:atmc",
+    "//go/lib/uring:uring",
+  ],
   visibility = ["PUBLIC"],
 )
 
@@ -19,7 +22,7 @@ go_test(
   srcs = ["filewin_test.go"],
   deps = [
     ":filewin",
-    "//go/lib/internal/orderedatomic:orderedatomic",
+    "//go/lib/atmc:atmc",
   ],
   packages = ["./go/lib/filewin"],
 )

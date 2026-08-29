@@ -1,0 +1,22 @@
+load("//rules:go.bzl", "go_library", "go_test")
+
+go_library(
+  name = "atmc",
+  srcs = [
+    "atmc.go",
+    "atomic.go",
+    "doc.go",
+    "fence_amd64.s",
+    "fence_arm64.s",
+    "store_amd64.go",
+    "store_atomic.go",
+  ],
+  visibility = ["PUBLIC"],
+)
+
+go_test(
+  name = "atmc_test",
+  srcs = ["atmc_test.go"],
+  deps = [":atmc"],
+  packages = ["./go/lib/atmc"],
+)

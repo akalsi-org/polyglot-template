@@ -3,110 +3,207 @@
 package filewin
 
 import (
-	"syscall"
+	"sync/atomic"
 
-	"github.com/akalsi-org/polyglot-template/go/lib/internal/orderedatomic"
+	"github.com/akalsi-org/polyglot-template/go/lib/atmc"
+	"github.com/akalsi-org/polyglot-template/go/lib/uring"
 )
 
-// Reader maps a contiguous window around read_pos.
+// Reader consumes the mapped log.
+//
+// A reader is anonymous. It claims nothing, publishes nothing, and the writer
+// never learns that it exists, so any number of readers may attach from any
+// number of processes. The cost of that freedom is that no reader holds
+// history: the writer retains RetainBytes and releases the rest. A reader
+// further behind than that still reads correct bytes, because the bytes stay
+// in the file. It reads them from the device instead of from memory.
+//
+// Peek and Advance never map, unmap, or advise. One unpinned helper releases
+// page-table entries behind the cursor, so a reader that trails a very large
+// file still holds a small resident set.
 type Reader struct {
-	file     *File
-	mapOff   uint64
-	mapBytes []byte
-	pos      uint64
+	file *File
+	pos  uint64
+	// limit is this reader's snapshot of the write cursor.
+	// The reader drains to it before it loads the shared cursor again.
+	limit uint64
+
+	ring    *uring.Ring
+	dropped uint64
+	closed  bool
+
+	Empty    atomic.Uint64
+	Dontneed atomic.Uint64
+	Reaped   atomic.Uint64
 }
 
-// AttachReader maps a data window at the current read cursor.
+// AttachReader returns a reader positioned at the start of the log.
+// Use Seek with WritePos to follow only new records instead.
 func (f *File) AttachReader() (*Reader, error) {
 	if f == nil || f.closed {
 		return nil, ErrClosed
 	}
 	r := &Reader{file: f}
-	r.pos = orderedatomic.LoadAcquire64(f.readPos())
-	if r.pos == 0 {
-		r.pos = 0
-	}
-	if err := r.remap(); err != nil {
-		return nil, err
+	r.dropped = 0
+	// A ring is an optimisation. Without one the reader releases its own
+	// history synchronously, which is correct but costs it the tens of
+	// microseconds each madvise takes.
+	if ring, err := uring.New(ringEntries); err == nil {
+		r.ring = ring
 	}
 	return r, nil
 }
 
-func (r *Reader) remap() error {
-	if r.mapBytes != nil {
-		_ = syscall.Munmap(r.mapBytes)
-		r.mapBytes = nil
+// Seek moves the cursor to an absolute log position.
+func (r *Reader) Seek(pos uint64) error {
+	if r == nil || r.file == nil || r.closed || r.file.closed {
+		return ErrClosed
 	}
-	fileOff := alignDown(r.file.dataFileOff(r.pos), r.file.page)
-	mapped, err := mapRange(r.file.fd, fileOff, int(r.file.window), syscall.PROT_READ|syscall.PROT_WRITE)
-	if err != nil {
-		return err
+	// The write cursor never exceeds the file's published length, so a
+	// cursor-bounded reader can never touch a page past the end of the file
+	// and raise SIGBUS.
+	if pos > atmc.LoadAcquireU64(r.file.writePos()) {
+		return ErrMisuse
 	}
-	r.mapOff = fileOff
-	r.mapBytes = mapped
+	r.pos = pos
+	r.limit = pos
+	r.dropped = alignDown(pos, r.file.readerDropChunk)
 	return nil
+}
+
+// Pos returns this reader's own cursor. Nobody else can observe it.
+func (r *Reader) Pos() uint64 {
+	if r == nil {
+		return 0
+	}
+	return r.pos
 }
 
 // Peek returns committed bytes from the current read cursor.
+//
+// It loads the shared write cursor once and then drains everything up to that
+// snapshot without loading it again. The writer stores that cursor on every
+// commit, so each load by each reader is a line the writer must later
+// invalidate. Reading to a snapshot makes a reader that fell behind quiet: it
+// costs one shared load per batch instead of one per record, and the further
+// behind it is, the less it interferes with the writer.
+//
+// The returned slice aliases the mapping. It stays valid until this reader
+// has advanced RetainBytes past it.
 func (r *Reader) Peek(max uint64) ([]byte, error) {
-	if r == nil || r.file.closed {
+	if r == nil || r.file == nil || r.closed || r.file.closed {
 		return nil, ErrClosed
 	}
-	write := orderedatomic.LoadAcquire64(r.file.writePos())
-	if r.pos == write {
-		return nil, nil
+	if r.pos >= r.limit {
+		r.limit = atmc.LoadAcquireU64(r.file.writePos())
+		if r.pos == r.limit {
+			r.Empty.Add(1)
+			return nil, nil
+		}
 	}
-	if r.pos > write {
+	if r.pos > r.limit || r.limit > r.file.reserve {
 		return nil, ErrFormat
 	}
-	n := write - r.pos
+	n := r.limit - r.pos
 	if n > max && max != 0 {
 		n = max
 	}
-	if r.file.dataFileOff(r.pos)+n > r.mapOff+uint64(len(r.mapBytes)) {
-		if err := r.remap(); err != nil {
-			return nil, err
-		}
-	}
-	off := r.file.dataFileOff(r.pos) - r.mapOff
-	if off+n > uint64(len(r.mapBytes)) {
-		n = uint64(len(r.mapBytes)) - off
-	}
-	return r.mapBytes[off : off+n], nil
+	return r.file.data[r.pos : r.pos+n], nil
 }
 
-// Advance publishes a new read cursor and may drop pages behind the window.
-func (r *Reader) Advance(n uint64) error {
-	if r == nil || r.file.closed {
+// Wait blocks until the writer has probably produced more bytes.
+//
+// It watches the writer's chunk counter, never the bytes it is waiting for. A
+// caught-up reader that polled the write frontier would take the cache line
+// the writer is filling away from it on every record. The chunk counter moves
+// once per WakeBytes instead.
+//
+// A reader publishes nothing to wait, because FUTEX_WAIT only reads the word
+// it waits on. A host can therefore carry far more readers than it has cores:
+// a reader with nothing to do costs no processor time, where a spinning
+// reader would take a core away from the writer.
+func (r *Reader) Wait() error {
+	if r == nil || r.file == nil || r.closed || r.file.closed {
 		return ErrClosed
 	}
-	next := r.pos + n
-	prevChunk := r.pos / chunkBytes
-	orderedatomic.StoreRelease64(r.file.readPos(), next)
-	dropTo := next
-	if dropTo > r.file.window {
-		dropFile := r.file.dataFileOff(dropTo - r.file.window)
-		if dropFile >= r.mapOff {
-			local := dropFile - r.mapOff
-			if local > 0 && local <= uint64(len(r.mapBytes)) {
-				madvise(r.mapBytes[:local], madvDont)
-			}
+	gen := atmc.LoadAcquireU32(r.file.writeGen())
+	// Relax is the spin hint. It belongs here and not in the drain loop:
+	// this path runs only when a reader has nothing to do, and yielding the
+	// shared core is then exactly right.
+	for i := 0; i < readerSpins; i++ {
+		if atmc.LoadAcquireU32(r.file.writeGen()) != gen {
+			return nil
 		}
+		atmc.Relax()
 	}
-	r.pos = next
-	if next/chunkBytes != prevChunk {
-		orderedatomic.FetchAddAcqRel32(r.file.readGen(), 1)
-		futexWake(r.file.readGen())
+	if atmc.LoadAcquireU64(r.file.writePos()) != r.pos {
+		return nil
+	}
+	futexWait(r.file.writeGen(), gen)
+	return nil
+}
+
+// Advance moves this reader's cursor. It writes nothing shared.
+func (r *Reader) Advance(n uint64) error {
+	if r == nil || r.file == nil || r.closed || r.file.closed {
+		return ErrClosed
+	}
+	r.pos += n
+	if r.pos-r.dropped >= r.file.readerDropChunk {
+		r.dropBehind()
 	}
 	return nil
 }
 
-// Close unmaps the reader window.
+// dropBehind releases page-table entries behind this reader's cursor, so a
+// reader trailing a very large file still holds a small resident set. The
+// bytes stay in the page cache, which the writer process owns.
+//
+// The work is staged on the reader's own ring and never waited on: a missed
+// drop costs memory, never correctness.
+func (r *Reader) dropBehind() {
+	chunk := r.file.readerDropChunk
+	if r.pos < chunk {
+		return
+	}
+	target := alignDown(r.pos-chunk, chunk)
+	if target <= r.dropped {
+		return
+	}
+	if r.ring != nil {
+		r.Reaped.Add(uint64(r.ring.Reap()))
+	}
+	start := r.dropped
+	for start < target {
+		end := start + chunk
+		if end > target {
+			end = target
+		}
+		if r.ring == nil {
+			madvise(r.file.data[start:end], madvDont)
+		} else if !r.ring.Madvise(r.file.data[start:end], madvDont) {
+			break
+		}
+		r.Dontneed.Add(1)
+		start = end
+	}
+	r.dropped = start
+	if r.ring != nil {
+		_ = r.ring.Submit()
+	}
+}
+
+// Close releases the reader. The mapping belongs to the File.
 func (r *Reader) Close() error {
-	if r == nil || r.mapBytes == nil {
+	if r == nil || r.file == nil || r.closed {
 		return nil
 	}
-	err := syscall.Munmap(r.mapBytes)
-	r.mapBytes = nil
+	r.closed = true
+	var err error
+	if r.ring != nil {
+		err = r.ring.Close()
+		r.ring = nil
+	}
+	r.file = nil
 	return err
 }

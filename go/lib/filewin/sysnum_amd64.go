@@ -3,6 +3,15 @@
 package filewin
 
 const (
-	sysFutex     = 202
-	sysFallocate = 285
+	sysFutex         = 202
+	sysFallocate     = 285
+	sysFadvise64     = 221
+	sysSyncFileRange = 277
+)
+
+// io_uring entry points. See uring_linux.go.
+const (
+	sysIoUringSetup    = 425
+	sysIoUringEnter    = 426
+	sysIoUringRegister = 427
 )

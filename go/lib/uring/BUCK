@@ -1,0 +1,21 @@
+load("//rules:go.bzl", "go_library", "go_test")
+
+go_library(
+  name = "uring",
+  srcs = [
+    "doc.go",
+    "ring_linux.go",
+    "sysnum_amd64.go",
+    "sysnum_arm64.go",
+  ],
+  deps = ["//go/lib/atmc:atmc"],
+  visibility = ["PUBLIC"],
+)
+
+go_test(
+  name = "uring_test",
+  srcs = ["uring_test.go",
+    "unsafe_test.go"],
+  deps = [":uring"],
+  packages = ["./go/lib/uring"],
+)
