@@ -4,6 +4,7 @@ package filewin
 
 import (
 	"sync/atomic"
+	"time"
 
 	"github.com/akalsi-org/polyglot-template/go/lib/atmc"
 	"github.com/akalsi-org/polyglot-template/go/lib/uring"
@@ -29,15 +30,22 @@ type Reader struct {
 	// The reader drains to it before it loads the shared cursor again.
 	limit uint64
 
-	ring      *uring.Ring
-	dropped   uint64
-	populated uint64
-	closed    bool
+	// Staged by the reader, submitted by the other goroutine.
+	ring          *uring.Ring
+	dropped       uint64
+	populated     uint64
+	nextHousekeep uint64
+	closed        bool
+	stop          atomic.Bool
+	submitDone    chan struct{}
 
-	Empty     atomic.Uint64
-	Dontneed  atomic.Uint64
-	Populates atomic.Uint64
-	Reaped    atomic.Uint64
+	Empty       atomic.Uint64
+	Dontneed    atomic.Uint64
+	Populates   atomic.Uint64
+	Housekeeps  atomic.Uint64
+	HousekeepNs atomic.Uint64
+	SubmitNs    atomic.Uint64
+	Reaped      atomic.Uint64
 }
 
 // AttachReader returns a reader positioned at the start of the log.
@@ -49,12 +57,15 @@ func (f *File) AttachReader() (*Reader, error) {
 	r := &Reader{file: f}
 	r.dropped = 0
 	r.populated = 0
+	r.nextHousekeep = f.readerDropChunk
 	// A ring is an optimisation. Without one the reader releases its own
 	// history synchronously, which is correct but costs it the tens of
 	// microseconds each madvise takes.
 	if ring, err := uring.New(ringEntries); err == nil {
 		ring.Async = true
 		r.ring = ring
+		r.submitDone = make(chan struct{})
+		go r.runSubmitter()
 	}
 	return r, nil
 }
@@ -73,6 +84,8 @@ func (r *Reader) Seek(pos uint64) error {
 	r.pos = pos
 	r.limit = pos
 	r.dropped = alignDown(pos, r.file.readerDropChunk)
+	r.populated = alignDown(pos, r.file.page)
+	r.nextHousekeep = pos + r.file.readerDropChunk
 	return nil
 }
 
@@ -122,7 +135,13 @@ func (r *Reader) Advance(n uint64) error {
 		return ErrClosed
 	}
 	r.pos += n
-	if r.pos-r.dropped >= r.file.readerDropChunk {
+	// Compare against a position that moves, not against the drop cursor.
+	// dropBehind leaves the drop cursor exactly one chunk behind the reader,
+	// so a test against it stays true and housekeeping runs on every call:
+	// measured at thirteen million times in four seconds, which is a third
+	// of the reader thread spent almost entirely on early returns.
+	if r.pos >= r.nextHousekeep {
+		r.nextHousekeep = r.pos + r.file.readerDropChunk
 		r.housekeep()
 	}
 	return nil
@@ -141,18 +160,43 @@ func (r *Reader) Advance(n uint64) error {
 // allocation and no zeroing, which is what makes it much cheaper than the
 // write-side populate and safe to do in a batch.
 func (r *Reader) housekeep() {
-	if r.ring != nil {
-		r.Reaped.Add(uint64(r.ring.Reap()))
-	}
+	t0 := time.Now()
+	defer func() {
+		r.HousekeepNs.Add(uint64(time.Since(t0).Nanoseconds()))
+		r.Housekeeps.Add(1)
+	}()
 	// Release before establishing, not after. Both go into one submission
 	// and the kernel runs them in that order, so the pages this reader has
 	// finished with are free to back the ones it is about to need. The other
 	// order peaks at holding both sets at once.
 	r.dropBehind()
 	r.populateAhead()
-	if r.ring != nil {
-		_ = r.ring.Submit()
+	// Staged, not submitted. io_uring_enter runs the advisory memory work in
+	// the calling thread on this kernel, so submitting here would put a
+	// thirty microsecond stall in the read path every chunk, which is
+	// exactly where the reader's tail was coming from.
+}
+
+// runSubmitter makes the system call the reader must not, exactly as the
+// writer's does. Staging is memory writes to the submission ring; only the
+// call is expensive.
+func (r *Reader) runSubmitter() {
+	defer close(r.submitDone)
+	for !r.stop.Load() && !r.file.closed {
+		if r.ring.Pending() != 0 {
+			s := time.Now()
+			_ = r.ring.Submit()
+			r.SubmitNs.Add(uint64(time.Since(s).Nanoseconds()))
+		}
+		r.ring.Reap()
+		if r.ring.Pending() == 0 && r.ring.Inflight() == 0 {
+			time.Sleep(readerIdleNs)
+			continue
+		}
+		atmc.Relax()
 	}
+	_ = r.ring.Submit()
+	r.ring.Reap()
 }
 
 func (r *Reader) populateAhead() {
@@ -230,6 +274,10 @@ func (r *Reader) dropBehind() {
 func (r *Reader) Close() error {
 	if r == nil || r.file == nil || r.closed {
 		return nil
+	}
+	r.stop.Store(true)
+	if r.submitDone != nil {
+		<-r.submitDone
 	}
 	r.closed = true
 	var err error

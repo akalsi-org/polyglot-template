@@ -562,6 +562,15 @@ var noReaderDrop, noWriteback, noEvict, populate bool
 
 var readerMinor, readerMajor int64
 
+var readerHousekeeps, readerHousekeepNs, readerSubmitNs, readerPopulates, readerDontneed uint64
+
+func max64u(a, b uint64) uint64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 var popChunkKB, retainMB, dropKB int
 
 var epoch = time.Now()
@@ -734,6 +743,11 @@ func run(dir, fstype string, payload int, warmup, seconds float64, readerCPU, wr
 			_ = syscall.Getrusage(1, &ruB)
 			readerMinor = ruB.Minflt - ruA.Minflt
 			readerMajor = ruB.Majflt - ruA.Majflt
+			readerHousekeeps = reader.Housekeeps.Load()
+			readerHousekeepNs = reader.HousekeepNs.Load()
+			readerSubmitNs = reader.SubmitNs.Load()
+			readerPopulates = reader.Populates.Load()
+			readerDontneed = reader.Dontneed.Load()
 		}()
 		if err := pin(readerCPU); err != nil {
 			report(err)
@@ -908,7 +922,11 @@ func printResult(row result) {
 		row.CoreSpeedMIterS, row.ClockCostNS, row.ClockSource)
 	fmt.Printf("  writer_gap  p50=%.0f p90=%.0f p95=%.0f p99=%.0f p99.99=%.0f max=%.0f\n",
 		row.GapP50NS, row.GapP90NS, row.GapP95NS, row.GapP99NS, row.GapP9999NS, row.GapMaxNS)
-	fmt.Printf("  reader_faults minor=%d major=%d\n", readerMinor, readerMajor)
+	fmt.Printf("  reader_faults minor=%d major=%d  housekeeps=%d avg_us=%.1f submit_us=%.1f populates=%d dontneed=%d\n",
+		readerMinor, readerMajor, readerHousekeeps,
+		float64(readerHousekeepNs)/float64(max64u(readerHousekeeps, 1))/1000,
+		float64(readerSubmitNs)/float64(max64u(readerHousekeeps, 1))/1000,
+		readerPopulates, readerDontneed)
 	fmt.Printf("  gc=%d gc_pause_us=%d mallocs=%d\n", row.NumGC, row.GCPauseUS, row.Mallocs)
 	fmt.Printf("  stalled_us cpu_some=%d io_some=%d io_full=%d mem_some=%d cgroup_throttled=%d/%dus\n",
 		row.CPUSomeUS, row.IOSomeUS, row.IOFullUS, row.MemSomeUS, row.NRThrottled, row.ThrottledUS)

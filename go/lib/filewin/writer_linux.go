@@ -36,6 +36,8 @@ const (
 	// runway is an extent, so this only has to be far below the time the
 	// producer takes to cross one.
 	helperIdleNs = 20 * time.Microsecond
+	// readerIdleNs is the same for a reader.
+	readerIdleNs = 20 * time.Microsecond
 )
 
 // Writer appends into the mapped log.
