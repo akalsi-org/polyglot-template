@@ -18,6 +18,7 @@ import (
 
 	"github.com/akalsi-org/polyglot-template/go/lib/filewin"
 	"github.com/akalsi-org/polyglot-template/go/lib/hostcpu"
+	"github.com/akalsi-org/polyglot-template/go/lib/tsc"
 )
 
 const (
@@ -265,7 +266,43 @@ func pin(cpu int) error {
 
 var epoch = time.Now()
 
-func nanotime() int64 { return time.Since(epoch).Nanoseconds() }
+// useTSC records whether the processor timestamp counter is a usable clock.
+// It is read once so the hot loop never repeats the check.
+var useTSC = tsc.Available()
+
+// now returns a reading in whatever unit the clock counts.
+//
+// It returns counter ticks when the timestamp counter is usable, and
+// nanoseconds otherwise. Deltas stay in that unit all the way to the report,
+// where toNanos converts them once. Converting per sample would put a
+// floating point divide inside the measured region.
+//
+// This matters more than it looks. time.Now costs about forty nanoseconds
+// here and the counter costs about eight, and this benchmark reads the clock
+// twice per record. With time.Now the instrument was the largest term in the
+// throughput figure.
+func now() int64 {
+	if useTSC {
+		return int64(tsc.Read())
+	}
+	return time.Since(epoch).Nanoseconds()
+}
+
+// toNanos converts a delta from now into nanoseconds.
+func toNanos(delta float64) float64 {
+	if !useTSC || delta < 0 {
+		return delta
+	}
+	return delta / float64(tsc.TicksPerSecond()) * 1e9
+}
+
+// clockName reports which clock produced the numbers.
+func clockName() string {
+	if useTSC {
+		return "tsc"
+	}
+	return "monotonic"
+}
 
 func removeLog(path string) {
 	link := path + ".head"
@@ -345,7 +382,7 @@ func run(dir, fstype string, payload int, warmup, seconds float64, readerCPU, wr
 			if p == phaseStop {
 				break
 			}
-			t0 := nanotime()
+			t0 := now()
 			span, err := writer.Reserve(n)
 			if err != nil {
 				report(err)
@@ -358,7 +395,7 @@ func run(dir, fstype string, payload int, warmup, seconds float64, readerCPU, wr
 				break
 			}
 			if p == phaseMeasure {
-				writerLat.add(float64(nanotime() - t0))
+				writerLat.add(float64(now() - t0))
 				writerRecs.Add(1)
 			}
 		}
@@ -395,12 +432,12 @@ func run(dir, fstype string, payload int, warmup, seconds float64, readerCPU, wr
 				usable := (len(span) / payload) * payload
 				span = span[:usable]
 			}
-			now := nanotime()
+			sample := now()
 			count := len(span) / payload
 			if p == phaseMeasure {
 				for i := 0; i < count; i++ {
 					ts := int64(binary.LittleEndian.Uint64(span[i*payload:]))
-					e2eLat.add(float64(now - ts))
+					e2eLat.add(float64(sample - ts))
 				}
 				readerRecs.Add(uint64(count))
 			}
@@ -446,6 +483,12 @@ func run(dir, fstype string, payload int, warmup, seconds float64, readerCPU, wr
 
 	wRec := writerRecs.Load()
 	rRec := readerRecs.Load()
+	for i, v := range writerLat.values {
+		writerLat.values[i] = toNanos(v)
+	}
+	for i, v := range e2eLat.values {
+		e2eLat.values[i] = toNanos(v)
+	}
 	wp50, wp90, wp95, wp99, wp9999, wmax := setPercentiles(writerLat.values)
 	ep50, ep90, ep95, ep99, ep9999, emax := setPercentiles(e2eLat.values)
 	return result{
@@ -499,6 +542,7 @@ func printResult(row result) {
 		row.FSType, row.Dir, row.PayloadBytes, row.WriterCPU, row.ReaderCPU, row.TopologyVerified)
 	fmt.Printf("  seconds=%.3f writer=%.3f Mrec/s %.3f GB/s reader=%.3f Mrec/s %.3f GB/s file=%d B\n",
 		row.Seconds, row.WriterMrecS, row.WriterGBS, row.ReaderMrecS, row.ReaderGBS, row.FileBytes)
+	fmt.Printf("  clock=%s ticks_per_second=%d\n", clockName(), tsc.TicksPerSecond())
 	fmt.Printf("  writer_ns  p50=%.0f p90=%.0f p95=%.0f p99=%.0f p99.99=%.0f max=%.0f samples=%d\n",
 		row.WriterP50NS, row.WriterP90NS, row.WriterP95NS, row.WriterP99NS, row.WriterP9999NS, row.WriterMaxNS, row.WriterSamples)
 	fmt.Printf("  e2e_ns     p50=%.0f p90=%.0f p95=%.0f p99=%.0f p99.99=%.0f max=%.0f samples=%d\n",

@@ -1,0 +1,19 @@
+load("//rules:go.bzl", "go_library", "go_test")
+
+go_library(
+  name = "tsc",
+  srcs = [
+    "doc.go",
+    "tsc.go",
+    "tsc_amd64.s",
+    "tsc_arm64.s",
+  ],
+  visibility = ["PUBLIC"],
+)
+
+go_test(
+  name = "tsc_test",
+  srcs = ["tsc_test.go"],
+  deps = [":tsc"],
+  packages = ["./go/lib/tsc"],
+)

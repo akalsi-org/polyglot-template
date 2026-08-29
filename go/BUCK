@@ -23,6 +23,8 @@ _GO_LANE_DEPS = [
   "//go/lib/hostcpu:hostcpu_test",
   "//go/lib/internal/orderedatomic:orderedatomic",
   "//go/lib/internal/orderedatomic:orderedatomic_test",
+  "//go/lib/tsc:tsc",
+  "//go/lib/tsc:tsc_test",
   "//go/lib/internal/shmregion:shmregion",
   "//go/lib/internal/shmregion:shmregion_test",
   "//go/lib/uring:uring",

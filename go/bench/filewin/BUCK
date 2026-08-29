@@ -7,6 +7,7 @@ go_binary(
   deps = [
     "//go/lib/filewin:filewin",
     "//go/lib/hostcpu:hostcpu",
+    "//go/lib/tsc:tsc",
   ],
   pkg_name = "go-filewin-bench",
   visibility = ["PUBLIC"],
