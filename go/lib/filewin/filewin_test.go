@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -413,5 +414,52 @@ func TestReaderStopsAtTheWriteCursor(t *testing.T) {
 	}
 	if err := reader.Wait(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The writer must never believe the file is longer than it is. Publishing a
+// length whose blocks do not exist makes the next store run past the end of
+// the file, and a store past the end of a mapping raises SIGBUS, which kills
+// the process. A staged allocation has not happened yet, so only a completed
+// one may move the length.
+func TestCommittedLengthNeverExceedsTheFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "log")
+	cfg := testConfig(path)
+	cfg.Extent = 1 << 20
+	file, err := Create(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	writer, err := file.AttachWriter()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+
+	payload := bytes.Repeat([]byte{6}, 4096)
+	for i := 0; i < 4096; i++ {
+		if err := writer.Write(payload); err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+		if i%64 != 0 {
+			continue
+		}
+		var st syscall.Stat_t
+		if err := syscall.Stat(path, &st); err != nil {
+			t.Fatal(err)
+		}
+		committed := atmc.LoadAcquireU64(file.committed())
+		if committed > uint64(st.Size) {
+			t.Fatalf("committed %d exceeds file size %d after %d writes",
+				committed, st.Size, i)
+		}
+		if writer.Pos() > uint64(st.Size) {
+			t.Fatalf("write cursor %d is past the end of the file %d",
+				writer.Pos(), st.Size)
+		}
+	}
+	if got := writer.GrowErrors.Load(); got != 0 {
+		t.Fatalf("%d growth failures on a healthy filesystem", got)
 	}
 }

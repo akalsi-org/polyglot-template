@@ -18,6 +18,8 @@ const (
 	// ringEntries sizes the submission queue. It only has to hold the few
 	// operations one housekeeping round stages.
 	ringEntries = 64
+	// growTag identifies a staged file growth in a ring completion.
+	growTag = 1
 )
 
 // Writer appends into the mapped log.
@@ -39,6 +41,7 @@ type Writer struct {
 	synced    uint64
 	evicted   uint64
 	nextWork  uint64
+	growing   uint64
 	woke      uint32
 	closed    bool
 
@@ -53,6 +56,7 @@ type Writer struct {
 	Reaped     atomic.Uint64
 	Dropped    atomic.Uint64
 	SyncErrors atomic.Uint64
+	GrowErrors atomic.Uint64
 }
 
 // AttachWriter binds a writer to the file.
@@ -72,6 +76,7 @@ func (f *File) AttachWriter() (*Writer, error) {
 	// operations run synchronously, which is correct but costs the writer
 	// the tens of microseconds each call takes.
 	if r, err := uring.New(ringEntries); err == nil {
+		r.OnComplete = w.onComplete
 		w.ring = r
 	}
 	f.addLocalWriter()
@@ -227,16 +232,51 @@ func (w *Writer) growAhead() {
 		return
 	}
 	if w.ring == nil {
-		_ = w.allocate(w.committed, want-w.committed, false)
-	} else if !w.ring.Fallocate(w.file.fd, 0, int64(w.committed), int64(want-w.committed)) {
+		if err := w.allocate(w.committed, want-w.committed, false); err == nil {
+			w.publishCommitted(want)
+		}
 		return
 	}
-	// Publish the new length only once the blocks exist. Until the staged
-	// fallocate completes, Reserve must still treat the file as short, so
-	// the local mirror moves and the shared field follows on the next round.
-	w.committed = want
-	atmc.StoreReleaseU64(w.file.committed(), want)
+	if w.growing != 0 {
+		// One staged grow at a time. Until it completes the file is still
+		// short, and Reserve must keep believing that.
+		return
+	}
+	if !w.ring.Fallocate(w.file.fd, 0, int64(w.committed), int64(want-w.committed)) {
+		return
+	}
+	w.ring.Tag(growTag)
+	// Do NOT publish the new length here. A staged operation has not
+	// happened yet, and it can still fail, most obviously with ENOSPC. A
+	// writer that believed the file had grown would store past the end of
+	// it and take SIGBUS. The completion handler publishes instead.
+	w.growing = want
+}
+
+// publishCommitted records a file length whose blocks now exist.
+func (w *Writer) publishCommitted(length uint64) {
+	if length <= w.committed {
+		return
+	}
+	w.committed = length
+	atmc.StoreReleaseU64(w.file.committed(), length)
 	w.Grows.Add(1)
+}
+
+// onComplete runs for every completion this writer's ring reaps.
+func (w *Writer) onComplete(tag uint64, res int32) {
+	if tag != growTag {
+		return
+	}
+	want := w.growing
+	w.growing = 0
+	if res < 0 {
+		// The allocation failed. Leave the file length alone. Reserve then
+		// retries synchronously and surfaces the error to the caller.
+		w.GrowErrors.Add(1)
+		return
+	}
+	w.publishCommitted(want)
 }
 
 // populateAhead establishes writable page-table entries ahead of the cursor,

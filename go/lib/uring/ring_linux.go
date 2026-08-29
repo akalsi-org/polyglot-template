@@ -129,6 +129,11 @@ type Ring struct {
 	// Failures counts completions the kernel reported as errors, plus
 	// submission calls that failed.
 	Failures uint64
+
+	// OnComplete, when set, receives every completion during Reap.
+	// A caller that must know an operation actually happened, rather than
+	// merely that it was staged, learns it here.
+	OnComplete func(tag uint64, res int32)
 }
 
 // New creates a ring with at least the requested number of entries.
@@ -243,6 +248,14 @@ func (r *Ring) Inflight() uint32 {
 }
 
 // push stages one entry. It reports false when the ring is full.
+// Tag sets the identifier reported to OnComplete for the last staged entry.
+func (r *Ring) Tag(tag uint64) {
+	if r.staged == 0 {
+		return
+	}
+	r.sqes[(r.sqLocal-1)&r.sqMask].userData = tag
+}
+
 func (r *Ring) push(op uint8, fd int32, addr uint64, length uint32, off uint64, opFlags uint32) bool {
 	if r.closed || r.Free() == 0 {
 		r.Dropped++
@@ -327,8 +340,12 @@ func (r *Ring) Reap() int {
 	tail := atmc.LoadAcquireU32(r.cqTail)
 	n := 0
 	for head != tail {
-		if r.cqes[head&r.cqMask].res < 0 {
+		c := &r.cqes[head&r.cqMask]
+		if c.res < 0 {
 			r.Failures++
+		}
+		if r.OnComplete != nil {
+			r.OnComplete(c.userData, c.res)
 		}
 		head++
 		n++
