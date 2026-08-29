@@ -37,6 +37,12 @@ const (
 )
 
 type result struct {
+	// CoreSpeedMIterS is how fast the processor ran a fixed dependent chain,
+	// in millions of steps per second. A guest cannot read its own clock
+	// rate, and a core at half speed is indistinguishable from slower code
+	// by every other counter here.
+	CoreSpeedMIterS float64 `json:"core_speed_miter_s"`
+
 	// Time between consecutive writer iterations. Where the per-record cost
 	// stays flat and this grows, the writer stopped running.
 	GapP50NS   float64 `json:"writer_gap_p50_ns"`
@@ -383,6 +389,50 @@ func (a healthSample) sub(b healthSample) healthSample {
 	}
 }
 
+// chainSink keeps the calibration loop from being optimised away.
+var chainSink uint64
+
+// spinChain runs a dependent multiply-add chain. Each step needs the previous
+// result, so the loop is latency bound and its rate is very nearly a fixed
+// number of cycles per iteration. It touches no memory and makes no call.
+//
+//go:noinline
+func spinChain(iterations uint64) uint64 {
+	x := uint64(1)
+	for i := uint64(0); i < iterations; i++ {
+		x = x*6364136223846793005 + 1442695040888963407
+	}
+	return x
+}
+
+// coreSpeed reports how fast the pinned processor executed a fixed amount of
+// work, in millions of chain steps per second.
+//
+// It exists because a guest cannot see its own clock rate. There is no
+// cpufreq interface under a hypervisor, and a core running at half speed
+// looks identical to correct code that became slower: no steal, no pressure,
+// no throttling, every iteration simply costs more. Running known work and
+// timing it turns that into a number that can be compared between runs.
+//
+// Take the best of several attempts. A single attempt can be interrupted, and
+// the fastest one is the closest to what the processor can actually do.
+func coreSpeed() float64 {
+	const iterations = 20_000_000
+	best := 0.0
+	for attempt := 0; attempt < 5; attempt++ {
+		start := time.Now()
+		chainSink += spinChain(iterations)
+		elapsed := time.Since(start).Seconds()
+		if elapsed <= 0 {
+			continue
+		}
+		if rate := iterations / elapsed / 1e6; rate > best {
+			best = rate
+		}
+	}
+	return best
+}
+
 // probe measures wall time a pinned, always-runnable thread loses.
 //
 // It is the last check when every other explanation is exhausted. The thread
@@ -436,8 +486,8 @@ func probe(cpu int, seconds float64) error {
 	}
 	wall := time.Since(start)
 
-	fmt.Printf("probe cpu=%d wall=%s iterations=%d worst_gap=%s\n",
-		cpu, wall.Round(time.Millisecond), iterations, worst)
+	fmt.Printf("probe cpu=%d wall=%s iterations=%d worst_gap=%s core_speed=%.1f Miter/s\n",
+		cpu, wall.Round(time.Millisecond), iterations, worst, coreSpeed())
 	for i, b := range buckets {
 		fmt.Printf("  gaps >= %-8s count=%-8d lost=%-12s %.3f%% of wall\n",
 			b, counts[i], lost[i].Round(time.Microsecond),
@@ -668,6 +718,7 @@ func run(dir, fstype string, payload int, warmup, seconds float64, readerCPU, wr
 		return result{}, runErr.Load().(error)
 	}
 	phase.Store(phaseMeasure)
+	speed := coreSpeed()
 	health0 := readHealth()
 	var gc0, gc1 runtime.MemStats
 	runtime.ReadMemStats(&gc0)
@@ -712,6 +763,7 @@ func run(dir, fstype string, payload int, warmup, seconds float64, readerCPU, wr
 		ReaderGBS:        float64(rRec) / elapsed * float64(payload) / 1e9,
 		FileBytes:        file.WritePos(),
 		WriterSamples:    len(writerLat.values),
+		CoreSpeedMIterS:  speed,
 		GapP50NS:         gp50,
 		GapP90NS:         gp90,
 		GapP95NS:         gp95,
@@ -767,6 +819,7 @@ func printResult(row result) {
 	// and cgroup throttling is time the kernel deliberately withheld one.
 	// Neither shows up as steal, so a run can be held back with steal at
 	// exactly zero.
+	fmt.Printf("  core_speed=%.1f Miter/s\n", row.CoreSpeedMIterS)
 	fmt.Printf("  writer_gap  p50=%.0f p90=%.0f p95=%.0f p99=%.0f p99.99=%.0f max=%.0f\n",
 		row.GapP50NS, row.GapP90NS, row.GapP95NS, row.GapP99NS, row.GapP9999NS, row.GapMaxNS)
 	fmt.Printf("  gc=%d gc_pause_us=%d mallocs=%d\n", row.NumGC, row.GCPauseUS, row.Mallocs)
