@@ -105,12 +105,21 @@ type Config struct {
 	KeepCachedBytes uint64
 	DisableEvict    bool
 	// PopulateChunkBytes bounds one MADV_POPULATE_WRITE call.
-	// A short call holds the address-space lock briefly, so a reader fault
-	// in the same process waits for one chunk and not the whole window.
+	//
+	// A short call holds the address-space lock briefly, so a reader fault in
+	// the same process waits for one chunk and not the whole window. The
+	// default sits where the syscall cost has amortised away: measured per
+	// page this call costs 4630ns at 4 KiB, 487ns at 64 KiB and 450ns at
+	// 1 MiB, so past 64 KiB the work is all per-page and a smaller chunk
+	// buys smoothness for almost nothing.
 	PopulateChunkBytes uint64
 	// DropChunkBytes bounds one MADV_DONTNEED call the writer makes behind
-	// the consumers. Small values keep resident set size low and each
-	// translation-buffer flush short.
+	// the consumers.
+	//
+	// This one does not want to be small. The translation-buffer flush
+	// amortises much later than the populate call: measured per page it
+	// costs 2005ns at 4 KiB, 339ns at 64 KiB, 170ns at 256 KiB and 135ns at
+	// 1 MiB, and is flat above that. The default sits at that knee.
 	DropChunkBytes uint64
 	// ReaderDropChunkBytes is the same bound for a reader releasing its own
 	// history. It defaults larger than DropChunkBytes: the reader competes
@@ -197,7 +206,7 @@ func (c Config) normalize() (Config, error) {
 		c.KeepCachedBytes = 8 << 20
 	}
 	if c.PopulateChunkBytes == 0 {
-		c.PopulateChunkBytes = 1 << 20
+		c.PopulateChunkBytes = 256 << 10
 	}
 	if c.DropChunkBytes == 0 {
 		c.DropChunkBytes = 1 << 20

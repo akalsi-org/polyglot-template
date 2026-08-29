@@ -18,6 +18,9 @@ const (
 	ringEntries = 64
 	// growTag identifies a staged file growth in a ring completion.
 	growTag = 1
+	// populateCatchUp is how many rounds' worth of page-table work one round
+	// may stage. One round's worth keeps pace; the rest closes a gap.
+	populateCatchUp = 2
 )
 
 // Writer appends into the mapped log.
@@ -286,6 +289,15 @@ func (w *Writer) populateAhead() {
 	if target <= w.populated || target-w.populated < w.file.populateChunk {
 		return
 	}
+	// Stage at most one round's worth. A round runs every WorkBytes, so
+	// staging that much keeps pace with the writer exactly, and the margin
+	// lets it close a gap without ever emptying the whole backlog into one
+	// submission. Draining the backlog in one round is what makes this work
+	// bursty: the same total, delivered in a spike the ring and the kernel
+	// workers then have to absorb.
+	if limit := w.populated + w.file.workBytes*populateCatchUp; target > limit {
+		target = limit
+	}
 	start := w.populated
 	for start < target {
 		end := start + w.file.populateChunk
@@ -313,6 +325,10 @@ func (w *Writer) dropBehind() {
 	target := alignDown(floor, chunk)
 	if target <= w.dropped || target-w.dropped < chunk {
 		return
+	}
+	// Same bound as populateAhead, and for the same reason.
+	if limit := w.dropped + w.file.workBytes*populateCatchUp; target > limit {
+		target = limit
 	}
 	start := w.dropped
 	for start < target {
