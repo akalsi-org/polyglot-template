@@ -165,3 +165,53 @@ func TestReadFastIsCheaperThanRead(t *testing.T) {
 	fast := float64(time.Since(start).Nanoseconds()) / n
 	t.Logf("Read=%.1f ns  ReadFast=%.1f ns  barrier costs %.1f ns", ordered, fast, ordered-fast)
 }
+
+// RDTSCP exists to report which processor produced a reading. A delta across
+// two processors is not a duration, and this is the only form that can say so.
+func TestReadTaggedReportsTheProcessor(t *testing.T) {
+	if !tsc.Available() {
+		t.Skip("the counter is not a clock on this processor")
+	}
+	if runtime.GOARCH != "amd64" {
+		t.Skip("no tagged counter read on this architecture")
+	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	first, tag := tsc.ReadTagged()
+	second, again := tsc.ReadTagged()
+	if second < first {
+		t.Fatalf("the counter went backwards: %d then %d", first, second)
+	}
+	if tag != again {
+		t.Fatalf("a locked thread reported two processors: %d then %d", tag, again)
+	}
+	t.Logf("processor tag=%d", tag)
+}
+
+func TestReadTaggedCost(t *testing.T) {
+	if !tsc.Available() {
+		t.Skip("the counter is not a clock on this processor")
+	}
+	const n = 2000000
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	cost := func(f func()) float64 {
+		best := math.MaxFloat64
+		for attempt := 0; attempt < 3; attempt++ {
+			start := time.Now()
+			for i := 0; i < n; i++ {
+				f()
+			}
+			if c := float64(time.Since(start).Nanoseconds()) / n; c < best {
+				best = c
+			}
+		}
+		return best
+	}
+	fast := cost(func() { _ = tsc.ReadFast() })
+	ordered := cost(func() { _ = tsc.Read() })
+	tagged := cost(func() { _, _ = tsc.ReadTagged() })
+	wall := cost(func() { _ = time.Now().UnixNano() })
+	t.Logf("ReadFast(RDTSC)=%.1fns  Read(LFENCE+RDTSC)=%.1fns  ReadTagged(RDTSCP)=%.1fns  time.Now=%.1fns",
+		fast, ordered, tagged, wall)
+}

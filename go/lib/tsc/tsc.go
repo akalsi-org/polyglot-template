@@ -14,6 +14,16 @@ import (
 // around it. See the package comment for what the barrier costs and buys.
 func Read() uint64
 
+// ReadTagged returns the counter together with a processor tag.
+//
+// On amd64 this is RDTSCP, and the tag is IA32_TSC_AUX, which Linux sets to
+// the processor number. Comparing the tag of two readings tells a caller
+// whether the thread moved between them, which is the one thing a bare
+// counter cannot report: a delta across two processors is not a duration.
+//
+// On arm64 the architecture offers no such instruction and the tag is zero.
+func ReadTagged() (ticks uint64, tag uint32)
+
 // ReadFast returns the counter without an ordering barrier. It is cheaper and
 // the reading may float by a few tens of cycles.
 func ReadFast() uint64

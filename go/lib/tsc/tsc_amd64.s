@@ -31,3 +31,24 @@ TEXT ·ReadFast(SB), NOSPLIT, $0-8
 	ORQ  DX, AX
 	MOVQ AX, ret+0(FP)
 	RET
+
+// func ReadTagged() (ticks uint64, tag uint32)
+//
+// RDTSCP waits for earlier instructions to retire before it reads, so like
+// LFENCE before RDTSC it cannot float backwards. It does not stop later
+// instructions starting first, so it is the right instruction to close a
+// timed region and needs a barrier after it to open one.
+//
+// It also returns IA32_TSC_AUX, which Linux sets to the processor number.
+// That is the reason to prefer it: a delta between two readings taken on
+// different processors is meaningless, and this is the only form that can
+// detect the migration rather than silently reporting nonsense.
+TEXT ·ReadTagged(SB), NOSPLIT, $0-12
+	BYTE $0x0f
+	BYTE $0x01
+	BYTE $0xf9 // RDTSCP: EDX:EAX = counter, ECX = IA32_TSC_AUX
+	SHLQ $32, DX
+	ORQ  DX, AX
+	MOVQ AX, ticks+0(FP)
+	MOVL CX, tag+8(FP)
+	RET

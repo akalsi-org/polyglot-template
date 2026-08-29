@@ -21,3 +21,15 @@ TEXT ·ReadFast(SB), NOSPLIT, $0-8
 	WORD $0xd53be040 // MRS CNTVCT_EL0, R0
 	MOVD R0, ret+0(FP)
 	RET
+
+// func ReadTagged() (ticks uint64, tag uint32)
+//
+// The architecture has no instruction that returns the counter and the
+// processor together, so the tag is always zero here. Callers that must
+// detect a migration have to ask the operating system.
+TEXT ·ReadTagged(SB), NOSPLIT, $0-12
+	ISB  $15
+	WORD $0xd53be040 // MRS CNTVCT_EL0, R0
+	MOVD R0, ticks+0(FP)
+	MOVW ZR, tag+8(FP)
+	RET
