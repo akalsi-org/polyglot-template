@@ -37,6 +37,22 @@ const (
 )
 
 type result struct {
+	// Time between consecutive writer iterations. Where the per-record cost
+	// stays flat and this grows, the writer stopped running.
+	GapP50NS   float64 `json:"writer_gap_p50_ns"`
+	GapP90NS   float64 `json:"writer_gap_p90_ns"`
+	GapP95NS   float64 `json:"writer_gap_p95_ns"`
+	GapP99NS   float64 `json:"writer_gap_p99_ns"`
+	GapP9999NS float64 `json:"writer_gap_p99_99_ns"`
+	GapMaxNS   float64 `json:"writer_gap_max_ns"`
+
+	// Garbage collection over the measured window. A collection stops every
+	// goroutine, including a pinned writer, and that stop is invisible to
+	// both steal and kernel pressure accounting.
+	NumGC     uint32 `json:"num_gc"`
+	GCPauseUS uint64 `json:"gc_pause_us"`
+	Mallocs   uint64 `json:"mallocs"`
+
 	// Stall accounting, in microseconds advanced over the measured window.
 	CPUSomeUS   uint64 `json:"cpu_some_us"`
 	IOSomeUS    uint64 `json:"io_some_us"`
@@ -367,6 +383,69 @@ func (a healthSample) sub(b healthSample) healthSample {
 	}
 }
 
+// probe measures wall time a pinned, always-runnable thread loses.
+//
+// It is the last check when every other explanation is exhausted. The thread
+// does nothing but read the clock, so any gap between consecutive readings is
+// time it was not executing. A hypervisor that descheduled the virtual
+// processor produces exactly that, and it is invisible from inside the guest:
+// steal stays zero because the guest believes it was running, and kernel
+// pressure accounting stays quiet because no task was waiting on a resource
+// the kernel knows about.
+//
+// Run it on the writer's processor. A quiet probe means the host gave the
+// thread its time and the slowdown is ours; a loud one means it did not.
+func probe(cpu int, seconds float64) error {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	if err := pin(cpu); err != nil {
+		return err
+	}
+	buckets := []time.Duration{
+		10 * time.Microsecond,
+		100 * time.Microsecond,
+		time.Millisecond,
+		10 * time.Millisecond,
+	}
+	counts := make([]uint64, len(buckets))
+	lost := make([]time.Duration, len(buckets))
+	var iterations uint64
+	var worst time.Duration
+
+	start := time.Now()
+	deadline := start.Add(time.Duration(seconds * float64(time.Second)))
+	prev := time.Now()
+	for {
+		nowT := time.Now()
+		gap := nowT.Sub(prev)
+		prev = nowT
+		iterations++
+		for i := len(buckets) - 1; i >= 0; i-- {
+			if gap >= buckets[i] {
+				counts[i]++
+				lost[i] += gap
+				break
+			}
+		}
+		if gap > worst {
+			worst = gap
+		}
+		if nowT.After(deadline) {
+			break
+		}
+	}
+	wall := time.Since(start)
+
+	fmt.Printf("probe cpu=%d wall=%s iterations=%d worst_gap=%s\n",
+		cpu, wall.Round(time.Millisecond), iterations, worst)
+	for i, b := range buckets {
+		fmt.Printf("  gaps >= %-8s count=%-8d lost=%-12s %.3f%% of wall\n",
+			b, counts[i], lost[i].Round(time.Microsecond),
+			float64(lost[i])/float64(wall)*100)
+	}
+	return nil
+}
+
 // aheadKB is the populate window, in KiB, set from the command line.
 var aheadKB = 4096
 
@@ -453,6 +532,12 @@ func run(dir, fstype string, payload int, warmup, seconds float64, readerCPU, wr
 	var writerDone atomic.Bool
 	var runErr atomic.Value
 	writerLat := newReservoir(0x9e3779b97f4a7c15)
+	// gapLat is the time between consecutive writer iterations. It costs no
+	// extra clock read, because it reuses the one each iteration already
+	// takes. It answers a question the per-record cost cannot: a writer whose
+	// Reserve and Commit stay fast while its rate halves was not running, and
+	// this is where that shows.
+	gapLat := newReservoir(0x853c49e6748fea9b)
 	e2eLat := newReservoir(0x6a09e667f3bcc909)
 	var writerRecs atomic.Uint64
 	var readerRecs atomic.Uint64
@@ -466,6 +551,7 @@ func run(dir, fstype string, payload int, warmup, seconds float64, readerCPU, wr
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
+		var prevT0 int64
 		defer wg.Done()
 		defer writerDone.Store(true)
 		if err := pin(writerCPU); err != nil {
@@ -489,6 +575,10 @@ func run(dir, fstype string, payload int, warmup, seconds float64, readerCPU, wr
 				break
 			}
 			t0 := now()
+			if prevT0 != 0 && p == phaseMeasure {
+				gapLat.add(float64(t0 - prevT0))
+			}
+			prevT0 = t0
 			span, err := writer.Reserve(n)
 			if err != nil {
 				report(err)
@@ -579,6 +669,8 @@ func run(dir, fstype string, payload int, warmup, seconds float64, readerCPU, wr
 	}
 	phase.Store(phaseMeasure)
 	health0 := readHealth()
+	var gc0, gc1 runtime.MemStats
+	runtime.ReadMemStats(&gc0)
 	start := time.Now()
 	time.Sleep(time.Duration(seconds * float64(time.Second)))
 	phase.Store(phaseStop)
@@ -590,13 +682,18 @@ func run(dir, fstype string, payload int, warmup, seconds float64, readerCPU, wr
 
 	wRec := writerRecs.Load()
 	rRec := readerRecs.Load()
+	runtime.ReadMemStats(&gc1)
 	health := readHealth().sub(health0)
 	for i, v := range writerLat.values {
 		writerLat.values[i] = toNanos(v)
 	}
+	for i, v := range gapLat.values {
+		gapLat.values[i] = toNanos(v)
+	}
 	for i, v := range e2eLat.values {
 		e2eLat.values[i] = toNanos(v)
 	}
+	gp50, gp90, gp95, gp99, gp9999, gmax := setPercentiles(gapLat.values)
 	wp50, wp90, wp95, wp99, wp9999, wmax := setPercentiles(writerLat.values)
 	ep50, ep90, ep95, ep99, ep9999, emax := setPercentiles(e2eLat.values)
 	return result{
@@ -615,6 +712,15 @@ func run(dir, fstype string, payload int, warmup, seconds float64, readerCPU, wr
 		ReaderGBS:        float64(rRec) / elapsed * float64(payload) / 1e9,
 		FileBytes:        file.WritePos(),
 		WriterSamples:    len(writerLat.values),
+		GapP50NS:         gp50,
+		GapP90NS:         gp90,
+		GapP95NS:         gp95,
+		GapP99NS:         gp99,
+		GapP9999NS:       gp9999,
+		GapMaxNS:         gmax,
+		NumGC:            gc1.NumGC - gc0.NumGC,
+		GCPauseUS:        (gc1.PauseTotalNs - gc0.PauseTotalNs) / 1000,
+		Mallocs:          gc1.Mallocs - gc0.Mallocs,
 		CPUSomeUS:        health.cpuSome,
 		IOSomeUS:         health.ioSome,
 		IOFullUS:         health.ioFull,
@@ -661,6 +767,9 @@ func printResult(row result) {
 	// and cgroup throttling is time the kernel deliberately withheld one.
 	// Neither shows up as steal, so a run can be held back with steal at
 	// exactly zero.
+	fmt.Printf("  writer_gap  p50=%.0f p90=%.0f p95=%.0f p99=%.0f p99.99=%.0f max=%.0f\n",
+		row.GapP50NS, row.GapP90NS, row.GapP95NS, row.GapP99NS, row.GapP9999NS, row.GapMaxNS)
+	fmt.Printf("  gc=%d gc_pause_us=%d mallocs=%d\n", row.NumGC, row.GCPauseUS, row.Mallocs)
 	fmt.Printf("  stalled_us cpu_some=%d io_some=%d io_full=%d mem_some=%d cgroup_throttled=%d/%dus\n",
 		row.CPUSomeUS, row.IOSomeUS, row.IOFullUS, row.MemSomeUS, row.NRThrottled, row.ThrottledUS)
 	fmt.Printf("  writer_ns  p50=%.0f p90=%.0f p95=%.0f p99=%.0f p99.99=%.0f max=%.0f samples=%d\n",
@@ -678,6 +787,7 @@ func main() {
 	warmup := flag.Float64("warmup", 1, "warmup seconds")
 	payloadsFlag := flag.String("payload", "64,256,4096", "comma-separated record sizes in bytes")
 	dir := flag.String("dir", "build/filewin-bench", "directory for the disk-backed log")
+	probeFlag := flag.Float64("probe", 0, "seconds to probe the writer CPU for lost wall time, then exit")
 	aheadFlag := flag.Int("ahead-kb", 4096, "populate window in KiB; runway for the staged populate")
 	jsonOut := flag.Bool("json", false, "write one JSON object per payload to stdout")
 	flag.Parse()
@@ -714,6 +824,13 @@ func main() {
 		fmt.Fprintln(os.Stderr, "pin warning: cgroup effective cpuset was unavailable; pinning from affinity and topology")
 	}
 	readerCPU, writerCPU := cpus[0], cpus[1]
+	if *probeFlag > 0 {
+		if err := probe(writerCPU, *probeFlag); err != nil {
+			fmt.Fprintln(os.Stderr, "probe:", err)
+			os.Exit(2)
+		}
+		return
+	}
 	for _, payload := range payloads {
 		row, err := run(abs, fstype, payload, *warmup, *seconds, readerCPU, writerCPU)
 		if err != nil {
