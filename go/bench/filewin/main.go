@@ -37,6 +37,14 @@ const (
 )
 
 type result struct {
+	// Stall accounting, in microseconds advanced over the measured window.
+	CPUSomeUS   uint64 `json:"cpu_some_us"`
+	IOSomeUS    uint64 `json:"io_some_us"`
+	IOFullUS    uint64 `json:"io_full_us"`
+	MemSomeUS   uint64 `json:"mem_some_us"`
+	NRThrottled uint64 `json:"cgroup_nr_throttled"`
+	ThrottledUS uint64 `json:"cgroup_throttled_us"`
+
 	PayloadBytes     int     `json:"payload_bytes"`
 	Seconds          float64 `json:"seconds"`
 	FSType           string  `json:"fs_type"`
@@ -264,6 +272,101 @@ func pin(cpu int) error {
 	return nil
 }
 
+// healthSample records kernel counters that explain a run the throughput
+// figure alone cannot. A writer that costs the same per record but produces
+// far fewer of them is not running, and steal is only one of the reasons.
+type healthSample struct {
+	cpuSome, ioSome, ioFull, memSome uint64
+	nrThrottled, throttledUsec       uint64
+}
+
+// pressure reads one "some" or "full" total from a PSI file, in microseconds.
+func pressure(path, kind string) uint64 {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if !strings.HasPrefix(line, kind) {
+			continue
+		}
+		for _, f := range strings.Fields(line) {
+			if v, ok := strings.CutPrefix(f, "total="); ok {
+				n, _ := strconv.ParseUint(v, 10, 64)
+				return n
+			}
+		}
+	}
+	return 0
+}
+
+// cgroupCPUStat returns the throttling counters for this process's cgroup.
+// Bandwidth throttling stops a process without ever appearing as steal, so a
+// guest can be held back with a steal reading of exactly zero.
+func cgroupCPUStat() (nrThrottled, throttledUsec uint64) {
+	raw, err := os.ReadFile("/proc/self/cgroup")
+	if err != nil {
+		return 0, 0
+	}
+	rel := ""
+	for _, line := range strings.Split(string(raw), "\n") {
+		if p, ok := strings.CutPrefix(line, "0::"); ok {
+			rel = p
+			break
+		}
+	}
+	// Walk from the process's own cgroup up to the root. A quota set on any
+	// ancestor throttles this process.
+	for dir := filepath.Join("/sys/fs/cgroup", rel); ; dir = filepath.Dir(dir) {
+		if raw, err := os.ReadFile(filepath.Join(dir, "cpu.stat")); err == nil {
+			for _, line := range strings.Split(string(raw), "\n") {
+				f := strings.Fields(line)
+				if len(f) != 2 {
+					continue
+				}
+				v, _ := strconv.ParseUint(f[1], 10, 64)
+				switch f[0] {
+				case "nr_throttled":
+					if v > nrThrottled {
+						nrThrottled = v
+					}
+				case "throttled_usec":
+					if v > throttledUsec {
+						throttledUsec = v
+					}
+				}
+			}
+		}
+		if dir == "/sys/fs/cgroup" || dir == "/" || dir == "." {
+			return nrThrottled, throttledUsec
+		}
+	}
+}
+
+func readHealth() healthSample {
+	n, u := cgroupCPUStat()
+	return healthSample{
+		cpuSome:       pressure("/proc/pressure/cpu", "some"),
+		ioSome:        pressure("/proc/pressure/io", "some"),
+		ioFull:        pressure("/proc/pressure/io", "full"),
+		memSome:       pressure("/proc/pressure/memory", "some"),
+		nrThrottled:   n,
+		throttledUsec: u,
+	}
+}
+
+// sub returns how much each counter advanced, in microseconds.
+func (a healthSample) sub(b healthSample) healthSample {
+	return healthSample{
+		cpuSome:       a.cpuSome - b.cpuSome,
+		ioSome:        a.ioSome - b.ioSome,
+		ioFull:        a.ioFull - b.ioFull,
+		memSome:       a.memSome - b.memSome,
+		nrThrottled:   a.nrThrottled - b.nrThrottled,
+		throttledUsec: a.throttledUsec - b.throttledUsec,
+	}
+}
+
 // aheadKB is the populate window, in KiB, set from the command line.
 var aheadKB = 4096
 
@@ -475,6 +578,7 @@ func run(dir, fstype string, payload int, warmup, seconds float64, readerCPU, wr
 		return result{}, runErr.Load().(error)
 	}
 	phase.Store(phaseMeasure)
+	health0 := readHealth()
 	start := time.Now()
 	time.Sleep(time.Duration(seconds * float64(time.Second)))
 	phase.Store(phaseStop)
@@ -486,6 +590,7 @@ func run(dir, fstype string, payload int, warmup, seconds float64, readerCPU, wr
 
 	wRec := writerRecs.Load()
 	rRec := readerRecs.Load()
+	health := readHealth().sub(health0)
 	for i, v := range writerLat.values {
 		writerLat.values[i] = toNanos(v)
 	}
@@ -510,6 +615,12 @@ func run(dir, fstype string, payload int, warmup, seconds float64, readerCPU, wr
 		ReaderGBS:        float64(rRec) / elapsed * float64(payload) / 1e9,
 		FileBytes:        file.WritePos(),
 		WriterSamples:    len(writerLat.values),
+		CPUSomeUS:        health.cpuSome,
+		IOSomeUS:         health.ioSome,
+		IOFullUS:         health.ioFull,
+		MemSomeUS:        health.memSome,
+		NRThrottled:      health.nrThrottled,
+		ThrottledUS:      health.throttledUsec,
 		WriterP50NS:      wp50,
 		WriterP90NS:      wp90,
 		WriterP95NS:      wp95,
@@ -546,6 +657,12 @@ func printResult(row result) {
 	fmt.Printf("  seconds=%.3f writer=%.3f Mrec/s %.3f GB/s reader=%.3f Mrec/s %.3f GB/s file=%d B\n",
 		row.Seconds, row.WriterMrecS, row.WriterGBS, row.ReaderMrecS, row.ReaderGBS, row.FileBytes)
 	fmt.Printf("  clock=%s ticks_per_second=%d\n", clockName(), tsc.TicksPerSecond())
+	// Stall accounting. cpu_some is time a runnable task waited for a core,
+	// and cgroup throttling is time the kernel deliberately withheld one.
+	// Neither shows up as steal, so a run can be held back with steal at
+	// exactly zero.
+	fmt.Printf("  stalled_us cpu_some=%d io_some=%d io_full=%d mem_some=%d cgroup_throttled=%d/%dus\n",
+		row.CPUSomeUS, row.IOSomeUS, row.IOFullUS, row.MemSomeUS, row.NRThrottled, row.ThrottledUS)
 	fmt.Printf("  writer_ns  p50=%.0f p90=%.0f p95=%.0f p99=%.0f p99.99=%.0f max=%.0f samples=%d\n",
 		row.WriterP50NS, row.WriterP90NS, row.WriterP95NS, row.WriterP99NS, row.WriterP9999NS, row.WriterMaxNS, row.WriterSamples)
 	fmt.Printf("  e2e_ns     p50=%.0f p90=%.0f p95=%.0f p99=%.0f p99.99=%.0f max=%.0f samples=%d\n",
