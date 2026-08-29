@@ -833,6 +833,74 @@ func parseArchiveBatchReaderBounded(
 	return meta, nil
 }
 
+func forEachArchiveRecord(
+	reader io.ReaderAt,
+	meta archiveBatchMeta,
+	start Sequence,
+	visit func(Sequence, []byte) error,
+) error {
+	if reader == nil || start < meta.first.sequence || start > meta.next.sequence || visit == nil {
+		return ErrFormat
+	}
+	if start == meta.next.sequence {
+		return nil
+	}
+	decoderMemory := meta.blockMaxBytes
+	if decoderMemory < 1<<20 {
+		decoderMemory = 1 << 20
+	}
+	decoder, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxMemory(decoderMemory+(1<<20)))
+	if err != nil {
+		return err
+	}
+	defer decoder.Close()
+	for blockIndex := uint32(0); blockIndex < meta.blockCount; blockIndex++ {
+		entryOffset := meta.indexOffset + uint64(blockIndex)*uint64(BatchIndexEntrySize)
+		entry, err := readArchiveObject(reader, entryOffset, BatchIndexEntrySize)
+		if err != nil {
+			return err
+		}
+		first := Sequence(get64(entry, BatchIndexFirstSequenceOffset))
+		end := Sequence(get64(entry, BatchIndexEndSequenceOffset))
+		fileOffset := get64(entry, BatchIndexFileOffsetOffset)
+		compressedBytes := get64(entry, BatchIndexCompressedBytesOffset)
+		uncompressedBytes := get64(entry, BatchIndexUncompressedBytesOffset)
+		payloadCRC := get32(entry, BatchIndexBlockCRC32COffset)
+		if end <= start {
+			continue
+		}
+		compressed := make([]byte, compressedBytes)
+		if _, err := reader.ReadAt(compressed, int64(fileOffset+uint64(BatchBlockHeaderSize))); err != nil {
+			return err
+		}
+		decoded, err := decoder.DecodeAll(compressed, make([]byte, 0, uncompressedBytes))
+		if err != nil || uint64(len(decoded)) != uncompressedBytes || crc32.Checksum(decoded, archiveCRC32CTable) != payloadCRC {
+			if err == nil {
+				err = ErrFormat
+			}
+			return err
+		}
+		cursor := 0
+		for sequence := first; sequence < end; sequence++ {
+			if len(decoded)-cursor < int(BatchRecordHeaderSize) {
+				return ErrFormat
+			}
+			length := uint64(get32(decoded[cursor:], 8))
+			if length > uint64(len(decoded)-cursor-int(BatchRecordHeaderSize)) {
+				return ErrFormat
+			}
+			payload := decoded[cursor+int(BatchRecordHeaderSize) : cursor+int(BatchRecordHeaderSize)+int(length)]
+			if sequence >= start {
+				if err := visit(sequence, payload); err != nil {
+					return err
+				}
+			}
+			cursor += int(BatchRecordHeaderSize) + int(length)
+		}
+	}
+	return nil
+}
+
 func parseArchiveBatch(file []byte, name string, expectedEpoch RingEpoch) (archiveBatchMeta, error) {
 	minimum := int(BatchHeaderSize + BatchBlockHeaderSize + BatchIndexEntrySize + BatchFooterSize)
 	if len(file) < minimum {

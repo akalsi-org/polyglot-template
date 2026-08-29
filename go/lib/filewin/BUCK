@@ -1,0 +1,25 @@
+load("//rules:go.bzl", "go_library", "go_test")
+
+go_library(
+  name = "filewin",
+  srcs = [
+    "doc.go",
+    "file_linux.go",
+    "reader_linux.go",
+    "sysnum_amd64.go",
+    "sysnum_arm64.go",
+    "writer_linux.go",
+  ],
+  deps = ["//go/lib/internal/orderedatomic:orderedatomic"],
+  visibility = ["PUBLIC"],
+)
+
+go_test(
+  name = "filewin_test",
+  srcs = ["filewin_test.go"],
+  deps = [
+    ":filewin",
+    "//go/lib/internal/orderedatomic:orderedatomic",
+  ],
+  packages = ["./go/lib/filewin"],
+)

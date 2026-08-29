@@ -12,6 +12,8 @@ _GO_LANE_DEPS = [
   "//go/bench/mpsc:schema_test",
   "//go/bench/mpsc:summarize_campaign",
   "//go/bench/mpsc:summarize_campaign_test",
+  "//go/lib/filewin:filewin",
+  "//go/lib/filewin:filewin_test",
   "//go/lib/greeting:greeting",
   "//go/lib/hostcpu:hostcpu",
   "//go/lib/hostcpu:hostcpu_test",
