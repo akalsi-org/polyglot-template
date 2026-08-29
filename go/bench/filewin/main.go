@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -37,6 +38,13 @@ const (
 )
 
 type result struct {
+	// ClockCostNS is what one reading of the benchmark clock costs, measured
+	// on the writer's own processor. The benchmark reads the clock twice per
+	// record, so this is part of every latency and throughput number here.
+	ClockCostNS float64 `json:"clock_cost_ns"`
+	// ClockSource is the kernel clocksource behind that clock.
+	ClockSource string `json:"clock_source"`
+
 	// CoreSpeedMIterS is how fast the processor ran a fixed dependent chain,
 	// in millions of steps per second. A guest cannot read its own clock
 	// rate, and a core at half speed is indistinguishable from slower code
@@ -389,6 +397,50 @@ func (a healthSample) sub(b healthSample) healthSample {
 	}
 }
 
+// clockSink keeps the clock calibration from being optimised away.
+var clockSink int64
+
+// clockCost reports the nanoseconds one reading of the benchmark clock costs.
+//
+// The benchmark reads the clock twice per record, so the clock is part of
+// every number it produces. Where the clock itself becomes more expensive,
+// the per-record cost and the iteration gap both rise and nothing in the
+// library changed. That is indistinguishable from a slower writer unless the
+// clock is measured too.
+//
+// This matters under a hypervisor. A guest reads the clock through the vDSO
+// while its clocksource supports it, and falls back to a system call when it
+// does not. The two differ by hundreds of nanoseconds, which is an order of
+// magnitude more than the operation being timed.
+//
+// Take the smallest of several attempts. An interrupted attempt only reads
+// high, so the minimum is the closest to the true cost.
+func clockCost() float64 {
+	const reads = 200_000
+	best := math.MaxFloat64
+	for attempt := 0; attempt < 5; attempt++ {
+		start := time.Now()
+		for i := 0; i < reads; i++ {
+			clockSink += now()
+		}
+		cost := float64(time.Since(start).Nanoseconds()) / reads
+		if cost < best {
+			best = cost
+		}
+	}
+	return best
+}
+
+// clockSource names the kernel clocksource, which decides whether a clock
+// reading is a vDSO read or a system call.
+func clockSource() string {
+	raw, err := os.ReadFile("/sys/devices/system/clocksource/clocksource0/current_clocksource")
+	if err != nil {
+		return "unknown"
+	}
+	return strings.TrimSpace(string(raw))
+}
+
 // chainSink keeps the calibration loop from being optimised away.
 var chainSink uint64
 
@@ -495,6 +547,13 @@ func probe(cpu int, seconds float64) error {
 	}
 	return nil
 }
+
+// coreSpeedOnWriter and clockCostOnWriter are measured on the pinned writer
+// thread, and read back after it finishes.
+var (
+	coreSpeedOnWriter float64
+	clockCostOnWriter float64
+)
 
 // aheadKB is the populate window, in KiB, set from the command line.
 var aheadKB = 4096
@@ -610,6 +669,11 @@ func run(dir, fstype string, payload int, warmup, seconds float64, readerCPU, wr
 			return
 		}
 		identity := hostcpu.CurrentThreadIdentity()
+		// Measure the processor and the clock on this thread, not on the
+		// coordinator. A host that slowed only this virtual processor, or a
+		// clock that is only expensive here, would otherwise hide.
+		coreSpeedOnWriter = coreSpeed()
+		clockCostOnWriter = clockCost()
 		template := make([]byte, payload)
 		for i := range template {
 			template[i] = 0xA5
@@ -718,7 +782,6 @@ func run(dir, fstype string, payload int, warmup, seconds float64, readerCPU, wr
 		return result{}, runErr.Load().(error)
 	}
 	phase.Store(phaseMeasure)
-	speed := coreSpeed()
 	health0 := readHealth()
 	var gc0, gc1 runtime.MemStats
 	runtime.ReadMemStats(&gc0)
@@ -763,7 +826,9 @@ func run(dir, fstype string, payload int, warmup, seconds float64, readerCPU, wr
 		ReaderGBS:        float64(rRec) / elapsed * float64(payload) / 1e9,
 		FileBytes:        file.WritePos(),
 		WriterSamples:    len(writerLat.values),
-		CoreSpeedMIterS:  speed,
+		CoreSpeedMIterS:  coreSpeedOnWriter,
+		ClockCostNS:      clockCostOnWriter,
+		ClockSource:      clockSource(),
 		GapP50NS:         gp50,
 		GapP90NS:         gp90,
 		GapP95NS:         gp95,
@@ -819,7 +884,8 @@ func printResult(row result) {
 	// and cgroup throttling is time the kernel deliberately withheld one.
 	// Neither shows up as steal, so a run can be held back with steal at
 	// exactly zero.
-	fmt.Printf("  core_speed=%.1f Miter/s\n", row.CoreSpeedMIterS)
+	fmt.Printf("  core_speed=%.1f Miter/s clock_cost=%.1f ns clocksource=%s\n",
+		row.CoreSpeedMIterS, row.ClockCostNS, row.ClockSource)
 	fmt.Printf("  writer_gap  p50=%.0f p90=%.0f p95=%.0f p99=%.0f p99.99=%.0f max=%.0f\n",
 		row.GapP50NS, row.GapP90NS, row.GapP95NS, row.GapP99NS, row.GapP9999NS, row.GapMaxNS)
 	fmt.Printf("  gc=%d gc_pause_us=%d mallocs=%d\n", row.NumGC, row.GCPauseUS, row.Mallocs)
