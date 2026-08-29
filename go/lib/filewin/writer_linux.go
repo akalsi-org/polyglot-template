@@ -282,6 +282,9 @@ func (w *Writer) onComplete(tag uint64, res int32) {
 // so the writer does not fault on first touch. A missed populate costs a
 // fault, never correctness, so it is staged and never waited on.
 func (w *Writer) populateAhead() {
+	if w.file.noPopulate {
+		return
+	}
 	target := alignDown(w.pos+w.file.ahead, w.file.page)
 	if target > w.committed {
 		target = alignDown(w.committed, w.file.page)
