@@ -15,12 +15,19 @@ import (
 const (
 	// ringEntries sizes the submission queue. It only has to hold the few
 	// operations one housekeeping round stages.
-	ringEntries = 64
+	ringEntries = 256
 	// growTag identifies a staged file growth in a ring completion.
 	growTag = 1
 	// populateCatchUp is how many rounds' worth of page-table work one round
 	// may stage. One round's worth keeps pace; the rest closes a gap.
 	populateCatchUp = 2
+	// commitSpins is how long a producer waits for the helper to lengthen
+	// the file before growing it itself.
+	commitSpins = 4096
+	// helperIdleNs is how long the helper sleeps with nothing to do. The
+	// runway is an extent, so this only has to be far below the time the
+	// producer takes to cross one.
+	helperIdleNs = 50 * time.Microsecond
 )
 
 // Writer appends into the mapped log.
@@ -32,18 +39,24 @@ const (
 // and no futex handshakes: the writer tees the work up and reaps completions
 // at its own chunk boundaries.
 type Writer struct {
-	file *File
-	pos  uint64
-	ring *uring.Ring
-
-	committed uint64
-	populated uint64
-	dropped   uint64
-	synced    uint64
-	evicted   uint64
-	nextWork  uint64
-	growing   uint64
+	// Producer state. Only the calling goroutine touches these.
+	file      *File
+	pos       uint64
+	committed uint64 // cached file length; the shared one is authoritative
 	closed    bool
+
+	// Helper state. Only runHelper touches these, including the ring.
+	ring       *uring.Ring
+	helperPos  uint64
+	helperLen  uint64
+	populated  uint64
+	dropped    uint64
+	synced     uint64
+	evicted    uint64
+	nextWork   uint64
+	growing    uint64
+	stop       atomic.Bool
+	helperDone chan struct{}
 
 	Waits      atomic.Uint64
 	WaitNs     atomic.Uint64
@@ -72,6 +85,8 @@ func (f *File) AttachWriter() (*Writer, error) {
 	w := &Writer{file: f}
 	w.pos = atmc.LoadAcquireU64(f.writePos())
 	w.committed = atmc.LoadAcquireU64(f.committed())
+	w.helperLen = w.committed
+	w.helperPos = w.pos
 	w.populated = w.pos
 	w.dropped = 0
 	w.synced = w.pos
@@ -81,14 +96,14 @@ func (f *File) AttachWriter() (*Writer, error) {
 	// operations run synchronously, which is correct but costs the writer
 	// the tens of microseconds each call takes.
 	if r, err := uring.New(ringEntries); err == nil {
-		r.OnComplete = w.onComplete
-		// The producer stages this work so it does not have to do it.
-		// Without this the kernel runs it inline during submission and the
-		// producer pays for it anyway, in one lump instead of many.
 		r.Async = true
 		w.ring = r
 	}
 	f.addLocalWriter()
+	if w.ring != nil {
+		w.helperDone = make(chan struct{})
+		go w.runSubmitter()
+	}
 	return w, nil
 }
 
@@ -103,10 +118,7 @@ func (w *Writer) Reserve(n uint64) ([]byte, error) {
 	if w.pos+n > w.file.reserve {
 		return nil, ErrFull
 	}
-	if w.pos+n > w.committed {
-		// The file is short. This is the one piece of housekeeping the
-		// writer cannot outrun, so it waits here. Growing an extent at a
-		// time keeps it rare.
+	if w.pos+n+w.file.extent > w.committed {
 		if err := w.growTo(w.pos + n); err != nil {
 			return nil, err
 		}
@@ -120,6 +132,9 @@ func (w *Writer) Commit(n uint64) error {
 		return ErrClosed
 	}
 	next := w.pos + n
+	// The only thing a commit publishes. The housekeeping helper reads this
+	// and decides what to stage; the producer never stages anything itself,
+	// so a commit costs one release store however much work is due.
 	atmc.StoreReleaseU64(w.file.writePos(), next)
 	w.pos = next
 	if next >= w.nextWork {
@@ -162,7 +177,9 @@ func (w *Writer) growTo(need uint64) error {
 	if err := w.allocate(w.committed, want-w.committed); err != nil {
 		return err
 	}
-	w.publishCommitted(want)
+	w.committed = want
+	atmc.StoreReleaseU64(w.file.committed(), want)
+	w.Grows.Add(1)
 	w.GrowNs.Add(uint64(time.Since(t0).Nanoseconds()))
 	w.Waits.Add(1)
 	w.WaitNs.Add(uint64(time.Since(t0).Nanoseconds()))
@@ -192,21 +209,50 @@ func (w *Writer) allocate(off, length uint64) error {
 	return err
 }
 
-// work stages one round of housekeeping. It never waits for the kernel.
+// runSubmitter makes the system call the producer must not.
+//
+// Everything else lives on the producer: it decides what is due and stages it
+// straight into the submission ring, which costs a handful of memory writes.
+// Only io_uring_enter is expensive, and on the measured kernel it costs what
+// the staged work costs, because the kernel runs advisory memory work during
+// the submitting call rather than on a worker. Timing the parts of one round
+// gave 0.3us to reap, 0.2 to stage a populate, 0.1 each to stage a drop and a
+// writeback, and 572us to submit.
+//
+// So the producer stages and this submits. The two never write the same word:
+// staging owns the submission ring and its tail, this owns the completion
+// ring's head and the call.
+func (w *Writer) runSubmitter() {
+	defer close(w.helperDone)
+	for !w.stop.Load() && !w.file.closed {
+		if w.ring.Pending() != 0 {
+			if err := w.ring.Submit(); err != nil {
+				w.SyncErrors.Add(1)
+			}
+		}
+		w.ring.Reap()
+		// Sleep only with nothing to submit and nothing outstanding. Sleeping
+		// while work is pending lets the producer fill the submission ring,
+		// and a full ring drops the very work that keeps it ahead.
+		if w.ring.Pending() == 0 && w.ring.Inflight() == 0 {
+			time.Sleep(helperIdleNs)
+			continue
+		}
+		atmc.Relax()
+	}
+	_ = w.ring.Submit()
+	w.ring.Reap()
+}
+
+// work stages one round of housekeeping and reports whether it found any.
+// It never waits for the kernel.
 func (w *Writer) work() {
 	t0 := time.Now()
 	defer func() { w.WorkNs.Add(uint64(time.Since(t0).Nanoseconds())) }()
 	w.nextWork = w.pos + w.file.workBytes
 	w.Works.Add(1)
-	if w.ring != nil {
-		rs := time.Now()
-		w.Reaped.Add(uint64(w.ring.Reap()))
-		w.ReapNs.Add(uint64(time.Since(rs).Nanoseconds()))
-	}
+	w.helperPos = w.pos
 	s := time.Now()
-	w.growAhead()
-	w.GrowStageNs.Add(uint64(time.Since(s).Nanoseconds()))
-	s = time.Now()
 	w.populateAhead()
 	w.PopStageNs.Add(uint64(time.Since(s).Nanoseconds()))
 	s = time.Now()
@@ -217,90 +263,8 @@ func (w *Writer) work() {
 	w.evictBehind()
 	w.SyncStageNs.Add(uint64(time.Since(s).Nanoseconds()))
 	if w.ring != nil {
-		s = time.Now()
-		err := w.ring.Submit()
-		w.SubmitNs.Add(uint64(time.Since(s).Nanoseconds()))
-		if err != nil {
-			w.SyncErrors.Add(1)
-		}
 		w.Dropped.Store(w.ring.Dropped)
 	}
-}
-
-// growAhead keeps the file ahead of the cursor so Reserve rarely waits.
-func (w *Writer) growAhead() {
-	// Keep a whole extent allocated in front of the cursor, not merely the
-	// populate window. The staged allocation only hides its cost if it
-	// finishes before the writer arrives, and fallocate is not always quick:
-	// on a busy filesystem it waits behind writeback and journal commits,
-	// where it has been measured at hundreds of microseconds against a
-	// populate window worth a few milliseconds of runway. An extent of
-	// runway is an order of magnitude more, and costs nothing extra, since
-	// the file grows in extents either way.
-	runway := w.file.extent
-	if least := w.file.ahead + w.file.maxReserve; least > runway {
-		runway = least
-	}
-	want := w.pos + runway
-	if want <= w.committed {
-		return
-	}
-	if want > w.file.reserve {
-		want = w.file.reserve
-	}
-	want = alignUp(want, w.file.extent)
-	if want > w.file.reserve {
-		want = w.file.reserve
-	}
-	if want <= w.committed {
-		return
-	}
-	if w.ring == nil {
-		if err := w.allocate(w.committed, want-w.committed); err == nil {
-			w.publishCommitted(want)
-		}
-		return
-	}
-	if w.growing != 0 {
-		// One staged grow at a time. Until it completes the file is still
-		// short, and Reserve must keep believing that.
-		return
-	}
-	if !w.ring.Fallocate(w.file.fd, 0, int64(w.committed), int64(want-w.committed)) {
-		return
-	}
-	w.ring.Tag(growTag)
-	// Do NOT publish the new length here. A staged operation has not
-	// happened yet, and it can still fail, most obviously with ENOSPC. A
-	// writer that believed the file had grown would store past the end of
-	// it and take SIGBUS. The completion handler publishes instead.
-	w.growing = want
-}
-
-// publishCommitted records a file length whose blocks now exist.
-func (w *Writer) publishCommitted(length uint64) {
-	if length <= w.committed {
-		return
-	}
-	w.committed = length
-	atmc.StoreReleaseU64(w.file.committed(), length)
-	w.Grows.Add(1)
-}
-
-// onComplete runs for every completion this writer's ring reaps.
-func (w *Writer) onComplete(tag uint64, res int32) {
-	if tag != growTag {
-		return
-	}
-	want := w.growing
-	w.growing = 0
-	if res < 0 {
-		// The allocation failed. Leave the file length alone. Reserve then
-		// retries synchronously and surfaces the error to the caller.
-		w.GrowErrors.Add(1)
-		return
-	}
-	w.publishCommitted(want)
 }
 
 // populateAhead establishes writable page-table entries ahead of the cursor,
@@ -310,9 +274,10 @@ func (w *Writer) populateAhead() {
 	if w.file.noPopulate {
 		return
 	}
-	target := alignDown(w.pos+w.file.ahead, w.file.page)
-	if target > w.committed {
-		target = alignDown(w.committed, w.file.page)
+	pos := w.helperPos
+	target := alignDown(pos+w.file.ahead, w.file.page)
+	if target > w.helperLen {
+		target = alignDown(w.helperLen, w.file.page)
 	}
 	if target <= w.populated || target-w.populated < w.file.populateChunk {
 		return
@@ -380,7 +345,7 @@ func (w *Writer) syncBehind() {
 	if w.file.disableWriteback {
 		return
 	}
-	target := alignDown(w.pos, w.file.page)
+	target := alignDown(w.helperPos, w.file.page)
 	if target <= w.synced || target-w.synced < w.file.syncBytes {
 		return
 	}
@@ -448,6 +413,10 @@ func (w *Writer) evictBehind() {
 func (w *Writer) Close() error {
 	if w == nil || w.closed {
 		return nil
+	}
+	w.stop.Store(true)
+	if w.helperDone != nil {
+		<-w.helperDone
 	}
 	w.closed = true
 	var err error

@@ -252,13 +252,22 @@ func (r *Ring) mapRings(p *params) error {
 func (r *Ring) Entries() uint32 { return r.entries }
 
 // Free reports how many submission slots are open.
+// Only the goroutine that stages may call it: it reads that goroutine's own
+// view of the tail.
 func (r *Ring) Free() uint32 {
 	return r.entries - (r.sqLocal - atmc.LoadAcquireU32(r.sqHead))
 }
 
 // Inflight reports operations the kernel still owes a completion.
+// It reads only shared ring words, so either goroutine may call it.
 func (r *Ring) Inflight() uint32 {
-	return r.sqLocal - atmc.LoadAcquireU32(r.cqHead)
+	return atmc.LoadAcquireU32(r.sqTail) - atmc.LoadAcquireU32(r.cqHead)
+}
+
+// Pending reports entries staged but not yet handed to the kernel.
+// It reads only shared ring words, so either goroutine may call it.
+func (r *Ring) Pending() uint32 {
+	return atmc.LoadAcquireU32(r.sqTail) - atmc.LoadAcquireU32(r.sqHead)
 }
 
 // push stages one entry. It reports false when the ring is full.
@@ -290,6 +299,11 @@ func (r *Ring) push(op uint8, fd int32, addr uint64, length uint32, off uint64, 
 	r.sqArray[idx] = idx
 	r.sqLocal++
 	r.staged++
+	// Publish the entry as it is staged, not at submission. That lets the
+	// thread that stages be a different one from the thread that submits:
+	// staging is a handful of memory writes and submission is a system call,
+	// and on the measured kernel the call costs what the work costs.
+	atmc.StoreReleaseU32(r.sqTail, r.sqLocal)
 	return true
 }
 
@@ -328,17 +342,25 @@ func (r *Ring) Link() {
 	r.sqes[(r.sqLocal-1)&r.sqMask].flags |= flagIOLink
 }
 
-// Submit hands staged operations to the kernel and does not wait for them.
+// Submit stages nothing and hands whatever is staged to the kernel.
+//
+// It may be called from a different goroutine than the one that stages, and
+// that is the point. Staging writes to the submission ring; this makes the
+// system call. Only this call is expensive, so a caller that must not block
+// stages on its own thread and leaves this to another.
+//
+// The caller that stages owns the submission ring and its tail. This call
+// owns nothing but the syscall, so the two never write the same word.
 func (r *Ring) Submit() error {
 	if r.closed {
 		return ErrClosed
 	}
-	if r.staged == 0 {
+	head := atmc.LoadAcquireU32(r.sqHead)
+	tail := atmc.LoadAcquireU32(r.sqTail)
+	n := tail - head
+	if n == 0 {
 		return nil
 	}
-	atmc.StoreReleaseU32(r.sqTail, r.sqLocal)
-	n := r.staged
-	r.staged = 0
 	_, _, errno := syscall.Syscall6(sysEnter, uintptr(r.fd), uintptr(n), 0, 0, 0, 0)
 	if errno != 0 {
 		r.Failures++
