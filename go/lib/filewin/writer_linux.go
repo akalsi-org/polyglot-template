@@ -18,9 +18,12 @@ const (
 	// It has to hold everything a round stages with room to spare, because a
 	// full ring drops the staged work silently, and what goes first is
 	// whatever was staged last: the drop and the writeback rather than the
-	// populate. A ring costs about 1.3 MiB of kernel memory, which is worth
-	// noting for a process holding many readers.
-	ringEntries = 16384
+	// populate. With populating off a round stages about five operations, so
+	// this is three orders of magnitude of headroom.
+	//
+	// It is not larger because a ring is kernel memory, roughly 400 KiB
+	// here, and a process may hold one per reader.
+	ringEntries = 4096
 	// growTag identifies a staged file growth in a ring completion.
 	growTag = 1
 	// populateCatchUp is how many rounds' worth of page-table work one round
@@ -352,12 +355,15 @@ func (w *Writer) work() {
 	defer func() { w.WorkNs.Add(uint64(time.Since(t0).Nanoseconds())) }()
 	w.nextWork = w.pos + w.file.workBytes
 	w.Works.Add(1)
+	// Release before establishing. Both are staged into one submission and
+	// the kernel runs them in that order, so the pages behind the retention
+	// window are free to back the ones being populated ahead of the writer.
 	s := time.Now()
-	w.populateAhead()
-	w.PopStageNs.Add(uint64(time.Since(s).Nanoseconds()))
-	s = time.Now()
 	w.dropBehind()
 	w.DropStageNs.Add(uint64(time.Since(s).Nanoseconds()))
+	s = time.Now()
+	w.populateAhead()
+	w.PopStageNs.Add(uint64(time.Since(s).Nanoseconds()))
 	s = time.Now()
 	w.syncBehind()
 	w.evictBehind()

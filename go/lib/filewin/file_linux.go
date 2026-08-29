@@ -121,6 +121,13 @@ type Config struct {
 	// 1 MiB, so past 64 KiB the work is all per-page and a smaller chunk
 	// buys smoothness for almost nothing.
 	PopulateChunkBytes uint64
+	// DisableReaderPopulate stops a reader establishing page-table entries
+	// ahead of itself. See Reader.housekeep for why a reader wants this and
+	// a writer does not.
+	DisableReaderPopulate bool
+	// ReaderAheadBytes is how far ahead of itself a reader establishes those
+	// entries. Zero selects a default.
+	ReaderAheadBytes uint64
 	// PopulateAhead establishes page-table entries in front of the writer
 	// instead of letting it fault them in as it arrives.
 	//
@@ -204,6 +211,8 @@ type File struct {
 	growAhead        uint64
 	noReaderDrop     bool
 	populateAhead    bool
+	noReaderPopulate bool
+	readerAhead      uint64
 	populateChunk    uint64
 	dropChunk        uint64
 	readerDropChunk  uint64
@@ -256,6 +265,10 @@ func (c Config) normalize() (Config, error) {
 	if c.DropChunkBytes == 0 {
 		c.DropChunkBytes = 1 << 20
 	}
+	if c.ReaderAheadBytes == 0 {
+		c.ReaderAheadBytes = 2 << 20
+	}
+	c.ReaderAheadBytes = alignUp(c.ReaderAheadBytes, page)
 	if c.ReaderDropChunkBytes == 0 {
 		c.ReaderDropChunkBytes = 512 << 10
 	}
@@ -354,6 +367,7 @@ func Create(cfg Config) (*File, error) {
 		readerDropChunk: cfg.ReaderDropChunkBytes,
 		evictChunk:      cfg.EvictChunkBytes, retain: cfg.RetainBytes, workBytes: cfg.WorkBytes, growAhead: cfg.GrowAheadBytes,
 		noReaderDrop: cfg.DisableReaderDrop, populateAhead: cfg.PopulateAhead,
+		noReaderPopulate: cfg.DisableReaderPopulate, readerAhead: cfg.ReaderAheadBytes,
 		page: pageSize(),
 	}, nil
 }
@@ -421,6 +435,7 @@ func Open(path string, cfg Config) (*File, error) {
 		readerDropChunk: cfg.ReaderDropChunkBytes,
 		evictChunk:      cfg.EvictChunkBytes, retain: cfg.RetainBytes, workBytes: cfg.WorkBytes, growAhead: cfg.GrowAheadBytes,
 		noReaderDrop: cfg.DisableReaderDrop, populateAhead: cfg.PopulateAhead,
+		noReaderPopulate: cfg.DisableReaderPopulate, readerAhead: cfg.ReaderAheadBytes,
 		page: pageSize(),
 	}, nil
 }

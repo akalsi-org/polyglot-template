@@ -29,13 +29,15 @@ type Reader struct {
 	// The reader drains to it before it loads the shared cursor again.
 	limit uint64
 
-	ring    *uring.Ring
-	dropped uint64
-	closed  bool
+	ring      *uring.Ring
+	dropped   uint64
+	populated uint64
+	closed    bool
 
-	Empty    atomic.Uint64
-	Dontneed atomic.Uint64
-	Reaped   atomic.Uint64
+	Empty     atomic.Uint64
+	Dontneed  atomic.Uint64
+	Populates atomic.Uint64
+	Reaped    atomic.Uint64
 }
 
 // AttachReader returns a reader positioned at the start of the log.
@@ -46,6 +48,7 @@ func (f *File) AttachReader() (*Reader, error) {
 	}
 	r := &Reader{file: f}
 	r.dropped = 0
+	r.populated = 0
 	// A ring is an optimisation. Without one the reader releases its own
 	// history synchronously, which is correct but costs it the tens of
 	// microseconds each madvise takes.
@@ -120,9 +123,75 @@ func (r *Reader) Advance(n uint64) error {
 	}
 	r.pos += n
 	if r.pos-r.dropped >= r.file.readerDropChunk {
-		r.dropBehind()
+		r.housekeep()
 	}
 	return nil
+}
+
+// housekeep establishes page-table entries ahead of this reader and releases
+// them behind it, in one submission.
+//
+// A reader in the writer's own process rarely faults, because the writer has
+// already installed the entries it is about to read. A reader in another
+// process has its own page tables and faults on every page. Establishing them
+// ahead replaces those faults with one call over many pages.
+//
+// It asks for read entries, not write ones. The page is already in the page
+// cache, put there by the writer, so this only has to map it: there is no
+// allocation and no zeroing, which is what makes it much cheaper than the
+// write-side populate and safe to do in a batch.
+func (r *Reader) housekeep() {
+	if r.ring != nil {
+		r.Reaped.Add(uint64(r.ring.Reap()))
+	}
+	// Release before establishing, not after. Both go into one submission
+	// and the kernel runs them in that order, so the pages this reader has
+	// finished with are free to back the ones it is about to need. The other
+	// order peaks at holding both sets at once.
+	r.dropBehind()
+	r.populateAhead()
+	if r.ring != nil {
+		_ = r.ring.Submit()
+	}
+}
+
+func (r *Reader) populateAhead() {
+	if r.file.noReaderPopulate {
+		return
+	}
+	chunk := r.file.readerDropChunk
+	target := alignDown(r.pos+r.file.readerAhead, r.file.page)
+	// Never past what the writer has published: the pages beyond it may not
+	// be in the file yet, and touching those is fatal rather than slow.
+	//
+	// Read the cursor rather than the reader's snapshot of it. Advance calls
+	// this having just consumed up to that snapshot, so the snapshot equals
+	// the cursor and clamping to it would leave nothing ahead to establish.
+	limit := alignDown(atmc.LoadAcquireU64(r.file.writePos()), r.file.page)
+	if target > limit {
+		target = limit
+	}
+	if r.populated < r.pos {
+		r.populated = alignDown(r.pos, r.file.page)
+	}
+	if target <= r.populated || target-r.populated < chunk {
+		return
+	}
+	start := r.populated
+	for start < target {
+		end := start + chunk
+		if end > target {
+			end = target
+		}
+		if r.ring == nil {
+			madvise(r.file.data[start:end], madvPopulateRead)
+		} else if !r.ring.Madvise(r.file.data[start:end], madvPopulateRead) {
+			break
+		}
+		r.Populates.Add(1)
+		start = end
+	}
+	r.populated = start
 }
 
 // dropBehind releases page-table entries behind this reader's cursor, so a
@@ -140,9 +209,6 @@ func (r *Reader) dropBehind() {
 	if target <= r.dropped {
 		return
 	}
-	if r.ring != nil {
-		r.Reaped.Add(uint64(r.ring.Reap()))
-	}
 	start := r.dropped
 	for start < target {
 		end := start + chunk
@@ -158,9 +224,6 @@ func (r *Reader) dropBehind() {
 		start = end
 	}
 	r.dropped = start
-	if r.ring != nil {
-		_ = r.ring.Submit()
-	}
 }
 
 // Close releases the reader. The mapping belongs to the File.
