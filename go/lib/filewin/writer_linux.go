@@ -57,6 +57,11 @@ type Writer struct {
 	Dropped    atomic.Uint64
 	SyncErrors atomic.Uint64
 	GrowErrors atomic.Uint64
+	// WorkNs is time the producer itself spent staging housekeeping.
+	WorkNs                                                      atomic.Uint64
+	Works                                                       atomic.Uint64
+	GrowStageNs, PopStageNs, DropStageNs, SyncStageNs, SubmitNs atomic.Uint64
+	ReapNs                                                      atomic.Uint64
 }
 
 // AttachWriter binds a writer to the file.
@@ -77,6 +82,10 @@ func (f *File) AttachWriter() (*Writer, error) {
 	// the tens of microseconds each call takes.
 	if r, err := uring.New(ringEntries); err == nil {
 		r.OnComplete = w.onComplete
+		// The producer stages this work so it does not have to do it.
+		// Without this the kernel runs it inline during submission and the
+		// producer pays for it anyway, in one lump instead of many.
+		r.Async = true
 		w.ring = r
 	}
 	f.addLocalWriter()
@@ -185,17 +194,33 @@ func (w *Writer) allocate(off, length uint64) error {
 
 // work stages one round of housekeeping. It never waits for the kernel.
 func (w *Writer) work() {
+	t0 := time.Now()
+	defer func() { w.WorkNs.Add(uint64(time.Since(t0).Nanoseconds())) }()
 	w.nextWork = w.pos + w.file.workBytes
+	w.Works.Add(1)
 	if w.ring != nil {
+		rs := time.Now()
 		w.Reaped.Add(uint64(w.ring.Reap()))
+		w.ReapNs.Add(uint64(time.Since(rs).Nanoseconds()))
 	}
+	s := time.Now()
 	w.growAhead()
+	w.GrowStageNs.Add(uint64(time.Since(s).Nanoseconds()))
+	s = time.Now()
 	w.populateAhead()
+	w.PopStageNs.Add(uint64(time.Since(s).Nanoseconds()))
+	s = time.Now()
 	w.dropBehind()
+	w.DropStageNs.Add(uint64(time.Since(s).Nanoseconds()))
+	s = time.Now()
 	w.syncBehind()
 	w.evictBehind()
+	w.SyncStageNs.Add(uint64(time.Since(s).Nanoseconds()))
 	if w.ring != nil {
-		if err := w.ring.Submit(); err != nil {
+		s = time.Now()
+		err := w.ring.Submit()
+		w.SubmitNs.Add(uint64(time.Since(s).Nanoseconds()))
+		if err != nil {
 			w.SyncErrors.Add(1)
 		}
 		w.Dropped.Store(w.ring.Dropped)

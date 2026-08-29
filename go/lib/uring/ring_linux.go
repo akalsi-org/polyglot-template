@@ -38,6 +38,16 @@ const (
 	// drop it" without ever blocking to sequence the two itself.
 	flagIOLink = 1 << 2
 
+	// flagAsync forces an operation to a kernel worker instead of letting
+	// the kernel attempt it inline during submission.
+	//
+	// io_uring runs what it can inline, and for advisory memory work that
+	// means the whole madvise happens inside io_uring_enter on the calling
+	// thread. Submission then costs what the work costs, and the ring has
+	// amortised nothing: it has batched several synchronous calls into one
+	// syscall. This flag is what makes the work actually asynchronous.
+	flagAsync = 1 << 4
+
 	registerProbe = 8
 	probeOps      = 256
 	opSupported   = 1 << 0
@@ -129,6 +139,10 @@ type Ring struct {
 	// Failures counts completions the kernel reported as errors, plus
 	// submission calls that failed.
 	Failures uint64
+
+	// Async forces staged operations onto kernel workers rather than letting
+	// the kernel run them inline during submission. See flagAsync.
+	Async bool
 
 	// OnComplete, when set, receives every completion during Reap.
 	// A caller that must know an operation actually happened, rather than
@@ -270,6 +284,9 @@ func (r *Ring) push(op uint8, fd int32, addr uint64, length uint32, off uint64, 
 	e.length = length
 	e.off = off
 	e.opFlags = opFlags
+	if r.Async {
+		e.flags |= flagAsync
+	}
 	r.sqArray[idx] = idx
 	r.sqLocal++
 	r.staged++

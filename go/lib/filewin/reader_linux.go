@@ -50,6 +50,7 @@ func (f *File) AttachReader() (*Reader, error) {
 	// history synchronously, which is correct but costs it the tens of
 	// microseconds each madvise takes.
 	if ring, err := uring.New(ringEntries); err == nil {
+		ring.Async = true
 		r.ring = ring
 	}
 	return r, nil
