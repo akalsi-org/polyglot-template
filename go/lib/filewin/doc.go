@@ -5,8 +5,9 @@
 // section. WriterWindow is larger than the reader window so growth and remap
 // happen less often on the write path.
 //
-// A writer helper goroutine extends the file in linear extents and prefaults
-// pages ahead of write_pos. It is not pinned.
+// Commit publishes with one release store of the write cursor. A reader
+// observes that store with Peek. The writer does not wake anyone, and a
+// reader does not wait in the kernel.
 //
 // Each process maps its own window. A remap is local. Other processes map the
 // same file offset themselves.

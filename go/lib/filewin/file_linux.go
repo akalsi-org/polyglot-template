@@ -40,7 +40,8 @@ const (
 
 	// Line 1 belongs to the writer.
 	offWritePos = 1*cacheLine + 0
-	offWriteGen = 1*cacheLine + 8
+	// offReserved1 held a wake generation in earlier versions.
+	offReserved1 = 1*cacheLine + 8
 
 	// Line 2 is reserved. Earlier versions published a reader cursor here.
 	// Readers are anonymous now, so nothing writes this line.
@@ -51,10 +52,8 @@ const (
 	offSyncedPos  = 3*cacheLine + 8
 	offEvictedPos = 3*cacheLine + 16
 
-	futexWaitOp = 0
-	futexWakeOp = 1
-	madvWill    = 3
-	madvDont    = 4
+	madvWill = 3
+	madvDont = 4
 	// madvPopulateWrite establishes writable page-table entries now.
 	// It removes the first-touch minor fault from the writer.
 	madvPopulateWrite = 23
@@ -127,11 +126,6 @@ type Config struct {
 	// and eviction work has become due. One round costs one submission, so
 	// this trades submission rate against how promptly the work is staged.
 	WorkBytes uint64
-	// WakeBytes is how often the writer bumps the counter that sleeping
-	// readers wait on. It trades writer cost against wake-up delay: a
-	// sleeping reader waits at most this many bytes, and the writer pays one
-	// wake syscall per step, which grows with the number of sleepers.
-	WakeBytes uint64
 	// RetainBytes is how much history the writer keeps resident behind the
 	// write cursor. It sets the writer's resident set size, and it is the
 	// only reader budget: readers are anonymous, so nothing else can hold
@@ -163,7 +157,6 @@ type File struct {
 	keepCached       uint64
 	disableEvict     bool
 	retain           uint64
-	wakeBytes        uint64
 	workBytes        uint64
 	noReaderDrop     bool
 	populateChunk    uint64
@@ -219,10 +212,6 @@ func (c Config) normalize() (Config, error) {
 		c.WorkBytes = 1 << 20
 	}
 	c.WorkBytes = alignUp(c.WorkBytes, page)
-	if c.WakeBytes == 0 {
-		c.WakeBytes = 64 << 10
-	}
-	c.WakeBytes = alignUp(c.WakeBytes, page)
 	if c.RetainBytes == 0 {
 		c.RetainBytes = 1 << 20
 	}
@@ -305,7 +294,7 @@ func Create(cfg Config) (*File, error) {
 		keepCached: cfg.KeepCachedBytes, disableEvict: cfg.DisableEvict,
 		populateChunk: cfg.PopulateChunkBytes, dropChunk: cfg.DropChunkBytes,
 		readerDropChunk: cfg.ReaderDropChunkBytes,
-		evictChunk:      cfg.EvictChunkBytes, retain: cfg.RetainBytes, wakeBytes: cfg.WakeBytes, workBytes: cfg.WorkBytes,
+		evictChunk:      cfg.EvictChunkBytes, retain: cfg.RetainBytes, workBytes: cfg.WorkBytes,
 		noReaderDrop: cfg.DisableReaderDrop,
 		page:         pageSize(),
 	}, nil
@@ -372,7 +361,7 @@ func Open(path string, cfg Config) (*File, error) {
 		keepCached: cfg.KeepCachedBytes, disableEvict: cfg.DisableEvict,
 		populateChunk: cfg.PopulateChunkBytes, dropChunk: cfg.DropChunkBytes,
 		readerDropChunk: cfg.ReaderDropChunkBytes,
-		evictChunk:      cfg.EvictChunkBytes, retain: cfg.RetainBytes, wakeBytes: cfg.WakeBytes, workBytes: cfg.WorkBytes,
+		evictChunk:      cfg.EvictChunkBytes, retain: cfg.RetainBytes, workBytes: cfg.WorkBytes,
 		noReaderDrop: cfg.DisableReaderDrop,
 		page:         pageSize(),
 	}, nil
@@ -407,7 +396,6 @@ func (f *File) Extent() uint64 {
 }
 
 func (f *File) writePos() *uint64 { return (*uint64)(unsafe.Pointer(&f.header[offWritePos])) }
-func (f *File) writeGen() *uint32 { return (*uint32)(unsafe.Pointer(&f.header[offWriteGen])) }
 
 func (f *File) committed() *uint64 {
 	return (*uint64)(unsafe.Pointer(&f.header[offCommitted]))
@@ -524,23 +512,6 @@ func fallocate(fd int, off, len int64) error {
 		return errno
 	}
 	return nil
-}
-
-func futexWait(ptr *uint32, val uint32) {
-	ts := syscall.Timespec{Nsec: 10_000_000}
-	_, _, _ = syscall.Syscall6(
-		sysFutex,
-		uintptr(unsafe.Pointer(ptr)),
-		futexWaitOp,
-		uintptr(val),
-		uintptr(unsafe.Pointer(&ts)),
-		0,
-		0,
-	)
-}
-
-func futexWake(ptr *uint32) {
-	_, _, _ = syscall.Syscall6(sysFutex, uintptr(unsafe.Pointer(ptr)), futexWakeOp, ^uintptr(0)>>1, 0, 0, 0)
 }
 
 func madvise(b []byte, advice int) {

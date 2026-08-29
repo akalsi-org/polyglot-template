@@ -13,8 +13,6 @@ import (
 )
 
 const (
-	// readerSpins is how long Reader.Wait polls before it sleeps.
-	readerSpins = 512
 	// ringEntries sizes the submission queue. It only has to hold the few
 	// operations one housekeeping round stages.
 	ringEntries = 64
@@ -42,7 +40,6 @@ type Writer struct {
 	evicted   uint64
 	nextWork  uint64
 	growing   uint64
-	woke      uint32
 	closed    bool
 
 	Waits      atomic.Uint64
@@ -113,10 +110,6 @@ func (w *Writer) Commit(n uint64) error {
 	next := w.pos + n
 	atmc.StoreReleaseU64(w.file.writePos(), next)
 	w.pos = next
-	chunk := uint32(next / w.file.wakeBytes)
-	if atmc.LoadRelaxedU32(w.file.writeGen()) != chunk {
-		atmc.StoreReleaseU32(w.file.writeGen(), chunk)
-	}
 	if next >= w.nextWork {
 		w.work()
 	}
@@ -194,13 +187,6 @@ func (w *Writer) work() {
 	w.nextWork = w.pos + w.file.workBytes
 	if w.ring != nil {
 		w.Reaped.Add(uint64(w.ring.Reap()))
-	}
-	// Wake readers sleeping on the doorbell. This is the only futex the
-	// writer touches, and it belongs here rather than in Commit: on the
-	// record path a wake syscall cost more than three times the throughput.
-	if gen := atmc.LoadAcquireU32(w.file.writeGen()); gen != w.woke {
-		w.woke = gen
-		futexWake(w.file.writeGen())
 	}
 	w.growAhead()
 	w.populateAhead()

@@ -18,9 +18,10 @@ import (
 // further behind than that still reads correct bytes, because the bytes stay
 // in the file. It reads them from the device instead of from memory.
 //
-// Peek and Advance never map, unmap, or advise. One unpinned helper releases
-// page-table entries behind the cursor, so a reader that trails a very large
-// file still holds a small resident set.
+// Peek and Advance never map, unmap, or advise. A live reader polls the
+// write cursor. The writer does not wake it. Page-table entries behind the
+// cursor are released on the reader's own ring, so a reader that trails a
+// very large file still holds a small resident set.
 type Reader struct {
 	file *File
 	pos  uint64
@@ -109,38 +110,6 @@ func (r *Reader) Peek(max uint64) ([]byte, error) {
 		n = max
 	}
 	return r.file.data[r.pos : r.pos+n], nil
-}
-
-// Wait blocks until the writer has probably produced more bytes.
-//
-// It watches the writer's chunk counter, never the bytes it is waiting for. A
-// caught-up reader that polled the write frontier would take the cache line
-// the writer is filling away from it on every record. The chunk counter moves
-// once per WakeBytes instead.
-//
-// A reader publishes nothing to wait, because FUTEX_WAIT only reads the word
-// it waits on. A host can therefore carry far more readers than it has cores:
-// a reader with nothing to do costs no processor time, where a spinning
-// reader would take a core away from the writer.
-func (r *Reader) Wait() error {
-	if r == nil || r.file == nil || r.closed || r.file.closed {
-		return ErrClosed
-	}
-	gen := atmc.LoadAcquireU32(r.file.writeGen())
-	// Relax is the spin hint. It belongs here and not in the drain loop:
-	// this path runs only when a reader has nothing to do, and yielding the
-	// shared core is then exactly right.
-	for i := 0; i < readerSpins; i++ {
-		if atmc.LoadAcquireU32(r.file.writeGen()) != gen {
-			return nil
-		}
-		atmc.Relax()
-	}
-	if atmc.LoadAcquireU64(r.file.writePos()) != r.pos {
-		return nil
-	}
-	futexWait(r.file.writeGen(), gen)
-	return nil
 }
 
 // Advance moves this reader's cursor. It writes nothing shared.

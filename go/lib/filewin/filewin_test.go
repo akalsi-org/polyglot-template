@@ -4,6 +4,7 @@ package filewin
 
 import (
 	"bytes"
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -247,13 +248,12 @@ func TestCursorsSitOnSeparateCacheLines(t *testing.T) {
 	lines := map[int]string{}
 	for name, off := range map[string]int{
 		"writePos":   offWritePos,
-		"writeGen":   offWriteGen,
 		"committed":  offCommitted,
 		"syncedPos":  offSyncedPos,
 		"evictedPos": offEvictedPos,
 	} {
 		owner := map[string]string{
-			"writePos": "writer", "writeGen": "writer",
+			"writePos":  "writer",
 			"committed": "helper", "syncedPos": "helper", "evictedPos": "helper",
 		}[name]
 		line := off / cacheLine
@@ -412,9 +412,6 @@ func TestReaderStopsAtTheWriteCursor(t *testing.T) {
 	if span, err := reader.Peek(0); err != nil || len(span) != 0 {
 		t.Fatalf("read past the write cursor: %d bytes, %v", len(span), err)
 	}
-	if err := reader.Wait(); err != nil {
-		t.Fatal(err)
-	}
 }
 
 // The writer must never believe the file is longer than it is. Publishing a
@@ -461,5 +458,69 @@ func TestCommittedLengthNeverExceedsTheFile(t *testing.T) {
 	}
 	if got := writer.GrowErrors.Load(); got != 0 {
 		t.Fatalf("%d growth failures on a healthy filesystem", got)
+	}
+}
+
+// A live reader must see every record the writer publishes, in order, without
+// reading past the write cursor.
+func TestConcurrentWriterAndReader(t *testing.T) {
+	const (
+		records = 50_000
+		size    = 64
+	)
+	path := filepath.Join(t.TempDir(), "log")
+	file, err := Create(testConfig(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	writer, err := file.AttachWriter()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	reader, err := file.AttachReader()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+
+	errCh := make(chan error, 1)
+	go func() {
+		payload := make([]byte, size)
+		for i := 0; i < records; i++ {
+			binary.LittleEndian.PutUint64(payload, uint64(i))
+			if writeErr := writer.Write(payload); writeErr != nil {
+				errCh <- writeErr
+				return
+			}
+		}
+		errCh <- nil
+	}()
+
+	got := 0
+	deadline := time.Now().Add(30 * time.Second)
+	for got < records {
+		if time.Now().After(deadline) {
+			t.Fatalf("reader got %d of %d records", got, records)
+		}
+		span, peekErr := reader.Peek(uint64(size))
+		if peekErr != nil {
+			t.Fatal(peekErr)
+		}
+		if len(span) < size {
+			continue
+		}
+		seq := binary.LittleEndian.Uint64(span[:8])
+		if seq != uint64(got) {
+			t.Fatalf("seq %d, want %d", seq, got)
+		}
+		if advErr := reader.Advance(uint64(size)); advErr != nil {
+			t.Fatal(advErr)
+		}
+		got++
+	}
+	if writeErr := <-errCh; writeErr != nil {
+		t.Fatal(writeErr)
 	}
 }

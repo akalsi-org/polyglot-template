@@ -3,7 +3,6 @@
 package filewin
 
 const (
-	sysFutex         = 98
 	sysFallocate     = 47
 	sysFadvise64     = 223
 	sysSyncFileRange = 84

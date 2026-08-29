@@ -5,6 +5,8 @@ load("//rules:go.bzl", "go_graph_check", "go_lint")
 _GO_LANE_DEPS = [
   "//go/app/hello:hello",
   "//go/app/hello:main_test",
+  "//go/bench/filewin:bench_filewin",
+  "//go/bench/filewin:bench_filewin_test",
   "//go/bench/mpsc:bench_queue",
   "//go/bench/mpsc:bench_queue_test",
   "//go/bench/mpsc:run_campaign",
