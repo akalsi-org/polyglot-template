@@ -161,4 +161,18 @@ if grep -Fq 'command -v shellcheck' "$ROOT/repo.sh"; then
   printf 'repo.sh still gates shell linting on a host-provided ShellCheck\n' >&2; exit 1
 fi
 
+# scratch_file is always assigned as `var=$(scratch_file)`, a subshell. An
+# EXIT trap inside that function fires when the substitution ends and deletes
+# the file the caller just received. The trap must belong to the invoking
+# shell; the function body must only create the file.
+scratch_body=$(awk '/^scratch_file\(\)/,/^}/' "$ROOT/repo.sh")
+if grep -q 'trap' <<<"$scratch_body"; then
+  printf 'scratch_file must not set an EXIT trap: $(scratch_file) is a subshell\n' >&2
+  exit 1
+fi
+grep -Fq "trap 'rm -rf -- \"\$SCRATCH_DIR\"' EXIT" "$ROOT/repo.sh" || {
+  printf 'repo.sh must register the scratch EXIT trap in the invoking shell\n' >&2
+  exit 1
+}
+
 printf 'bootstrap smoke: ok\n'

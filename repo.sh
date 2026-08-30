@@ -32,13 +32,16 @@ caller_path() {
 # Repo scratch policy (mirrors tools/coverage_merge.py): never /tmp (small
 # tmpfs), always under buck-out. One directory per invocation, removed by an
 # EXIT trap so a `set -e` abort mid-function cannot leak it.
-SCRATCH_DIR=
+#
+# Create the directory and register the trap in THIS shell. Callers assign
+# with `var=$(scratch_file)`, which runs the function in a subshell. A trap
+# set inside that function would fire when the substitution ended and delete
+# the file the caller just received (`./repo.sh build` then failed with
+# "No such file or directory" on the uquery stderr redirect).
+mkdir -p "$ROOT/buck-out/v2/tmp"
+SCRATCH_DIR=$(mktemp -d "$ROOT/buck-out/v2/tmp/repo-sh.XXXXXX")
+trap 'rm -rf -- "$SCRATCH_DIR"' EXIT
 scratch_file() {
-  if [[ -z $SCRATCH_DIR ]]; then
-    mkdir -p "$ROOT/buck-out/v2/tmp"
-    SCRATCH_DIR=$(mktemp -d "$ROOT/buck-out/v2/tmp/repo-sh.XXXXXX")
-    trap 'rm -rf -- "$SCRATCH_DIR"' EXIT
-  fi
   mktemp "$SCRATCH_DIR/scratch.XXXXXX"
 }
 
